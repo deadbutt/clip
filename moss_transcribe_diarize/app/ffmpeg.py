@@ -5,7 +5,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+
+ProgressCallback = Callable[[float], None]
 
 
 @dataclass(slots=True)
@@ -87,6 +90,7 @@ def burn_ass_subtitles(
     output_path: str | Path,
     *,
     style: Any | None = None,
+    progress_callback: ProgressCallback | None = None,
     overwrite: bool = True,
 ) -> Path:
     tools = detect_ffmpeg()
@@ -98,6 +102,7 @@ def burn_ass_subtitles(
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     filter_args = _build_filter_args(ass_path, style=style)
+    duration = _media_duration(input_media)
     command = [
         tools.ffmpeg or "ffmpeg",
         "-y" if overwrite else "-n",
@@ -114,10 +119,76 @@ def burn_ass_subtitles(
         "copy",
         "-movflags",
         "+faststart",
+        "-progress",
+        "pipe:1",
+        "-nostats",
         str(output_path),
     ]
-    subprocess.run(command, cwd=str(ass_path.parent), check=True, capture_output=True, text=True)
+    _run_ffmpeg_with_progress(command, cwd=ass_path.parent, duration=duration, progress_callback=progress_callback)
     return output_path
+
+
+def _run_ffmpeg_with_progress(
+    command: list[str],
+    *,
+    cwd: Path,
+    duration: float | None,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    tail: list[str] = []
+    last_ratio = 0.0
+    assert process.stdout is not None
+    for line in process.stdout:
+        line = line.strip()
+        if line:
+            tail.append(line)
+            tail = tail[-40:]
+        if progress_callback is None or not duration:
+            continue
+        key, _, value = line.partition("=")
+        seconds = None
+        if key in {"out_time_us", "out_time_ms"}:
+            try:
+                seconds = float(value) / 1_000_000.0
+            except ValueError:
+                seconds = None
+        elif key == "out_time":
+            seconds = _parse_ffmpeg_time(value)
+        if seconds is not None:
+            last_ratio = max(last_ratio, max(0.0, min(1.0, seconds / duration)))
+            progress_callback(last_ratio)
+    return_code = process.wait()
+    if return_code != 0:
+        detail = "\n".join(tail[-12:])
+        raise RuntimeError(f"ffmpeg failed with exit code {return_code}: {detail}")
+    if progress_callback is not None:
+        progress_callback(1.0)
+
+
+def _media_duration(path: Path) -> float | None:
+    try:
+        media = probe_media(path)
+        duration = (media.get("format") or {}).get("duration")
+        return float(duration) if duration else None
+    except Exception:
+        return None
+
+
+def _parse_ffmpeg_time(value: str) -> float | None:
+    try:
+        hours, minutes, seconds = value.split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except Exception:
+        return None
 
 
 def _build_filter_args(ass_path: Path, *, style: Any | None = None) -> list[str]:

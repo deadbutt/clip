@@ -755,27 +755,76 @@ INDEX_HTML = """<!doctype html>
       min-width: 0;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: var(--panel);
+      background: #181b20;
       overflow: hidden;
+      color: #e9edf2;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .timeline-panel * {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-user-drag: none;
     }
     .timeline-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      height: 30px;
+      height: 32px;
       padding: 0 10px;
-      border-bottom: 1px solid var(--line);
-      color: var(--muted);
+      border-bottom: 1px solid #2b3038;
+      color: #b7c0cc;
       font-size: 12px;
       font-weight: 650;
+      background: #20242b;
+    }
+    .timeline-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .timeline-title::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--teal);
+      box-shadow: 0 0 0 3px rgba(0, 125, 119, 0.18);
+    }
+    .timeline-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .timeline-tool {
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 5px;
+      border: 1px solid #3a424e;
+      background: #2a3039;
+      color: #dce3ec;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .timeline-tool:hover:not(:disabled) {
+      border-color: #6adbd0;
+      color: white;
+    }
+    .timeline-tool:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     .timeline-scroll {
       position: relative;
       overflow-x: auto;
       overflow-y: hidden;
-      height: 74px;
-      background: #f7f5ef;
+      height: 112px;
+      cursor: pointer;
+      touch-action: none;
+      background:
+        linear-gradient(to bottom, #181b20 0, #181b20 31px, #111419 31px, #111419 100%),
+        repeating-linear-gradient(to right, rgba(255,255,255,0.06) 0 1px, transparent 1px 80px);
       scrollbar-gutter: stable;
     }
     .timeline-track {
@@ -783,43 +832,125 @@ INDEX_HTML = """<!doctype html>
       min-width: 100%;
       height: 100%;
     }
+    .timeline-ruler {
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 32px;
+      border-bottom: 1px solid #2b3038;
+    }
+    .timeline-tick {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: rgba(255, 255, 255, 0.18);
+    }
+    .timeline-tick.major {
+      background: rgba(255, 255, 255, 0.38);
+    }
+    .timeline-tick span {
+      position: absolute;
+      top: 7px;
+      left: 6px;
+      color: #9aa5b3;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .timeline-lane {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 32px;
+      height: 80px;
+      background: linear-gradient(to bottom, #151922, #111419);
+    }
+    .timeline-lane::before {
+      content: "SUB";
+      position: sticky;
+      left: 0;
+      top: 0;
+      z-index: 3;
+      display: inline-flex;
+      align-items: center;
+      height: 80px;
+      width: 46px;
+      padding-left: 10px;
+      color: #697586;
+      font-size: 11px;
+      font-weight: 800;
+      background: linear-gradient(to right, #151922 0, #151922 34px, rgba(21,25,34,0) 100%);
+      pointer-events: none;
+    }
     .timeline-segment {
       position: absolute;
-      top: 16px;
-      height: 38px;
+      top: 45px;
+      height: 50px;
       min-width: 8px;
-      border: 1px solid rgba(0, 125, 119, 0.48);
-      border-radius: 5px;
-      background: #dff0ed;
-      color: #174642;
+      border: 1px solid rgba(104, 224, 209, 0.45);
+      border-radius: 6px;
+      background: linear-gradient(180deg, #226d69, #174c49);
+      color: #eefdfb;
       cursor: pointer;
       overflow: hidden;
-      padding: 4px 6px;
-      font-size: 12px;
+      padding: 5px 7px;
+      font-size: 11px;
       line-height: 1.2;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+      text-align: left;
+      touch-action: none;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
     }
     .timeline-segment:hover {
-      background: #cde9e4;
-      border-color: var(--teal);
+      border-color: #85fff3;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
     }
     .timeline-segment.active {
-      background: var(--teal);
-      border-color: #005c58;
+      background: linear-gradient(180deg, #20a69d, #007d77);
+      border-color: #b1fff8;
       color: white;
-      transform: translateY(-2px);
+      transform: translateY(-3px);
+      box-shadow: 0 0 0 2px rgba(133, 255, 243, 0.22), 0 8px 20px rgba(0, 0, 0, 0.32);
+    }
+    .timeline-segment-speaker {
+      display: block;
+      margin-bottom: 2px;
+      color: #bffbf5;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .timeline-segment-text {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
     .timeline-playhead {
       position: absolute;
-      top: 8px;
-      bottom: 8px;
+      top: 0;
+      bottom: 0;
       width: 2px;
-      background: #c94b35;
-      pointer-events: none;
+      background: #ff4f3e;
+      pointer-events: auto;
       transform: translateX(-1px);
-      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+      z-index: 4;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 16px rgba(255, 79, 62, 0.48);
+      cursor: ew-resize;
+    }
+    .timeline-playhead::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 50%;
+      width: 12px;
+      height: 12px;
+      border-radius: 0 0 4px 4px;
+      background: #ff4f3e;
+      transform: translateX(-50%);
+      pointer-events: auto;
     }
     .table-wrap {
       overflow: auto;
@@ -858,6 +989,7 @@ INDEX_HTML = """<!doctype html>
     }
     .subtitle-table th.time { width: 76px; }
     .subtitle-table th.speaker { width: 68px; }
+    .subtitle-table th.row-actions { width: 92px; text-align: center; }
     .subtitle-table tbody tr {
       cursor: pointer;
       background: #fff;
@@ -928,6 +1060,46 @@ INDEX_HTML = """<!doctype html>
       -webkit-appearance: none;
     }
     .subtitle-table input[type="number"] { -moz-appearance: textfield; }
+    .segment-actions {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      width: 100%;
+    }
+    .segment-action {
+      width: 26px;
+      height: 24px;
+      padding: 0;
+      border-radius: 5px;
+      border: 1px solid #d8d0c2;
+      background: #fffdfa;
+      color: var(--teal);
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1;
+    }
+    .segment-action.delete-row {
+      color: #b24132;
+    }
+    .segment-action:hover {
+      border-color: #86bcb5;
+      background: #eef7f5;
+    }
+    .render-progress-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 10px 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .render-progress-meta strong {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
     .inspector {
       border-left: 1px solid var(--line);
       padding-left: 14px;
@@ -966,6 +1138,12 @@ INDEX_HTML = """<!doctype html>
       background: white;
       border: 1px solid var(--line);
       text-decoration: none;
+    }
+    .export-status {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
     }
     @media (max-width: 900px) {
       body { overflow: auto; }
@@ -1072,11 +1250,17 @@ INDEX_HTML = """<!doctype html>
             </div>
             <div class="timeline-panel">
               <div class="timeline-head">
-                <span>字幕时间轴</span>
-                <span id="timelineMeta">0 段</span>
+                <span class="timeline-title">字幕轨道</span>
+                <div class="timeline-actions">
+                  <button id="addSegment" class="timeline-tool" type="button">添加字幕</button>
+                  <button id="deleteSegment" class="timeline-tool" type="button">删除当前</button>
+                  <span id="timelineMeta">0 段</span>
+                </div>
               </div>
               <div id="timelineScroll" class="timeline-scroll">
                 <div id="timelineTrack" class="timeline-track">
+                  <div id="timelineRuler" class="timeline-ruler"></div>
+                  <div id="timelineLane" class="timeline-lane"></div>
                   <div id="timelinePlayhead" class="timeline-playhead"></div>
                 </div>
               </div>
@@ -1089,6 +1273,7 @@ INDEX_HTML = """<!doctype html>
                     <th class="time">结束</th>
                     <th class="speaker">说话人</th>
                     <th>字幕</th>
+                    <th class="row-actions">操作</th>
                   </tr>
                 </thead>
                 <tbody id="segments"></tbody>
@@ -1105,7 +1290,12 @@ INDEX_HTML = """<!doctype html>
               <div id="taskUsage" class="meta task-meta"></div>
               <div id="taskParams" class="meta task-meta"></div>
               <div id="taskNotice" class="task-notice is-hidden"></div>
-              <button id="render" class="warn primary-action">烧录视频</button>
+              <div id="renderProgressMeta" class="render-progress-meta is-hidden">
+                <span>烧录进度</span>
+                <strong id="renderProgressText">0%</strong>
+              </div>
+              <div id="renderProgress" class="progress is-hidden" style="margin:10px 0 8px"><div id="renderProgressBar" class="bar"></div></div>
+              <button id="render" class="warn primary-action" disabled>检测 FFmpeg...</button>
               <div class="secondary-actions">
                 <div>
                   <button id="save" class="primary is-hidden">保存修改</button>
@@ -1177,6 +1367,8 @@ INDEX_HTML = """<!doctype html>
             <div class="group">
               <label>输出</label>
               <div class="downloads" id="downloads"></div>
+              <button id="exportFolder" class="ghost" type="button" style="margin-top:8px">选择文件夹保存</button>
+              <div id="exportStatus" class="export-status"></div>
             </div>
           </div>
         </div>
@@ -1205,6 +1397,9 @@ const openNewBtn = document.querySelector('#openNew');
 const saveBtn = document.querySelector('#save');
 const renderBtn = document.querySelector('#render');
 const rerunBtn = document.querySelector('#rerun');
+const addSegmentBtn = document.querySelector('#addSegment');
+const deleteSegmentBtn = document.querySelector('#deleteSegment');
+const exportFolderBtn = document.querySelector('#exportFolder');
 const saveStatusEl = document.querySelector('#saveStatus');
 const importView = document.querySelector('#importView');
 const processingView = document.querySelector('#processingView');
@@ -1223,6 +1418,10 @@ const taskStatusEl = document.querySelector('#taskStatus');
 const taskUsageEl = document.querySelector('#taskUsage');
 const taskParamsEl = document.querySelector('#taskParams');
 const taskNoticeEl = document.querySelector('#taskNotice');
+const renderProgressMetaEl = document.querySelector('#renderProgressMeta');
+const renderProgressTextEl = document.querySelector('#renderProgressText');
+const renderProgressEl = document.querySelector('#renderProgress');
+const renderProgressBarEl = document.querySelector('#renderProgressBar');
 const modelInfoEl = document.querySelector('#modelinfo');
 const tbody = document.querySelector('#segments');
 const speakerMapEl = document.querySelector('#speakerMap');
@@ -1234,13 +1433,17 @@ const sourceMaskOverlay = document.querySelector('#sourceMaskOverlay');
 const subtitleOverlay = document.querySelector('#subtitleOverlay');
 const timelineScroll = document.querySelector('#timelineScroll');
 const timelineTrack = document.querySelector('#timelineTrack');
+const timelineRuler = document.querySelector('#timelineRuler');
+const timelineLane = document.querySelector('#timelineLane');
 const timelinePlayhead = document.querySelector('#timelinePlayhead');
 const timelineMeta = document.querySelector('#timelineMeta');
 const downloads = document.querySelector('#downloads');
+const exportStatusEl = document.querySelector('#exportStatus');
 let jobs = [];
 let currentJob = null;
 let rerunDraftJob = null;
 let pollTimer = null;
+let runtimeChecked = false;
 let ffmpegAvailable = false;
 let activeSegmentIndex = -1;
 let assPlayRes = { x: 1920, y: 1080 };
@@ -1248,11 +1451,14 @@ let layoutFitFrame = 0;
 let editorDirty = false;
 let saveStatusTimer = 0;
 let speakerNameMap = {};
+let timelineDragging = false;
 const assFontLineHeightFactor = 1.448;
 const speakerPalette = ['#ffffff', '#ffe75b', '#8ff286', '#ffa7bb', '#ffd700', '#6bb5ff', '#db8eff', '#d8d8d8'];
+const RENDER_PROGRESS_BASE = 0.95;
+const RENDER_PROGRESS_SPAN = 0.049;
 
 function apiUrl(path) {
-  const clean = String(path).replace(/^\\/+/, '');
+  const clean = String(path).replace(/^[/]+/, '');
   const basePath = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
   return new URL(clean, window.location.origin + basePath).toString();
 }
@@ -1268,17 +1474,19 @@ async function refreshRuntime() {
     const res = await fetch(apiUrl('api/runtime'), { cache: 'no-store' });
     if (!res.ok) throw new Error('runtime status ' + res.status);
     const data = await res.json();
+    runtimeChecked = true;
     ffmpegAvailable = !!(data.ffmpeg && data.ffmpeg.available);
     runtimeEl.textContent = ffmpegAvailable ? 'FFmpeg 可用' : 'FFmpeg 缺失';
     runtimeEl.className = 'pill ' + (ffmpegAvailable ? 'ok' : 'bad');
-    renderBtn.disabled = !ffmpegAvailable;
+    updateRenderAction(currentJob);
     applyInferenceDefaults(data.inference || {});
     renderModelInfo(data.model || {});
   } catch (err) {
+    runtimeChecked = true;
     ffmpegAvailable = false;
     runtimeEl.textContent = 'API 连接失败';
     runtimeEl.className = 'pill bad';
-    renderBtn.disabled = true;
+    updateRenderAction(currentJob);
     importErrorEl.textContent = '无法连接 api/runtime，请确认页面来自 mtd-subtitle-web 服务。';
   }
 }
@@ -1433,21 +1641,30 @@ saveBtn.addEventListener('click', async () => {
   await saveSegments();
 });
 
+addSegmentBtn.addEventListener('click', addSegmentAtPlayhead);
+deleteSegmentBtn.addEventListener('click', deleteActiveSegment);
+exportFolderBtn.addEventListener('click', exportCurrentJobToFolder);
+
 renderBtn.addEventListener('click', async () => {
   if (!currentJob || !ffmpegAvailable) return;
   const saved = await saveSegments();
   if (!saved) return;
   const style = collectSubtitleStyle();
+  currentJob = { ...currentJob, status: 'rendering', progress: RENDER_PROGRESS_BASE, error: null };
+  renderCurrentJob(currentJob, { skipSegments: true });
   const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/render`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ style })
   });
   const data = await res.json();
-  if (!res.ok) setTaskNotice(data.detail || '烧录失败', 'error');
+  if (!res.ok) {
+    currentJob = { ...currentJob, status: 'waiting_review', progress: 0.95, error: data.detail || '烧录失败' };
+    renderCurrentJob(currentJob, { skipSegments: true });
+  }
   else {
     currentJob = data;
-    renderCurrentJob(data);
+    renderCurrentJob(data, { skipSegments: true });
     await refreshJobs({ keepSelection: true });
   }
 });
@@ -1469,8 +1686,33 @@ preview.addEventListener('loadedmetadata', () => {
   syncActiveSegment();
   syncMaskPreviewPlaybackRate();
 });
+timelineScroll.addEventListener('pointerdown', (event) => {
+  if (!currentJob || event.target.closest('.timeline-segment')) return;
+  event.preventDefault();
+  timelineDragging = true;
+  timelineScroll.setPointerCapture(event.pointerId);
+  seekTimelineFromPointer(event);
+});
+timelineScroll.addEventListener('pointermove', (event) => {
+  if (!timelineDragging) return;
+  event.preventDefault();
+  seekTimelineFromPointer(event);
+});
+timelineScroll.addEventListener('pointerup', (event) => {
+  if (!timelineDragging) return;
+  event.preventDefault();
+  timelineDragging = false;
+  try {
+    timelineScroll.releasePointerCapture(event.pointerId);
+  } catch (err) {}
+});
+timelineScroll.addEventListener('pointercancel', () => {
+  timelineDragging = false;
+});
+timelineScroll.addEventListener('dragstart', (event) => event.preventDefault());
 window.addEventListener('resize', () => {
   scheduleLayoutFit();
+  renderTimeline(collectSegments());
 });
 if ('ResizeObserver' in window) {
   const layoutObserver = new ResizeObserver(scheduleLayoutFit);
@@ -1492,6 +1734,20 @@ tbody.addEventListener('input', (event) => {
   }
 });
 tbody.addEventListener('change', markEditorDirty);
+tbody.addEventListener('click', (event) => {
+  const addAboveButton = event.target.closest('.add-row-above');
+  const addBelowButton = event.target.closest('.add-row-below');
+  const deleteButton = event.target.closest('.delete-row');
+  if (!addAboveButton && !addBelowButton && !deleteButton) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const tr = event.target.closest('tr');
+  if (!tr) return;
+  const index = Number(tr.dataset.index);
+  if (addAboveButton) addSegmentAroundIndex(index, 'above');
+  else if (addBelowButton) addSegmentAroundIndex(index, 'below');
+  else deleteSegmentAtIndex(index);
+});
 speakerMapEl.addEventListener('input', () => {
   syncSpeakerNameInputs();
   markEditorDirty();
@@ -1647,14 +1903,36 @@ function updateEditorChrome(job) {
   taskStatusEl.className = statusClass(job.status);
   taskUsageEl.textContent = tokenUsageSummary(job);
   taskParamsEl.textContent = parameterSummary(job);
+  updateRenderProgress(job);
   if (job.error) setTaskNotice(job.error, 'error');
   else if (truncationWarning(job)) setTaskNotice('可能截断，建议提高输出 tokens 后重新转写。', 'warning');
   else setTaskNotice('', '');
-  renderBtn.disabled = !ffmpegAvailable || job.status === 'rendering';
-  renderBtn.textContent = job.status === 'rendering' ? '烧录中...' : ffmpegAvailable ? '烧录视频' : 'FFmpeg 不可用';
+  updateRenderAction(job);
   updateRerunAction(job);
   setSaveState(editorDirty ? 'dirty' : 'saved', editorDirty ? '有未保存修改' : '已保存');
   renderDownloads(job.status);
+}
+
+function updateRenderAction(job) {
+  const isRendering = job && job.status === 'rendering';
+  if (!runtimeChecked) {
+    renderBtn.disabled = true;
+    renderBtn.textContent = '检测 FFmpeg...';
+  } else {
+    renderBtn.disabled = !ffmpegAvailable || isRendering;
+    renderBtn.textContent = isRendering ? '烧录中...' : ffmpegAvailable ? '烧录视频' : 'FFmpeg 不可用';
+  }
+}
+
+function updateRenderProgress(job) {
+  const isRendering = job.status === 'rendering';
+  const showProgress = isRendering || job.status === 'done';
+  renderProgressMetaEl.classList.toggle('is-hidden', !showProgress);
+  renderProgressEl.classList.toggle('is-hidden', !showProgress);
+  const renderRatio = job.status === 'done' ? 1 : Math.max(0, Math.min(1, ((job.progress || RENDER_PROGRESS_BASE) - RENDER_PROGRESS_BASE) / RENDER_PROGRESS_SPAN));
+  const percent = Math.round(renderRatio * 100);
+  renderProgressBarEl.style.width = `${percent}%`;
+  renderProgressTextEl.textContent = `${percent}%`;
 }
 
 function setTaskNotice(message, kind) {
@@ -1880,7 +2158,7 @@ function speakerDisplayName(speaker) {
   return names[speaker] || speakerNameMap[speaker] || speaker;
 }
 
-function renderSegments(segments) {
+function renderSegments(segments, preferredIndex = null) {
   tbody.innerHTML = '';
   activeSegmentIndex = -1;
   for (const [index, segment] of segments.entries()) {
@@ -1892,6 +2170,13 @@ function renderSegments(segments) {
       <td><input class="end" type="number" min="0" step="0.01" value="${segment.end}"></td>
       <td><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
       <td><textarea class="text" rows="1">${escapeHtml(segment.text)}</textarea></td>
+      <td>
+        <div class="segment-actions">
+          <button class="segment-action add-row-above" type="button" title="在上方添加字幕">↑+</button>
+          <button class="segment-action add-row-below" type="button" title="在下方添加字幕">↓+</button>
+          <button class="segment-action delete-row" type="button" title="删除这条字幕">−</button>
+        </div>
+      </td>
     `;
     tr.addEventListener('click', (event) => {
       if (event.target.closest('input, textarea')) return;
@@ -1906,17 +2191,24 @@ function renderSegments(segments) {
   }
   renderSpeakerMap(segments);
   renderTimeline(segments);
-  syncActiveSegment();
+  if (preferredIndex != null && segments[preferredIndex]) {
+    setActiveSegment(preferredIndex, true);
+    updateSubtitlePreview(segments);
+  } else {
+    syncActiveSegment();
+  }
 }
 
 function renderTimeline(segments) {
-  timelineTrack.innerHTML = '';
   const duration = timelineDuration(segments);
   const scrollWidth = timelineScroll.clientWidth || 1;
-  const pixelsPerSecond = duration > 0 ? Math.max(6, Math.min(24, 1600 / duration)) : 12;
+  const pixelsPerSecond = timelinePixelsPerSecond(duration, scrollWidth);
   const trackWidth = Math.max(scrollWidth, Math.ceil(duration * pixelsPerSecond));
   timelineTrack.style.width = trackWidth + 'px';
   timelineMeta.textContent = segments.length + ' 段' + (duration ? ' · ' + formatTimelineTime(duration) : '');
+  timelineRuler.innerHTML = '';
+  timelineLane.innerHTML = '';
+  renderTimelineTicks(duration, pixelsPerSecond);
   for (const [index, segment] of segments.entries()) {
     const start = Math.max(0, Number(segment.start) || 0);
     const end = Math.max(start + 0.01, Number(segment.end) || start + 0.01);
@@ -1927,17 +2219,54 @@ function renderTimeline(segments) {
     item.style.left = Math.max(0, start * pixelsPerSecond) + 'px';
     item.style.width = Math.max(8, (end - start) * pixelsPerSecond) + 'px';
     item.title = `${formatTimelineTime(start)} - ${formatTimelineTime(end)} ${segment.text || ''}`;
-    item.textContent = segment.text || segment.speaker || String(index + 1);
-    item.addEventListener('click', () => {
+    item.innerHTML = `
+      <span class="timeline-segment-speaker">${escapeHtml(segment.speaker || 'S--')}</span>
+      <span class="timeline-segment-text">${escapeHtml(segment.text || '')}</span>
+    `;
+    item.addEventListener('pointerdown', (event) => event.preventDefault());
+    item.addEventListener('click', (event) => {
+      event.preventDefault();
       preview.currentTime = start;
       setActiveSegment(index, true);
       updateSubtitlePreview();
       updateTimelinePlayhead();
     });
-    timelineTrack.appendChild(item);
+    timelineLane.appendChild(item);
   }
   timelineTrack.appendChild(timelinePlayhead);
   updateTimelinePlayhead(segments);
+}
+
+function timelinePixelsPerSecond(duration, scrollWidth) {
+  if (!duration || duration <= 0) return 12;
+  return Math.max(8, Math.min(32, Math.max(1800, scrollWidth) / duration));
+}
+
+function renderTimelineTicks(duration, pixelsPerSecond) {
+  const interval = timelineTickInterval(pixelsPerSecond);
+  const end = Math.max(interval, Math.ceil((duration || interval) / interval) * interval);
+  for (let time = 0; time <= end; time += interval) {
+    const tick = document.createElement('div');
+    tick.className = 'timeline-tick major';
+    tick.style.left = Math.round(time * pixelsPerSecond) + 'px';
+    const label = document.createElement('span');
+    label.textContent = formatTimelineTime(time);
+    tick.appendChild(label);
+    timelineRuler.appendChild(tick);
+    const half = time + interval / 2;
+    if (half < end) {
+      const minor = document.createElement('div');
+      minor.className = 'timeline-tick';
+      minor.style.left = Math.round(half * pixelsPerSecond) + 'px';
+      timelineRuler.appendChild(minor);
+    }
+  }
+}
+
+function timelineTickInterval(pixelsPerSecond) {
+  if (pixelsPerSecond >= 24) return 5;
+  if (pixelsPerSecond >= 14) return 10;
+  return 15;
 }
 
 function timelineDuration(segments) {
@@ -1976,6 +2305,134 @@ function collectSegments() {
     speaker: tr.querySelector('.speaker').value,
     text: tr.querySelector('.text').value
   }));
+}
+
+function addSegmentAtPlayhead() {
+  if (!currentJob) return;
+  const segments = collectSegments();
+  const start = roundTime(Math.max(0, Number(preview.currentTime || 0)));
+  const next = segments.find((segment) => Number(segment.start) > start);
+  const mediaEnd = Number(preview.duration || 0);
+  const defaultEnd = mediaEnd > 0 ? Math.min(mediaEnd, start + 2.5) : start + 2.5;
+  const end = roundTime(Math.max(start + 0.25, next ? Math.min(Number(next.start), defaultEnd) : defaultEnd));
+  const currentSpeaker = segments[activeSegmentIndex] && segments[activeSegmentIndex].speaker;
+  const segment = {
+    id: 'seg_' + Date.now().toString(36),
+    start,
+    end,
+    speaker: currentSpeaker || 'S01',
+    text: ''
+  };
+  segments.push(segment);
+  segments.sort((a, b) => Number(a.start) - Number(b.start));
+  const index = segments.findIndex((item) => item.id === segment.id);
+  preview.currentTime = start;
+  renderSegments(segments, index);
+  markEditorDirty();
+  focusSegmentText(index);
+}
+
+function addSegmentAroundIndex(index, placement) {
+  if (!currentJob) return;
+  const segments = collectSegments();
+  const source = segments[index];
+  if (!source) {
+    addSegmentAtPlayhead();
+    return;
+  }
+  const isAbove = placement === 'above';
+  const previous = segments[index - 1];
+  const next = segments[index + 1];
+  const anchorStart = Math.max(0, Number(source.start) || 0);
+  const anchorEnd = Math.max(anchorStart, Number(source.end) || anchorStart);
+  const mediaEnd = Number(preview.duration || 0);
+  const segment = createBlankAdjacentSegment({
+    source,
+    previous,
+    next,
+    anchorStart,
+    anchorEnd,
+    mediaEnd,
+    isAbove
+  });
+  const insertIndex = isAbove ? index : index + 1;
+  segments.splice(insertIndex, 0, segment);
+  preview.currentTime = segment.start;
+  renderSegments(segments, insertIndex);
+  markEditorDirty();
+  focusSegmentText(insertIndex);
+}
+
+function createBlankAdjacentSegment({ source, previous, next, anchorStart, anchorEnd, mediaEnd, isAbove }) {
+  let start;
+  let end;
+  if (isAbove) {
+    end = anchorStart;
+    const floor = previous ? Math.max(0, Number(previous.end) || 0) : 0;
+    start = Math.max(floor, end - 2.5);
+    if (end - start < 0.25) {
+      start = Math.max(0, end - 0.25);
+      if (end <= start) end = start + 0.25;
+    }
+  } else {
+    start = anchorEnd;
+    const ceiling = next ? Number(next.start) : (mediaEnd > 0 ? mediaEnd : start + 2.5);
+    const defaultEnd = mediaEnd > 0 ? Math.min(mediaEnd, start + 2.5) : start + 2.5;
+    end = Math.max(start + 0.25, Math.min(Number.isFinite(ceiling) ? ceiling : defaultEnd, defaultEnd));
+  }
+  if (mediaEnd > 0) {
+    start = Math.min(start, Math.max(0, mediaEnd - 0.25));
+    end = Math.min(Math.max(start + 0.25, end), mediaEnd);
+  }
+  start = roundTime(start);
+  end = roundTime(Math.max(start + 0.25, end));
+  if (mediaEnd > 0) end = roundTime(Math.min(end, mediaEnd));
+  const segment = {
+    id: 'seg_' + Date.now().toString(36),
+    start,
+    end,
+    speaker: source.speaker || 'S01',
+    text: ''
+  };
+  return segment;
+}
+
+function deleteActiveSegment() {
+  if (!currentJob || activeSegmentIndex < 0) return;
+  deleteSegmentAtIndex(activeSegmentIndex);
+}
+
+function deleteSegmentAtIndex(index) {
+  if (!currentJob || index < 0) return;
+  const segments = collectSegments();
+  if (!segments[index]) return;
+  segments.splice(index, 1);
+  const nextIndex = Math.min(index, segments.length - 1);
+  renderSegments(segments, nextIndex >= 0 ? nextIndex : null);
+  markEditorDirty();
+}
+
+function focusSegmentText(index) {
+  const tr = tbody.querySelector(`tr[data-index="${index}"]`);
+  const textarea = tr && tr.querySelector('textarea.text');
+  if (!textarea) return;
+  textarea.focus();
+  textarea.select();
+}
+
+function roundTime(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function seekTimelineFromPointer(event) {
+  const segments = collectSegments();
+  const duration = timelineDuration(segments);
+  if (!duration) return;
+  const rect = timelineTrack.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+  const time = roundTime((x / Math.max(1, rect.width)) * duration);
+  preview.currentTime = Math.max(0, Math.min(duration, time));
+  syncActiveSegment();
 }
 
 function syncMaskPreviewTime() {
@@ -2061,7 +2518,7 @@ function setActiveSegment(index, shouldScroll) {
     resizeSegmentRow(tr, active);
     if (active && shouldScroll) scrollSegmentRowIntoView(tr);
   }
-  for (const item of timelineTrack.querySelectorAll('.timeline-segment')) {
+  for (const item of timelineLane.querySelectorAll('.timeline-segment')) {
     item.classList.toggle('active', Number(item.dataset.index) === index);
   }
 }
@@ -2069,7 +2526,7 @@ function setActiveSegment(index, shouldScroll) {
 function updateTimelinePlayhead(segments) {
   segments = segments || collectSegments();
   const duration = timelineDuration(segments);
-  const trackWidth = timelineTrack.clientWidth || timelineScroll.clientWidth || 1;
+  const trackWidth = Number.parseFloat(timelineTrack.style.width) || timelineTrack.clientWidth || timelineScroll.clientWidth || 1;
   const time = Math.max(0, Number(preview.currentTime || 0));
   const left = duration > 0 ? Math.min(trackWidth, (time / duration) * trackWidth) : 0;
   timelinePlayhead.style.left = left + 'px';
@@ -2189,6 +2646,44 @@ function renderDownloads(status) {
   downloads.innerHTML = links.map(([kind, label]) =>
     `<a href="${apiUrl(`api/jobs/${currentJob.id}/download?kind=${kind}`)}" target="_blank">${label}</a>`
   ).join('');
+}
+
+async function exportCurrentJobToFolder() {
+  if (!currentJob) return;
+  if (!window.showDirectoryPicker) {
+    exportStatusEl.textContent = '当前浏览器不支持选择文件夹，请使用上方下载链接。';
+    return;
+  }
+  const saved = await saveSegments();
+  if (!saved) return;
+  const files = [
+    ['json', 'segments.json'],
+    ['srt', 'subtitle.srt'],
+    ['ass', 'subtitle.ass'],
+    ['transcript', 'raw_transcript.txt'],
+  ];
+  if (currentJob.status === 'done') files.push(['mp4', 'output.mp4']);
+  try {
+    exportFolderBtn.disabled = true;
+    exportStatusEl.textContent = '请选择导出文件夹...';
+    const directory = await window.showDirectoryPicker({ mode: 'readwrite' });
+    let count = 0;
+    for (const [kind, filename] of files) {
+      exportStatusEl.textContent = `正在保存 ${filename}...`;
+      const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/download?kind=${kind}`), { cache: 'no-store' });
+      if (!res.ok) continue;
+      const handle = await directory.getFileHandle(filename, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(await res.blob());
+      await writable.close();
+      count += 1;
+    }
+    exportStatusEl.textContent = `已保存 ${count} 个文件到所选文件夹。`;
+  } catch (err) {
+    exportStatusEl.textContent = err && err.name === 'AbortError' ? '已取消选择文件夹。' : '导出失败：' + (err.message || err);
+  } finally {
+    exportFolderBtn.disabled = false;
+  }
 }
 
 function jobSummary(job) {

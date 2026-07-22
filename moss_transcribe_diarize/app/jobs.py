@@ -316,6 +316,11 @@ class JobManager:
             raise RuntimeError("ffmpeg and ffprobe are not available on PATH.")
         if not job.segments_path.exists():
             raise RuntimeError("No subtitle segments are available for this job.")
+        if job.status == "rendering":
+            return job
+        if job.status in {"queued", "loading_model", "transcribing", "postprocessing"}:
+            raise RuntimeError("Cannot render before transcription is ready.")
+        self._set_status(job, "rendering", 0.95, error=None)
         threading.Thread(
             target=self._render_job,
             args=(job.id, SubtitleStyle.from_dict(style_payload)),
@@ -402,11 +407,27 @@ class JobManager:
         job = self.get_job(job_id)
         with self._render_lock:
             try:
-                self._set_status(job, "rendering", 0.97, error=None)
+                self._set_status(job, "rendering", 0.95, error=None)
                 segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job.id)]
                 width, height = probe_video_size(job.input_path)
                 write_text(job.ass_path, export_ass(segments, style=style, video_width=width, video_height=height))
-                burn_ass_subtitles(job.input_path, job.ass_path, job.output_path, style=style)
+                def on_render_progress(ratio: float) -> None:
+                    progress = max(job.progress, 0.95 + max(0.0, min(1.0, ratio)) * 0.049)
+                    self._set_status(
+                        job,
+                        "rendering",
+                        progress,
+                        error=None,
+                        save=self._should_save_live_progress(job.id),
+                    )
+
+                burn_ass_subtitles(
+                    job.input_path,
+                    job.ass_path,
+                    job.output_path,
+                    style=style,
+                    progress_callback=on_render_progress,
+                )
                 self._set_status(job, "done", 1.0, error=None)
             except Exception as exc:
                 self._set_status(job, "waiting_review", 0.95, error=f"Render failed: {exc}")
