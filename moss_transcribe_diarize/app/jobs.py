@@ -406,7 +406,7 @@ class JobManager:
                 segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job.id)]
                 width, height = probe_video_size(job.input_path)
                 write_text(job.ass_path, export_ass(segments, style=style, video_width=width, video_height=height))
-                burn_ass_subtitles(job.input_path, job.ass_path, job.output_path)
+                burn_ass_subtitles(job.input_path, job.ass_path, job.output_path, style=style)
                 self._set_status(job, "done", 1.0, error=None)
             except Exception as exc:
                 self._set_status(job, "waiting_review", 0.95, error=f"Render failed: {exc}")

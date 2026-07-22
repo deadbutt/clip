@@ -671,7 +671,7 @@ INDEX_HTML = """<!doctype html>
     }
     .preview-column {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
       gap: 10px;
       min-width: 0;
       min-height: 0;
@@ -703,6 +703,17 @@ INDEX_HTML = """<!doctype html>
       display: block;
       object-fit: contain;
     }
+    .preview-mask-video {
+      position: absolute;
+      inset: 0;
+      display: none;
+      pointer-events: none;
+      z-index: 1;
+      filter: blur(18px);
+      transform: scale(1.02);
+      transform-origin: center;
+    }
+    .preview-mask-video.visible { display: block; }
     .subtitle-overlay {
       position: absolute;
       left: 50%;
@@ -725,8 +736,91 @@ INDEX_HTML = """<!doctype html>
       -webkit-text-stroke: 3px #000;
       paint-order: stroke fill;
       text-shadow: 0 2px 3px rgba(0, 0, 0, 0.65);
+      z-index: 3;
     }
     .subtitle-overlay.visible { display: flex; }
+    .source-mask-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 72px;
+      display: none;
+      pointer-events: none;
+      background: rgba(0, 0, 0, 0.82);
+      z-index: 2;
+    }
+    .source-mask-overlay.visible { display: block; }
+    .timeline-panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .timeline-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      height: 30px;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .timeline-scroll {
+      position: relative;
+      overflow-x: auto;
+      overflow-y: hidden;
+      height: 74px;
+      background: #f7f5ef;
+      scrollbar-gutter: stable;
+    }
+    .timeline-track {
+      position: relative;
+      min-width: 100%;
+      height: 100%;
+    }
+    .timeline-segment {
+      position: absolute;
+      top: 16px;
+      height: 38px;
+      min-width: 8px;
+      border: 1px solid rgba(0, 125, 119, 0.48);
+      border-radius: 5px;
+      background: #dff0ed;
+      color: #174642;
+      cursor: pointer;
+      overflow: hidden;
+      padding: 4px 6px;
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    }
+    .timeline-segment:hover {
+      background: #cde9e4;
+      border-color: var(--teal);
+    }
+    .timeline-segment.active {
+      background: var(--teal);
+      border-color: #005c58;
+      color: white;
+      transform: translateY(-2px);
+    }
+    .timeline-playhead {
+      position: absolute;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      background: #c94b35;
+      pointer-events: none;
+      transform: translateX(-1px);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+    }
     .table-wrap {
       overflow: auto;
       min-width: 0;
@@ -971,7 +1065,20 @@ INDEX_HTML = """<!doctype html>
             <div class="video-shell">
               <div id="videoStage" class="video-stage">
                 <video id="preview" controls></video>
+                <video id="maskPreviewVideo" class="preview-mask-video" muted playsinline></video>
+                <div id="sourceMaskOverlay" class="source-mask-overlay"></div>
                 <div id="subtitleOverlay" class="subtitle-overlay"></div>
+              </div>
+            </div>
+            <div class="timeline-panel">
+              <div class="timeline-head">
+                <span>字幕时间轴</span>
+                <span id="timelineMeta">0 段</span>
+              </div>
+              <div id="timelineScroll" class="timeline-scroll">
+                <div id="timelineTrack" class="timeline-track">
+                  <div id="timelinePlayhead" class="timeline-playhead"></div>
+                </div>
               </div>
             </div>
             <div class="table-wrap">
@@ -1034,6 +1141,40 @@ INDEX_HTML = """<!doctype html>
               </div>
             </div>
             <div class="group">
+              <label for="maskEnabled">原字幕遮挡</label>
+              <select id="maskEnabled">
+                <option value="false">关闭</option>
+                <option value="true">开启</option>
+              </select>
+              <div style="margin-top:10px">
+                <label for="maskMode">遮挡方式</label>
+                <select id="maskMode">
+                  <option value="blur">模糊原字幕区域</option>
+                  <option value="bar">黑底遮挡</option>
+                </select>
+              </div>
+              <div class="row" style="margin-top:10px">
+                <div>
+                  <label for="maskHeight">遮挡高度</label>
+                  <input id="maskHeight" type="number" min="12" max="360" value="120" />
+                </div>
+                <div>
+                  <label for="maskMarginV">离底距离</label>
+                  <input id="maskMarginV" type="number" min="0" max="360" value="0" />
+                </div>
+              </div>
+              <div class="row" style="margin-top:10px">
+                <div>
+                  <label for="maskBlur">模糊强度</label>
+                  <input id="maskBlur" type="number" min="1" max="80" value="24" />
+                </div>
+                <div>
+                  <label for="maskOpacity">黑底透明度</label>
+                  <input id="maskOpacity" type="number" min="0" max="1" step="0.05" value="0.82" />
+                </div>
+              </div>
+            </div>
+            <div class="group">
               <label>输出</label>
               <div class="downloads" id="downloads"></div>
             </div>
@@ -1088,7 +1229,13 @@ const speakerMapEl = document.querySelector('#speakerMap');
 const videoStage = document.querySelector('#videoStage');
 const videoShell = document.querySelector('.video-shell');
 const preview = document.querySelector('#preview');
+const maskPreviewVideo = document.querySelector('#maskPreviewVideo');
+const sourceMaskOverlay = document.querySelector('#sourceMaskOverlay');
 const subtitleOverlay = document.querySelector('#subtitleOverlay');
+const timelineScroll = document.querySelector('#timelineScroll');
+const timelineTrack = document.querySelector('#timelineTrack');
+const timelinePlayhead = document.querySelector('#timelinePlayhead');
+const timelineMeta = document.querySelector('#timelineMeta');
 const downloads = document.querySelector('#downloads');
 let jobs = [];
 let currentJob = null;
@@ -1108,6 +1255,12 @@ function apiUrl(path) {
   const clean = String(path).replace(/^\\/+/, '');
   const basePath = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
   return new URL(clean, window.location.origin + basePath).toString();
+}
+
+function setPreviewSource(src) {
+  preview.src = src;
+  maskPreviewVideo.src = src;
+  maskPreviewVideo.load();
 }
 
 async function refreshRuntime() {
@@ -1240,7 +1393,7 @@ fileInput.addEventListener('change', () => {
   if (rerunDraftJob) resetImportMode();
   const file = fileInput.files[0];
   if (file) {
-    preview.src = URL.createObjectURL(file);
+    setPreviewSource(URL.createObjectURL(file));
     resetVideoStage();
   }
 });
@@ -1305,9 +1458,16 @@ rerunBtn.addEventListener('click', () => {
 
 preview.addEventListener('timeupdate', syncActiveSegment);
 preview.addEventListener('seeked', syncActiveSegment);
+preview.addEventListener('play', syncMaskPreviewPlayback);
+preview.addEventListener('pause', syncMaskPreviewPlayback);
+preview.addEventListener('seeking', syncMaskPreviewTime);
+preview.addEventListener('seeked', syncMaskPreviewTime);
+preview.addEventListener('ratechange', syncMaskPreviewPlaybackRate);
 preview.addEventListener('loadedmetadata', () => {
   fitVideoStageToMedia();
+  renderTimeline(collectSegments());
   syncActiveSegment();
+  syncMaskPreviewPlaybackRate();
 });
 window.addEventListener('resize', () => {
   scheduleLayoutFit();
@@ -1320,6 +1480,7 @@ if ('ResizeObserver' in window) {
 }
 tbody.addEventListener('input', (event) => {
   markEditorDirty();
+  renderTimeline(collectSegments());
   if (event.target.classList.contains('text')) {
     const tr = event.target.closest('tr');
     resizeSegmentTextarea(event.target, tr && tr.classList.contains('active'));
@@ -1343,7 +1504,7 @@ tbody.addEventListener('focusin', (event) => {
   resizeSegmentRow(tr, true);
   updateSubtitlePreview();
 });
-for (const id of ['fontSize', 'marginV', 'showSpeaker', 'speakerColors']) {
+for (const id of ['fontSize', 'marginV', 'showSpeaker', 'speakerColors', 'maskEnabled', 'maskMode', 'maskHeight', 'maskMarginV', 'maskBlur', 'maskOpacity']) {
   document.querySelector('#' + id).addEventListener('input', () => {
     markEditorDirty();
     updateSubtitlePreview();
@@ -1472,7 +1633,7 @@ async function showEditor(job, options = {}) {
   const mediaUrl = apiUrl(`api/jobs/${job.id}/media`);
   if (preview.dataset.jobId !== job.id) {
     preview.dataset.jobId = job.id;
-    preview.src = mediaUrl;
+    setPreviewSource(mediaUrl);
     resetVideoStage();
   }
   renderDownloads(job.status);
@@ -1578,8 +1739,10 @@ async function deleteJob(jobId) {
   if (currentJob && currentJob.id === jobId) {
     currentJob = null;
     preview.removeAttribute('src');
+    maskPreviewVideo.removeAttribute('src');
     preview.removeAttribute('data-job-id');
     preview.load();
+    maskPreviewVideo.load();
     tbody.innerHTML = '';
     downloads.innerHTML = '';
     setEditorDirty(false);
@@ -1645,7 +1808,13 @@ function collectSubtitleStyle() {
     margin_v: Number(document.querySelector('#marginV').value || 56),
     show_speaker: document.querySelector('#showSpeaker').value === 'true',
     speaker_colors: document.querySelector('#speakerColors').value === 'true',
-    speaker_names: collectSpeakerNames()
+    speaker_names: collectSpeakerNames(),
+    mask_enabled: document.querySelector('#maskEnabled').value === 'true',
+    mask_mode: document.querySelector('#maskMode').value || 'blur',
+    mask_height: Number(document.querySelector('#maskHeight').value || 120),
+    mask_margin_v: Number(document.querySelector('#maskMarginV').value || 0),
+    mask_opacity: Number(document.querySelector('#maskOpacity').value || 0.82),
+    mask_blur: Number(document.querySelector('#maskBlur').value || 24)
   };
 }
 
@@ -1655,6 +1824,12 @@ function applySubtitleStyle(style) {
   if (style.margin_v != null) document.querySelector('#marginV').value = style.margin_v;
   if (style.show_speaker != null) document.querySelector('#showSpeaker').value = String(!!style.show_speaker);
   if (style.speaker_colors != null) document.querySelector('#speakerColors').value = String(!!style.speaker_colors);
+  if (style.mask_enabled != null) document.querySelector('#maskEnabled').value = String(!!style.mask_enabled);
+  if (style.mask_mode != null) document.querySelector('#maskMode').value = style.mask_mode === 'bar' ? 'bar' : 'blur';
+  if (style.mask_height != null) document.querySelector('#maskHeight').value = style.mask_height;
+  if (style.mask_margin_v != null) document.querySelector('#maskMarginV').value = style.mask_margin_v;
+  if (style.mask_opacity != null) document.querySelector('#maskOpacity').value = style.mask_opacity;
+  if (style.mask_blur != null) document.querySelector('#maskBlur').value = style.mask_blur;
   speakerNameMap = {};
   speakerMapEl.innerHTML = '';
   const names = style.speaker_names || {};
@@ -1730,7 +1905,53 @@ function renderSegments(segments) {
     resizeSegmentRow(tr, false);
   }
   renderSpeakerMap(segments);
+  renderTimeline(segments);
   syncActiveSegment();
+}
+
+function renderTimeline(segments) {
+  timelineTrack.innerHTML = '';
+  const duration = timelineDuration(segments);
+  const scrollWidth = timelineScroll.clientWidth || 1;
+  const pixelsPerSecond = duration > 0 ? Math.max(6, Math.min(24, 1600 / duration)) : 12;
+  const trackWidth = Math.max(scrollWidth, Math.ceil(duration * pixelsPerSecond));
+  timelineTrack.style.width = trackWidth + 'px';
+  timelineMeta.textContent = segments.length + ' 段' + (duration ? ' · ' + formatTimelineTime(duration) : '');
+  for (const [index, segment] of segments.entries()) {
+    const start = Math.max(0, Number(segment.start) || 0);
+    const end = Math.max(start + 0.01, Number(segment.end) || start + 0.01);
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'timeline-segment';
+    item.dataset.index = String(index);
+    item.style.left = Math.max(0, start * pixelsPerSecond) + 'px';
+    item.style.width = Math.max(8, (end - start) * pixelsPerSecond) + 'px';
+    item.title = `${formatTimelineTime(start)} - ${formatTimelineTime(end)} ${segment.text || ''}`;
+    item.textContent = segment.text || segment.speaker || String(index + 1);
+    item.addEventListener('click', () => {
+      preview.currentTime = start;
+      setActiveSegment(index, true);
+      updateSubtitlePreview();
+      updateTimelinePlayhead();
+    });
+    timelineTrack.appendChild(item);
+  }
+  timelineTrack.appendChild(timelinePlayhead);
+  updateTimelinePlayhead(segments);
+}
+
+function timelineDuration(segments) {
+  const mediaDuration = Number(preview.duration || 0);
+  const segmentDuration = Math.max(0, ...segments.map((segment) => Number(segment.end) || 0));
+  return Math.max(mediaDuration, segmentDuration);
+}
+
+function formatTimelineTime(seconds) {
+  seconds = Math.max(0, Number(seconds) || 0);
+  const total = Math.floor(seconds);
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  return String(minutes).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
 }
 
 function resizeSegmentTextarea(textarea, expanded) {
@@ -1757,11 +1978,39 @@ function collectSegments() {
   }));
 }
 
+function syncMaskPreviewTime() {
+  if (!maskPreviewVideo.src) return;
+  const drift = Math.abs(Number(maskPreviewVideo.currentTime || 0) - Number(preview.currentTime || 0));
+  if (drift > 0.12) {
+    try {
+      maskPreviewVideo.currentTime = preview.currentTime || 0;
+    } catch (err) {}
+  }
+}
+
+function syncMaskPreviewPlaybackRate() {
+  maskPreviewVideo.playbackRate = preview.playbackRate || 1;
+}
+
+function syncMaskPreviewPlayback() {
+  if (!maskPreviewVideo.src) return;
+  syncMaskPreviewTime();
+  syncMaskPreviewPlaybackRate();
+  if (preview.paused || preview.ended) {
+    maskPreviewVideo.pause();
+    return;
+  }
+  const playPromise = maskPreviewVideo.play();
+  if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
+}
+
 function resetVideoStage() {
   assPlayRes = { x: 1920, y: 1080 };
   videoStage.style.width = '';
   videoStage.style.height = '';
   videoStage.style.aspectRatio = assPlayRes.x + ' / ' + assPlayRes.y;
+  maskPreviewVideo.classList.remove('visible');
+  maskPreviewVideo.pause();
 }
 
 function fitVideoStageToMedia() {
@@ -1790,6 +2039,7 @@ function assScriptScale() {
 }
 
 function syncActiveSegment() {
+  syncMaskPreviewTime();
   const time = Number(preview.currentTime || 0);
   const segments = collectSegments();
   const index = segments.findIndex((segment) => {
@@ -1798,6 +2048,7 @@ function syncActiveSegment() {
     return Number.isFinite(start) && Number.isFinite(end) && start <= time && time <= end;
   });
   setActiveSegment(index, true);
+  updateTimelinePlayhead(segments);
   updateSubtitlePreview(segments);
 }
 
@@ -1809,6 +2060,25 @@ function setActiveSegment(index, shouldScroll) {
     tr.classList.toggle('active', active);
     resizeSegmentRow(tr, active);
     if (active && shouldScroll) scrollSegmentRowIntoView(tr);
+  }
+  for (const item of timelineTrack.querySelectorAll('.timeline-segment')) {
+    item.classList.toggle('active', Number(item.dataset.index) === index);
+  }
+}
+
+function updateTimelinePlayhead(segments) {
+  segments = segments || collectSegments();
+  const duration = timelineDuration(segments);
+  const trackWidth = timelineTrack.clientWidth || timelineScroll.clientWidth || 1;
+  const time = Math.max(0, Number(preview.currentTime || 0));
+  const left = duration > 0 ? Math.min(trackWidth, (time / duration) * trackWidth) : 0;
+  timelinePlayhead.style.left = left + 'px';
+  if (time > 0 && timelineScroll.clientWidth) {
+    const visibleLeft = timelineScroll.scrollLeft;
+    const visibleRight = visibleLeft + timelineScroll.clientWidth;
+    if (left < visibleLeft + 24 || left > visibleRight - 24) {
+      timelineScroll.scrollLeft = Math.max(0, left - timelineScroll.clientWidth * 0.45);
+    }
   }
 }
 
@@ -1829,6 +2099,7 @@ function scrollSegmentRowIntoView(tr) {
 
 function updateSubtitlePreview(segments) {
   segments = segments || collectSegments();
+  updateSourceMaskPreview();
   const segment = segments[activeSegmentIndex];
   if (!segment || !segment.text || activeSegmentIndex < 0) {
     subtitleOverlay.classList.remove('visible');
@@ -1851,6 +2122,39 @@ function updateSubtitlePreview(segments) {
   subtitleOverlay.style.color = color;
   subtitleOverlay.style.webkitTextFillColor = color;
   subtitleOverlay.classList.add('visible');
+}
+
+function updateSourceMaskPreview() {
+  const enabled = document.querySelector('#maskEnabled').value === 'true';
+  sourceMaskOverlay.classList.toggle('visible', enabled);
+  maskPreviewVideo.classList.toggle('visible', false);
+  if (!enabled) {
+    maskPreviewVideo.pause();
+    return;
+  }
+  const scale = assScriptScale();
+  const mode = document.querySelector('#maskMode').value || 'blur';
+  const height = Math.max(1, Number(document.querySelector('#maskHeight').value || 120));
+  const marginV = Math.max(0, Number(document.querySelector('#maskMarginV').value || 0));
+  const opacity = Math.max(0, Math.min(1, Number(document.querySelector('#maskOpacity').value || 0.82)));
+  const blur = Math.max(1, Number(document.querySelector('#maskBlur').value || 24));
+  const scaledHeight = Math.max(1, height * scale);
+  const scaledBottom = Math.max(0, marginV * scale);
+  const stageHeight = Math.max(1, videoStage.clientHeight || assPlayRes.y || 1);
+  const clipTop = Math.max(0, stageHeight - scaledBottom - scaledHeight);
+  const clipBottom = Math.max(0, scaledBottom);
+  sourceMaskOverlay.style.height = scaledHeight + 'px';
+  sourceMaskOverlay.style.bottom = scaledBottom + 'px';
+  if (mode === 'bar') {
+    sourceMaskOverlay.style.background = `rgba(0, 0, 0, ${opacity})`;
+    maskPreviewVideo.pause();
+  } else {
+    maskPreviewVideo.classList.add('visible');
+    maskPreviewVideo.style.clipPath = `inset(${clipTop}px 0 ${clipBottom}px 0)`;
+    maskPreviewVideo.style.filter = `blur(${Math.max(1, blur * scale)}px)`;
+    sourceMaskOverlay.style.background = 'rgba(0, 0, 0, 0.18)';
+    syncMaskPreviewPlayback();
+  }
 }
 
 function subtitleTextStroke(scale) {

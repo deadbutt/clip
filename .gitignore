@@ -11,6 +11,7 @@ outputs/
 examples/*
 !examples/*.md
 runs/
+tools/
 
 # Large or transient runtime files.
 *.safetensors

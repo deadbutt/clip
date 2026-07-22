@@ -40,6 +40,12 @@ class SubtitleStyle:
     outline: int = 3
     shadow: int = 1
     speaker_names: dict[str, str] | None = None
+    mask_enabled: bool = False
+    mask_mode: str = "blur"
+    mask_height: int = 120
+    mask_margin_v: int = 0
+    mask_opacity: float = 0.82
+    mask_blur: int = 24
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "SubtitleStyle":
@@ -58,8 +64,17 @@ class SubtitleStyle:
                     setattr(style, field, names or None)
             elif field in {"alignment", "margin_v", "outline", "shadow"}:
                 setattr(style, field, int(value))
-            elif field in {"show_speaker", "speaker_colors"}:
+            elif field in {"mask_height", "mask_margin_v"}:
+                setattr(style, field, int(value))
+            elif field == "mask_opacity":
+                setattr(style, field, float(value))
+            elif field == "mask_blur":
+                setattr(style, field, int(value))
+            elif field in {"show_speaker", "speaker_colors", "mask_enabled"}:
                 setattr(style, field, bool(value))
+            elif field == "mask_mode":
+                mode = str(value)
+                setattr(style, field, mode if mode in {"blur", "bar"} else "blur")
             else:
                 setattr(style, field, str(value))
         return style
