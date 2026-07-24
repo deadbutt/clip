@@ -21,11 +21,42 @@ from moss_transcribe_diarize.subtitle import (
     write_text,
 )
 
-from .ffmpeg import burn_ass_subtitles, detect_ffmpeg, probe_video_size
+from .ffmpeg import burn_ass_subtitles, detect_ffmpeg, probe_media_duration, probe_video_size
 from .model_runner import ModelRunner
 
 
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
+
+# Audio consumes ~12.5 prompt tokens/sec (Whisper 30s -> 375 tokens after 4x merge).
+# Transcript output is ~10 generated tokens/sec of speech; use 14 with a safety margin
+# so a single pass is unlikely to hit the limit and force a costly re-run.
+_AUDIO_TOKENS_PER_SECOND = 12.5
+_OUTPUT_TOKENS_PER_SECOND = 14.0
+_MIN_MAX_NEW_TOKENS = 2048
+_MAX_MAX_NEW_TOKENS = 65536
+_TOKEN_ROUNDING = 512
+
+
+def recommend_max_new_tokens(
+    duration_sec: float | None,
+    *,
+    max_length: int = 131072,
+) -> int | None:
+    """Suggest a non-truncating ``max_new_tokens`` for an audio of the given duration.
+
+    Returns ``None`` when the duration is unknown, leaving any caller-provided
+    value untouched. The result is clamped to a safe range and rounded so that
+    ``prompt + output`` stays within ``max_length``.
+    """
+    if duration_sec is None or duration_sec <= 0:
+        return None
+    raw = duration_sec * _OUTPUT_TOKENS_PER_SECOND
+    recommended = max(_MIN_MAX_NEW_TOKENS, int((raw + _TOKEN_ROUNDING - 1) // _TOKEN_ROUNDING) * _TOKEN_ROUNDING)
+    # Reserve room for the audio prompt so prompt + output fits the context window.
+    prompt_estimate = int(duration_sec * _AUDIO_TOKENS_PER_SECOND)
+    context_ceiling = max(_MIN_MAX_NEW_TOKENS, max_length - prompt_estimate - _TOKEN_ROUNDING)
+    recommended = min(recommended, context_ceiling, _MAX_MAX_NEW_TOKENS)
+    return max(_MIN_MAX_NEW_TOKENS, recommended)
 
 
 @dataclass(slots=True)
@@ -381,6 +412,8 @@ class JobManager:
                 save = generated_tokens is None or self._should_save_live_progress(job.id)
                 self._set_status(job, status, progress if progress is not None else job.progress, save=save)
 
+            self._apply_auto_max_new_tokens(job)
+
             result = self.model_runner.transcribe(
                 job.input_path,
                 prompt=job.inference_prompt,
@@ -402,6 +435,19 @@ class JobManager:
         except Exception as exc:
             self._set_status(job, "failed", 1.0, error=str(exc))
             self._progress_save_times.pop(job.id, None)
+
+    def _apply_auto_max_new_tokens(self, job: JobRecord) -> None:
+        """Raise ``max_new_tokens`` to a non-truncating floor based on audio duration.
+
+        Only ever increases the value, so an explicit user override that is already
+        large enough is left untouched. If the duration cannot be probed (e.g. a
+        non-media file or ffprobe unavailable), the configured value is kept as-is.
+        """
+        duration = probe_media_duration(job.input_path)
+        recommended = recommend_max_new_tokens(duration, max_length=job.max_length)
+        if recommended is not None and recommended > job.max_new_tokens:
+            job.max_new_tokens = recommended
+            self._save_job(job)
 
     def _render_job(self, job_id: str, style: SubtitleStyle) -> None:
         job = self.get_job(job_id)

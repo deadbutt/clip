@@ -49,6 +49,19 @@ class SubtitleExportTest(unittest.TestCase):
 
         self.assertIn("Alice: hello", text)
 
+    def test_export_ass_merges_overlapping_segments_into_multiline_events(self):
+        text = export_ass(
+            [
+                SubtitleSegment("seg_0001", 1.0, 5.0, "S01", "first"),
+                SubtitleSegment("seg_0002", 3.0, 4.0, "S02", "second"),
+            ],
+            style=SubtitleStyle(show_speaker=False, speaker_colors=False),
+        )
+
+        self.assertIn("Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,first", text)
+        self.assertIn("Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,first\\Nsecond", text)
+        self.assertIn("Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,first", text)
+
     def test_export_json(self):
         data = json.loads(export_json([SubtitleSegment("seg_0001", 0, 1, "S01", "hello")]))
 

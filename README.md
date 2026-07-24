@@ -392,6 +392,28 @@ mtd-subtitle /path/to/input.mp4 \
   --render
 ```
 
+### Long audio: use the vLLM backend
+
+The default HF backend is fine for short clips, but on long video every generated token attends back over the full audio context, so decode speed drops sharply with duration (a 9-minute video may run at only ~2 tok/s on a consumer GPU). For long video (>5 min) switch to the vLLM backend: its chunked prefill and paged KV cache are far faster on long context, while still taking the full audio in a single pass so speaker IDs stay consistent throughout.
+
+> vLLM is Linux-only. On Windows run it under WSL2 (see "Windows one-click" below); on Linux use `mtd-serve` directly.
+
+**Windows one-click (WSL2)**: double-click `start_vllm.bat` in the repo root. It auto-installs vLLM inside WSL2 Ubuntu (first run, ~5-15 min), starts the vLLM server in a new window, waits for it to be ready, then starts the Windows-side web app and opens the browser. Prerequisites: WSL2 + Ubuntu enabled, and the NVIDIA WSL driver working (`wsl nvidia-smi` shows the GPU). Helper scripts: `setup_wsl_vllm.sh` (one-time install), `serve_wsl.sh` (start the server).
+
+**Linux / manual**: two terminals:
+
+```bash
+# Terminal 1: start the vLLM server (wraps sensible --max-model-len / --gpu-memory-utilization defaults)
+mtd-serve --model OpenMOSS-Team/MOSS-Transcribe-Diarize
+
+# Terminal 2: start the web app, pointed at vLLM
+mtd-subtitle-web --backend vllm --vllm-base-url http://127.0.0.1:8000/v1
+```
+
+> On a single 8GB GPU, keep a single pass under ~30 minutes; longer audio needs chunking. Exceeding VRAM fails with an OOM error. `start_vllm.bat` / `serve_wsl.sh` default to `--max-model-len 32768` (safe for 8GB); raise it on larger GPUs.
+
+`max_new_tokens` defaults to 8192 and the server auto-raises it to a non-truncating floor based on audio duration (capped at 65536), so manual tuning is usually unnecessary; override it in the "输出 tokens" / output-tokens field if you need precise control.
+
 ## Citation
 
 If you use MOSS-Transcribe-Diarize, please cite the technical report:

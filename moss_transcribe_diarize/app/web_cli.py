@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--max-new-tokens", type=int, default=8192)
     parser.add_argument("--max-len", type=int, default=131072)
     parser.add_argument("--decoding", choices=["greedy", "sample"], default="greedy")
     parser.add_argument("--temperature", type=float, default=1.0)

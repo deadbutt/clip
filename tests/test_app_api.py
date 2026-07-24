@@ -178,6 +178,37 @@ class AppApiTest(unittest.TestCase):
             self.assertEqual(deleted.status_code, 200)
             self.assertEqual(client.get(f"/api/jobs/{job_id}").status_code, 404)
 
+    def test_auto_max_new_tokens_bumped_by_duration(self):
+        from fastapi.testclient import TestClient
+        from moss_transcribe_diarize.app.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            runner = FakeRunner()
+            app.state.manager.model_runner = runner
+            client = TestClient(app)
+
+            with patch("moss_transcribe_diarize.app.jobs.probe_media_duration", return_value=1800.0):
+                created = client.post(
+                    "/api/jobs",
+                    files={"file": ("sample.wav", b"audio", "audio/wav")},
+                    data={"max_new_tokens": "2048"},
+                )
+                self.assertEqual(created.status_code, 200)
+                job_id = created.json()["id"]
+                job = {}
+                for _ in range(40):
+                    job = client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] == "waiting_review":
+                        break
+                    time.sleep(0.05)
+
+            self.assertEqual(job["status"], "waiting_review")
+            # 1800s of audio -> recommended 25600, which overrides the requested 2048.
+            self.assertEqual(job["inference"]["max_new_tokens"], 25600)
+            self.assertEqual(job["usage"]["max_new_tokens"], 25600)
+            self.assertEqual(runner.calls[-1]["max_new_tokens"], 25600)
+
     def test_running_job_exposes_live_token_progress(self):
         from fastapi.testclient import TestClient
         from moss_transcribe_diarize.app.server import create_app

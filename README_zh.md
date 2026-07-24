@@ -392,6 +392,28 @@ mtd-subtitle /path/to/input.mp4 \
   --render
 ```
 
+### 长音频推荐：vLLM 后端
+
+默认的 HF 后端适合短音频，但在长视频上每生成一个 token 都要对整段音频上下文做注意力，速度会随音频时长显著下降（9 分钟视频在消费级 GPU 上可能只有 ~2 tok/s）。对于长视频（>5 分钟）建议切换到 vLLM 后端，它通过 chunked prefill 与 paged KV cache 在长上下文上快得多，且仍保持单次输入完整音频、说话人编号全程一致。
+
+> vLLM 仅支持 Linux。Windows 用户通过 WSL2 运行（见下文“Windows 一键”）；Linux 用户直接用 `mtd-serve`。
+
+**Windows 一键（WSL2）**：双击仓库根目录的 `start_vllm.bat`。它会自动在 WSL2 Ubuntu 里装好 vLLM（首次约 5-15 分钟），在新窗口启动 vLLM 服务，等就绪后启动 Windows 侧的 Web 应用并自动打开浏览器。前提：已启用 WSL2 + Ubuntu，且 NVIDIA WSL 驱动就绪（`wsl nvidia-smi` 能看到 GPU）。相关脚本：`setup_wsl_vllm.sh`（一次性安装）、`serve_wsl.sh`（启动服务）。
+
+**Linux / 手动**：两个终端：
+
+```bash
+# 终端 1：启动 vLLM 服务（已封装 --max-model-len、--gpu-memory-utilization 等合理默认）
+mtd-serve --model OpenMOSS-Team/MOSS-Transcribe-Diarize
+
+# 终端 2：启动 web 应用，指向 vLLM
+mtd-subtitle-web --backend vllm --vllm-base-url http://127.0.0.1:8000/v1
+```
+
+> 单卡 8GB 显存下，单次转写建议不超过约 30 分钟；更长的音频需要切片处理。超出显存会以 OOM 报错失败。`start_vllm.bat` / `serve_wsl.sh` 默认 `--max-model-len 32768`，8GB 卡安全；显存更大可调高。
+
+`max_new_tokens` 默认 8192，且服务端会按音频时长自动抬高到不致截断的下限（上限 65536），一般无需手动调整；如需精确控制可在界面的"输出 tokens"输入框覆盖。
+
 ## 引用
 
 如果你使用了 MOSS-Transcribe-Diarize，请引用我们的技术报告：

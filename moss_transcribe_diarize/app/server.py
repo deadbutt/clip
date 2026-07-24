@@ -18,7 +18,7 @@ def create_app(
     dtype: str = "bf16",
     prompt: str = DEFAULT_PROMPT,
     max_length: int = 131072,
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 8192,
     decoding: str = "greedy",
     temperature: float | None = None,
     backend: str = "hf",
@@ -305,11 +305,9 @@ INDEX_HTML = """<!doctype html>
     main {
       height: calc(100vh - 56px);
       display: grid;
-      grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
       overflow: hidden;
-    }
-    body.sidebar-collapsed main {
-      grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr);
     }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
     input, select, button, textarea {
@@ -442,6 +440,13 @@ INDEX_HTML = """<!doctype html>
       border-right: 0;
       background: #f4f1e9;
     }
+    .sidebar-body {
+      min-height: 0;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+    }
+    .sidebar-body .task-list { overflow: visible; }
     .sidebar-head {
       padding: 14px;
       border-bottom: 1px solid var(--line);
@@ -575,6 +580,7 @@ INDEX_HTML = """<!doctype html>
       min-width: 54px;
     }
     .content {
+      height: 100%;
       min-width: 0;
       min-height: 0;
       overflow: hidden;
@@ -657,21 +663,160 @@ INDEX_HTML = """<!doctype html>
     }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .process-panel .progress { margin: 16px 0 8px; }
+    .task-view {
+      height: 100%;
+      overflow: auto;
+      padding: 20px 28px 28px;
+    }
+    .task-view-inner {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      max-width: 1280px;
+      margin: 0 auto;
+      align-items: start;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 16px;
+    }
+    .upload-card { display: flex; flex-direction: column; gap: 10px; }
+    .jobs-card { display: flex; flex-direction: column; min-height: 0; }
+    .jobs-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .jobs-head strong { font-size: 15px; }
+    .jobs-tools { display: inline-flex; align-items: center; gap: 8px; }
+    .jobs-card .task-list {
+      overflow: visible;
+      padding: 6px;
+    }
+    .pending-list { display: flex; flex-direction: column; gap: 8px; }
+    .pending-item {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fffdfa;
+      padding: 8px 10px;
+    }
+    .pending-item-head { display: flex; align-items: center; gap: 8px; }
+    .pending-item-name {
+      flex: 1 1 0;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .pending-item-summary { color: var(--muted); font-size: 12px; }
+    .pending-item-body { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .pending-item-body.is-hidden { display: none; }
+    .pending-toggle {
+      min-height: 26px;
+      padding: 2px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      background: transparent;
+    }
+    .pending-remove {
+      min-height: 26px;
+      padding: 2px 8px;
+      font-size: 14px;
+      line-height: 1;
+      color: var(--muted);
+      background: transparent;
+    }
+    .workbench-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
+      min-height: 40px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fffdfa;
+    }
+    .workbench-bar .bar-name {
+      font-weight: 700;
+      font-size: 14px;
+      max-width: 30ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .workbench-bar .bar-spacer { flex: 1 1 auto; }
+    .workbench-bar .bar-progress { width: 120px; margin: 0; }
+    .workbench-bar .icon-btn {
+      min-height: 34px;
+      width: 38px;
+      padding: 0;
+      font-size: 18px;
+      line-height: 1;
+    }
+    .workbench-bar .save-status { font-size: 12px; color: var(--muted); }
+    .workbench-bar .render-progress-meta { font-size: 12px; color: var(--muted); }
+    .settings-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(20, 22, 26, 0.5);
+    }
+    .settings-modal.is-hidden { display: none; }
+    .settings-modal-card {
+      width: min(560px, 100%);
+      max-height: min(80vh, 720px);
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+      overflow: hidden;
+    }
+    .settings-modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .settings-modal-body {
+      padding: 12px 16px 16px;
+      overflow: auto;
+    }
+    .settings-modal-body .group:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
     .workbench {
       height: 100%;
       padding: 12px 14px 14px;
       overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
     .editor-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 300px;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 12px;
-      height: 100%;
+      flex: 1 1 0;
       min-height: 0;
     }
     .preview-column {
       display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
       gap: 10px;
       min-width: 0;
       min-height: 0;
@@ -753,6 +898,7 @@ INDEX_HTML = """<!doctype html>
     .source-mask-overlay.visible { display: block; }
     .timeline-panel {
       min-width: 0;
+      min-height: 0;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: #181b20;
@@ -760,6 +906,8 @@ INDEX_HTML = """<!doctype html>
       color: #e9edf2;
       user-select: none;
       -webkit-user-select: none;
+      display: flex;
+      flex-direction: column;
     }
     .timeline-panel * {
       user-select: none;
@@ -818,8 +966,9 @@ INDEX_HTML = """<!doctype html>
     .timeline-scroll {
       position: relative;
       overflow-x: auto;
-      overflow-y: hidden;
-      height: 112px;
+      overflow-y: auto;
+      flex: 1 1 0;
+      min-height: 0;
       cursor: pointer;
       touch-action: none;
       background:
@@ -830,7 +979,7 @@ INDEX_HTML = """<!doctype html>
     .timeline-track {
       position: relative;
       min-width: 100%;
-      height: 100%;
+      min-height: 100%;
     }
     .timeline-ruler {
       position: absolute;
@@ -862,8 +1011,10 @@ INDEX_HTML = """<!doctype html>
       left: 0;
       right: 0;
       top: 32px;
-      height: 80px;
-      background: linear-gradient(to bottom, #151922, #111419);
+      min-height: 140px;
+      background:
+        repeating-linear-gradient(to bottom, rgba(255,255,255,0.04) 0 1px, transparent 1px 44px),
+        linear-gradient(to bottom, #151922, #111419);
     }
     .timeline-lane::before {
       content: "SUB";
@@ -873,7 +1024,7 @@ INDEX_HTML = """<!doctype html>
       z-index: 3;
       display: inline-flex;
       align-items: center;
-      height: 80px;
+      height: 100%;
       width: 46px;
       padding-left: 10px;
       color: #697586;
@@ -885,20 +1036,39 @@ INDEX_HTML = """<!doctype html>
     .timeline-segment {
       position: absolute;
       top: 45px;
-      height: 50px;
+      height: 36px;
       min-width: 8px;
       border: 1px solid rgba(104, 224, 209, 0.45);
       border-radius: 6px;
       background: linear-gradient(180deg, #226d69, #174c49);
       color: #eefdfb;
-      cursor: pointer;
+      cursor: grab;
       overflow: hidden;
-      padding: 5px 7px;
+      padding: 4px 7px;
       font-size: 11px;
       line-height: 1.2;
       text-align: left;
       touch-action: none;
       transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+    }
+    .timeline-segment:active { cursor: grabbing; }
+    .timeline-segment::before,
+    .timeline-segment::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      cursor: ew-resize;
+      z-index: 1;
+    }
+    .timeline-segment::before { left: 0; }
+    .timeline-segment::after { right: 0; }
+    .timeline-segment.dragging {
+      cursor: grabbing;
+      z-index: 6;
+      transition: none;
+      box-shadow: 0 0 0 2px rgba(133, 255, 243, 0.55), 0 10px 24px rgba(0, 0, 0, 0.42);
     }
     .timeline-segment:hover {
       border-color: #85fff3;
@@ -908,7 +1078,7 @@ INDEX_HTML = """<!doctype html>
       background: linear-gradient(180deg, #20a69d, #007d77);
       border-color: #b1fff8;
       color: white;
-      transform: translateY(-3px);
+      transform: translateY(-2px);
       box-shadow: 0 0 0 2px rgba(133, 255, 243, 0.22), 0 8px 20px rgba(0, 0, 0, 0.32);
     }
     .timeline-segment-speaker {
@@ -924,7 +1094,7 @@ INDEX_HTML = """<!doctype html>
     }
     .timeline-segment-text {
       display: -webkit-box;
-      -webkit-line-clamp: 2;
+      -webkit-line-clamp: 1;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
@@ -952,6 +1122,58 @@ INDEX_HTML = """<!doctype html>
       transform: translateX(-50%);
       pointer-events: auto;
     }
+    .timeline-guide {
+      position: absolute;
+      top: 32px;
+      bottom: 0;
+      width: 3px;
+      display: none;
+      pointer-events: none;
+      z-index: 12;
+      background: rgba(255, 255, 255, 0.96);
+      transform: translateX(-1.5px);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.65), 0 0 18px rgba(255, 255, 255, 0.95);
+    }
+    .timeline-guide.visible.snapped { display: block; }
+    .timeline-guide.snapped {
+      background: #ffffff;
+    }
+    .timeline-guide::before,
+    .timeline-guide::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      transform: translateX(calc(-50% + var(--guide-label-offset, 0px)));
+    }
+    .timeline-guide::before {
+      top: -1px;
+      border-left-width: 7px;
+      border-right-width: 7px;
+      border-top: 11px solid #ffffff;
+      border-bottom: 0;
+      transform: translateX(-50%);
+      filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.8));
+    }
+    .timeline-guide::after {
+      top: 12px;
+      width: auto;
+      height: 16px;
+      padding: 0 5px;
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      border-radius: 3px;
+      background: #ffffff;
+      color: #111419;
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 15px;
+      white-space: nowrap;
+      content: attr(data-label);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+    }
     .table-wrap {
       overflow: auto;
       min-width: 0;
@@ -960,6 +1182,39 @@ INDEX_HTML = """<!doctype html>
       border-radius: 6px;
       background: var(--panel);
       scrollbar-gutter: stable;
+    }
+    .table-column {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .table-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 32px;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      background: #fffdfa;
+      flex: 0 0 auto;
+    }
+    .table-head .table-title {
+      color: var(--text);
+      font-weight: 700;
+    }
+    .table-column .table-wrap {
+      flex: 1 1 0;
+      min-height: 0;
+      border: 0;
+      border-radius: 0;
     }
     .subtitle-table {
       width: 100%;
@@ -1100,12 +1355,6 @@ INDEX_HTML = """<!doctype html>
       color: var(--text);
       font-variant-numeric: tabular-nums;
     }
-    .inspector {
-      border-left: 1px solid var(--line);
-      padding-left: 14px;
-      min-width: 0;
-      overflow: auto;
-    }
     .group {
       border-bottom: 1px solid var(--line);
       padding: 0 0 16px;
@@ -1148,13 +1397,10 @@ INDEX_HTML = """<!doctype html>
     @media (max-width: 900px) {
       body { overflow: auto; }
       main { height: auto; grid-template-columns: 1fr; }
-      body.sidebar-collapsed main { grid-template-columns: 1fr; }
-      .sidebar { min-height: 260px; border-right: 0; border-bottom: 1px solid var(--line); }
-      .sidebar-collapsed .sidebar { min-height: 42px; }
-      .sidebar-toggle-zone { display: none; }
       .view, .workbench { height: auto; }
       .editor-grid { grid-template-columns: 1fr; }
-      .inspector { border-left: 0; padding-left: 0; }
+      .table-column { border: 0; }
+      .task-view-inner { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1164,64 +1410,62 @@ INDEX_HTML = """<!doctype html>
     <span id="runtime" class="pill">检测中</span>
   </header>
   <main>
-    <aside class="sidebar">
-      <div class="sidebar-head">
-        <div class="sidebar-title">
-          <strong>任务</strong>
-        </div>
-        <div class="sidebar-tools">
-          <span id="jobCount" class="meta">0 个任务</span>
-          <button id="refreshJobs" class="small ghost">刷新</button>
-        </div>
-        <button id="newTask" class="primary sidebar-primary">导入媒体</button>
-      </div>
-      <div class="sidebar-toggle-zone">
-        <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="收起任务栏" title="收起任务栏"></button>
-      </div>
-      <div id="jobList" class="task-list"></div>
-    </aside>
     <section class="content">
-      <section id="importView" class="view center-view">
-        <div class="import-panel">
-          <h2 id="importTitle" class="view-title">导入媒体</h2>
-          <label for="file">媒体文件</label>
-          <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" />
-          <div id="rerunSource" class="meta" style="margin-top:8px"></div>
-          <details class="advanced">
-            <summary>
-              <span>
-                <span class="advanced-title">推理参数</span>
-                <span class="advanced-hint">默认不用改</span>
-              </span>
-            </summary>
-            <div class="advanced-body">
-              <label for="prompt" style="margin-top:10px">推理 Prompt</label>
-              <textarea id="prompt" class="prompt-input"></textarea>
-              <div class="row" style="margin-top:10px">
-                <div>
-                  <label for="maxNewTokens">输出 tokens</label>
-                  <input id="maxNewTokens" type="number" min="1" step="1" value="2048" />
+      <section id="importView" class="view task-view">
+        <div class="task-view-inner">
+          <div class="panel upload-card">
+            <h2 id="importTitle" class="view-title">任务管理</h2>
+            <label for="file">选择媒体文件（可多选）</label>
+            <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
+            <div id="rerunSource" class="meta" style="margin-top:8px"></div>
+            <details class="advanced">
+              <summary>
+                <span>
+                  <span class="advanced-title">默认推理参数</span>
+                  <span class="advanced-hint">新文件继承此参数，可在下方逐个修改</span>
+                </span>
+              </summary>
+              <div class="advanced-body">
+                <label for="prompt" style="margin-top:10px">推理 Prompt</label>
+                <textarea id="prompt" class="prompt-input"></textarea>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="maxNewTokens">输出 tokens</label>
+                    <input id="maxNewTokens" type="number" min="1" step="1" value="8192" title="留默认或留空时，服务端会按音频时长自动抬高以避免截断" />
+                  </div>
+                  <div>
+                    <label for="maxLen">上下文上限</label>
+                    <input id="maxLen" type="number" min="1" step="1" value="131072" />
+                  </div>
                 </div>
-                <div>
-                  <label for="maxLen">上下文上限</label>
-                  <input id="maxLen" type="number" min="1" step="1" value="131072" />
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="decoding">解码</label>
+                    <select id="decoding"><option value="greedy">greedy</option><option value="sample">sample</option></select>
+                  </div>
+                  <div>
+                    <label for="temperature">温度</label>
+                    <input id="temperature" type="number" min="0.01" step="0.05" value="1.0" />
+                  </div>
                 </div>
+                <div id="modelinfo" class="meta" style="margin-top:8px"></div>
               </div>
-              <div class="row" style="margin-top:10px">
-                <div>
-                  <label for="decoding">解码</label>
-                  <select id="decoding"><option value="greedy">greedy</option><option value="sample">sample</option></select>
-                </div>
-                <div>
-                  <label for="temperature">温度</label>
-                  <input id="temperature" type="number" min="0.01" step="0.05" value="1.0" />
-                </div>
+            </details>
+            <div id="pendingList" class="pending-list"></div>
+            <button id="upload" class="primary">全部开始转写</button>
+            <div id="importError" class="error" style="margin-top:10px"></div>
+          </div>
+          <div class="panel jobs-card">
+            <div class="jobs-head">
+              <strong>任务列表</strong>
+              <div class="jobs-tools">
+                <span id="jobCount" class="meta">0 个任务</span>
+                <button id="refreshJobs" class="small ghost">刷新</button>
+                <button id="newTask" class="small primary">新建任务</button>
               </div>
-              <div id="modelinfo" class="meta" style="margin-top:8px"></div>
             </div>
-          </details>
-          <button id="upload" class="primary">开始转写</button>
-          <div id="importError" class="error" style="margin-top:10px"></div>
+            <div id="jobList" class="task-list"></div>
+          </div>
         </div>
       </section>
       <section id="processingView" class="view center-view is-hidden">
@@ -1238,6 +1482,19 @@ INDEX_HTML = """<!doctype html>
         </div>
       </section>
       <section id="workbench" class="view workbench is-hidden">
+        <div class="workbench-bar">
+          <button id="backToTasks" class="ghost" type="button">← 任务</button>
+          <span id="selectedName" class="bar-name"></span>
+          <span id="taskStatus" class="pill">待校对</span>
+          <span id="taskNotice" class="task-notice is-hidden"></span>
+          <span id="renderProgressMeta" class="render-progress-meta is-hidden"><span>烧录进度</span><strong id="renderProgressText">0%</strong></span>
+          <div id="renderProgress" class="progress bar-progress is-hidden"><div id="renderProgressBar" class="bar"></div></div>
+          <div class="bar-spacer"></div>
+          <span id="saveStatus" class="save-status saved">已保存</span>
+          <button id="save" class="primary is-hidden">保存修改</button>
+          <button id="render" class="warn" disabled>检测 FFmpeg...</button>
+          <button id="openSettings" class="ghost icon-btn" type="button" title="设置" aria-label="设置">⚙</button>
+        </div>
         <div class="editor-grid">
           <div class="preview-column">
             <div class="video-shell">
@@ -1262,8 +1519,14 @@ INDEX_HTML = """<!doctype html>
                   <div id="timelineRuler" class="timeline-ruler"></div>
                   <div id="timelineLane" class="timeline-lane"></div>
                   <div id="timelinePlayhead" class="timeline-playhead"></div>
+                  <div id="timelineGuide" class="timeline-guide"></div>
                 </div>
               </div>
+            </div>
+          </div>
+          <div class="table-column">
+            <div class="table-head">
+              <span class="table-title">字幕</span>
             </div>
             <div class="table-wrap">
               <table class="subtitle-table">
@@ -1280,95 +1543,88 @@ INDEX_HTML = """<!doctype html>
               </table>
             </div>
           </div>
-          <div class="inspector">
-            <div class="group">
-              <div class="task-header">
-                <label style="margin:0">当前任务</label>
-                <span id="taskStatus" class="pill">待校对</span>
+        </div>
+        <div id="settingsModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card">
+            <div class="settings-modal-head">
+              <strong>设置</strong>
+              <button id="closeSettings" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div class="group">
+                <label>任务信息</label>
+                <div id="taskUsage" class="meta task-meta"></div>
+                <div id="taskParams" class="meta task-meta"></div>
               </div>
-              <div id="selectedName" class="task-title"></div>
-              <div id="taskUsage" class="meta task-meta"></div>
-              <div id="taskParams" class="meta task-meta"></div>
-              <div id="taskNotice" class="task-notice is-hidden"></div>
-              <div id="renderProgressMeta" class="render-progress-meta is-hidden">
-                <span>烧录进度</span>
-                <strong id="renderProgressText">0%</strong>
+              <div class="group">
+                <label>说话人名称</label>
+                <div id="speakerMap" class="speaker-map"></div>
               </div>
-              <div id="renderProgress" class="progress is-hidden" style="margin:10px 0 8px"><div id="renderProgressBar" class="bar"></div></div>
-              <button id="render" class="warn primary-action" disabled>检测 FFmpeg...</button>
-              <div class="secondary-actions">
-                <div>
-                  <button id="save" class="primary is-hidden">保存修改</button>
-                  <div id="saveStatus" class="save-status saved">已保存</div>
+              <div class="group">
+                <div class="row">
+                  <div>
+                    <label for="fontSize">字号</label>
+                    <input id="fontSize" type="number" min="18" max="96" value="48" />
+                  </div>
+                  <div>
+                    <label for="marginV">底边距</label>
+                    <input id="marginV" type="number" min="12" max="220" value="56" />
+                  </div>
                 </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="showSpeaker">说话人</label>
+                    <select id="showSpeaker"><option value="true">显示</option><option value="false">隐藏</option></select>
+                  </div>
+                  <div>
+                    <label for="speakerColors">颜色</label>
+                    <select id="speakerColors"><option value="true">按说话人</option><option value="false">统一</option></select>
+                  </div>
+                </div>
+              </div>
+              <div class="group">
+                <label for="maskEnabled">原字幕遮挡</label>
+                <select id="maskEnabled">
+                  <option value="false">关闭</option>
+                  <option value="true">开启</option>
+                </select>
+                <div style="margin-top:10px">
+                  <label for="maskMode">遮挡方式</label>
+                  <select id="maskMode">
+                    <option value="blur">模糊原字幕区域</option>
+                    <option value="bar">黑底遮挡</option>
+                  </select>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="maskHeight">遮挡高度</label>
+                    <input id="maskHeight" type="number" min="12" max="360" value="120" />
+                  </div>
+                  <div>
+                    <label for="maskMarginV">离底距离</label>
+                    <input id="maskMarginV" type="number" min="0" max="360" value="0" />
+                  </div>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="maskBlur">模糊强度</label>
+                    <input id="maskBlur" type="number" min="1" max="80" value="24" />
+                  </div>
+                  <div>
+                    <label for="maskOpacity">黑底透明度</label>
+                    <input id="maskOpacity" type="number" min="0" max="1" step="0.05" value="0.82" />
+                  </div>
+                </div>
+              </div>
+              <div class="group">
+                <label>输出</label>
+                <div class="downloads" id="downloads"></div>
+                <button id="exportFolder" class="ghost" type="button" style="margin-top:8px">选择文件夹保存</button>
+                <div id="exportStatus" class="export-status"></div>
+              </div>
+              <div class="group">
                 <button id="rerun" class="ghost">重新转写</button>
               </div>
-            </div>
-            <div class="group">
-              <label>说话人名称</label>
-              <div id="speakerMap" class="speaker-map"></div>
-            </div>
-            <div class="group">
-              <div class="row">
-                <div>
-                  <label for="fontSize">字号</label>
-                  <input id="fontSize" type="number" min="18" max="96" value="48" />
-                </div>
-                <div>
-                  <label for="marginV">底边距</label>
-                  <input id="marginV" type="number" min="12" max="220" value="56" />
-                </div>
-              </div>
-              <div class="row" style="margin-top:10px">
-                <div>
-                  <label for="showSpeaker">说话人</label>
-                  <select id="showSpeaker"><option value="true">显示</option><option value="false">隐藏</option></select>
-                </div>
-                <div>
-                  <label for="speakerColors">颜色</label>
-                  <select id="speakerColors"><option value="true">按说话人</option><option value="false">统一</option></select>
-                </div>
-              </div>
-            </div>
-            <div class="group">
-              <label for="maskEnabled">原字幕遮挡</label>
-              <select id="maskEnabled">
-                <option value="false">关闭</option>
-                <option value="true">开启</option>
-              </select>
-              <div style="margin-top:10px">
-                <label for="maskMode">遮挡方式</label>
-                <select id="maskMode">
-                  <option value="blur">模糊原字幕区域</option>
-                  <option value="bar">黑底遮挡</option>
-                </select>
-              </div>
-              <div class="row" style="margin-top:10px">
-                <div>
-                  <label for="maskHeight">遮挡高度</label>
-                  <input id="maskHeight" type="number" min="12" max="360" value="120" />
-                </div>
-                <div>
-                  <label for="maskMarginV">离底距离</label>
-                  <input id="maskMarginV" type="number" min="0" max="360" value="0" />
-                </div>
-              </div>
-              <div class="row" style="margin-top:10px">
-                <div>
-                  <label for="maskBlur">模糊强度</label>
-                  <input id="maskBlur" type="number" min="1" max="80" value="24" />
-                </div>
-                <div>
-                  <label for="maskOpacity">黑底透明度</label>
-                  <input id="maskOpacity" type="number" min="0" max="1" step="0.05" value="0.82" />
-                </div>
-              </div>
-            </div>
-            <div class="group">
-              <label>输出</label>
-              <div class="downloads" id="downloads"></div>
-              <button id="exportFolder" class="ghost" type="button" style="margin-top:8px">选择文件夹保存</button>
-              <div id="exportStatus" class="export-status"></div>
             </div>
           </div>
         </div>
@@ -1391,9 +1647,13 @@ const temperatureInput = document.querySelector('#temperature');
 const uploadBtn = document.querySelector('#upload');
 const newTaskBtn = document.querySelector('#newTask');
 const refreshJobsBtn = document.querySelector('#refreshJobs');
-const sidebarToggleBtn = document.querySelector('#sidebarToggle');
 const deleteCurrentBtn = document.querySelector('#deleteCurrent');
 const openNewBtn = document.querySelector('#openNew');
+const backToTasksBtn = document.querySelector('#backToTasks');
+const openSettingsBtn = document.querySelector('#openSettings');
+const closeSettingsBtn = document.querySelector('#closeSettings');
+const settingsModal = document.querySelector('#settingsModal');
+const pendingListEl = document.querySelector('#pendingList');
 const saveBtn = document.querySelector('#save');
 const renderBtn = document.querySelector('#render');
 const rerunBtn = document.querySelector('#rerun');
@@ -1436,12 +1696,15 @@ const timelineTrack = document.querySelector('#timelineTrack');
 const timelineRuler = document.querySelector('#timelineRuler');
 const timelineLane = document.querySelector('#timelineLane');
 const timelinePlayhead = document.querySelector('#timelinePlayhead');
+const timelineGuide = document.querySelector('#timelineGuide');
 const timelineMeta = document.querySelector('#timelineMeta');
 const downloads = document.querySelector('#downloads');
 const exportStatusEl = document.querySelector('#exportStatus');
 let jobs = [];
 let currentJob = null;
 let rerunDraftJob = null;
+let pendingUploads = [];
+let pendingIdCounter = 0;
 let pollTimer = null;
 let runtimeChecked = false;
 let ffmpegAvailable = false;
@@ -1452,6 +1715,11 @@ let editorDirty = false;
 let saveStatusTimer = 0;
 let speakerNameMap = {};
 let timelineDragging = false;
+let currentPixelsPerSecond = 12;
+let segmentDragState = null;
+const SEGMENT_EDGE_PX = 8;
+const SEGMENT_DRAG_THRESHOLD = 3;
+const SNAP_PX = 18;
 const assFontLineHeightFactor = 1.448;
 const speakerPalette = ['#ffffff', '#ffe75b', '#8ff286', '#ffa7bb', '#ffd700', '#6bb5ff', '#db8eff', '#d8d8d8'];
 const RENDER_PROGRESS_BASE = 0.95;
@@ -1525,25 +1793,8 @@ function scheduleLayoutFit() {
   });
 }
 
-function setSidebarCollapsed(collapsed, persist = true) {
-  document.body.classList.toggle('sidebar-collapsed', collapsed);
-  sidebarToggleBtn.setAttribute('aria-label', collapsed ? '展开任务栏' : '收起任务栏');
-  sidebarToggleBtn.title = collapsed ? '展开任务栏' : '收起任务栏';
-  if (persist) {
-    try {
-      localStorage.setItem('mtdSidebarCollapsed', collapsed ? '1' : '0');
-    } catch (err) {}
-  }
-  scheduleLayoutFit();
-}
-
-function restoreSidebarState() {
-  try {
-    setSidebarCollapsed(localStorage.getItem('mtdSidebarCollapsed') === '1', false);
-  } catch (err) {
-    setSidebarCollapsed(false);
-  }
-}
+function openSettings() { settingsModal.classList.remove('is-hidden'); }
+function closeSettings() { settingsModal.classList.add('is-hidden'); }
 
 function setSaveState(state, message) {
   if (saveStatusTimer) {
@@ -1579,8 +1830,11 @@ decodingSelect.addEventListener('change', updateDecodingControls);
 newTaskBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 openNewBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
-sidebarToggleBtn.addEventListener('click', () => {
-  setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+backToTasksBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
+openSettingsBtn.addEventListener('click', openSettings);
+closeSettingsBtn.addEventListener('click', closeSettings);
+settingsModal.addEventListener('click', (event) => {
+  if (event.target === settingsModal) closeSettings();
 });
 deleteCurrentBtn.addEventListener('click', async () => {
   if (currentJob) await deleteJob(currentJob.id);
@@ -1597,13 +1851,133 @@ jobListEl.addEventListener('click', async (event) => {
   if (item) await selectJob(item.dataset.jobId);
 });
 
+function defaultPendingParams() {
+  return {
+    prompt: promptInput.value,
+    maxNewTokens: maxNewTokensInput.value,
+    maxLen: maxLenInput.value,
+    decoding: decodingSelect.value,
+    temperature: temperatureInput.value
+  };
+}
+
+function pendingSummary(item) {
+  return 'tokens ' + (item.maxNewTokens || '8192') + ' · ' + (item.decoding || 'greedy');
+}
+
+function renderPendingList() {
+  if (!pendingUploads.length) {
+    pendingListEl.innerHTML = '';
+    return;
+  }
+  pendingListEl.innerHTML = pendingUploads.map((item) => `
+    <div class="pending-item" data-id="${item.id}">
+      <div class="pending-item-head">
+        <span class="pending-item-name">${escapeHtml(item.file.name)}</span>
+        <span class="pending-item-summary">${escapeHtml(pendingSummary(item))}</span>
+        <button class="pending-toggle" type="button" data-action="toggle">参数</button>
+        <button class="pending-remove" type="button" data-action="remove" title="移除">✕</button>
+      </div>
+      <div class="pending-item-body${item.expanded ? '' : ' is-hidden'}">
+        <div>
+          <label>推理 Prompt</label>
+          <textarea class="pending-prompt" rows="2">${escapeHtml(item.prompt)}</textarea>
+        </div>
+        <div class="row">
+          <div>
+            <label>输出 tokens</label>
+            <input class="pending-tokens" type="number" min="1" step="1" value="${escapeHtml(String(item.maxNewTokens || ''))}" />
+          </div>
+          <div>
+            <label>上下文上限</label>
+            <input class="pending-maxlen" type="number" min="1" step="1" value="${escapeHtml(String(item.maxLen || ''))}" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>解码</label>
+            <select class="pending-decoding"><option value="greedy"${item.decoding === 'greedy' ? ' selected' : ''}>greedy</option><option value="sample"${item.decoding === 'sample' ? ' selected' : ''}>sample</option></select>
+          </div>
+          <div>
+            <label>温度</label>
+            <input class="pending-temp" type="number" min="0.01" step="0.05" value="${escapeHtml(String(item.temperature || ''))}" />
+          </div>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+function updatePendingSummary(id) {
+  const item = pendingUploads.find((p) => p.id === id);
+  if (!item) return;
+  const row = pendingListEl.querySelector('.pending-item[data-id="' + id + '"] .pending-item-summary');
+  if (row) row.textContent = pendingSummary(item);
+}
+
+function updateUploadBtnLabel() {
+  if (rerunDraftJob) {
+    uploadBtn.textContent = '开始重跑';
+  } else if (pendingUploads.length) {
+    uploadBtn.textContent = '开始转写 ' + pendingUploads.length + ' 个任务';
+  } else {
+    uploadBtn.textContent = '全部开始转写';
+  }
+}
+
+function addPendingFiles(fileList) {
+  for (const file of fileList) {
+    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file, expanded: false }, defaultPendingParams()));
+  }
+  renderPendingList();
+  updateUploadBtnLabel();
+}
+
 fileInput.addEventListener('change', () => {
   if (rerunDraftJob) resetImportMode();
-  const file = fileInput.files[0];
-  if (file) {
-    setPreviewSource(URL.createObjectURL(file));
-    resetVideoStage();
+  if (fileInput.files && fileInput.files.length) {
+    addPendingFiles(fileInput.files);
   }
+  fileInput.value = '';
+});
+
+pendingListEl.addEventListener('click', (event) => {
+  const row = event.target.closest('.pending-item');
+  if (!row) return;
+  const id = Number(row.dataset.id);
+  const action = event.target.dataset.action;
+  if (action === 'toggle') {
+    const item = pendingUploads.find((p) => p.id === id);
+    if (item) {
+      item.expanded = !item.expanded;
+      const body = row.querySelector('.pending-item-body');
+      if (body) body.classList.toggle('is-hidden', !item.expanded);
+    }
+  } else if (action === 'remove') {
+    pendingUploads = pendingUploads.filter((p) => p.id !== id);
+    renderPendingList();
+    updateUploadBtnLabel();
+  }
+});
+
+pendingListEl.addEventListener('input', (event) => {
+  const row = event.target.closest('.pending-item');
+  if (!row) return;
+  const id = Number(row.dataset.id);
+  const item = pendingUploads.find((p) => p.id === id);
+  if (!item) return;
+  if (event.target.classList.contains('pending-prompt')) item.prompt = event.target.value;
+  else if (event.target.classList.contains('pending-tokens')) { item.maxNewTokens = event.target.value; updatePendingSummary(id); }
+  else if (event.target.classList.contains('pending-maxlen')) item.maxLen = event.target.value;
+  else if (event.target.classList.contains('pending-temp')) item.temperature = event.target.value;
+});
+
+pendingListEl.addEventListener('change', (event) => {
+  const row = event.target.closest('.pending-item');
+  if (!row) return;
+  const id = Number(row.dataset.id);
+  const item = pendingUploads.find((p) => p.id === id);
+  if (!item) return;
+  if (event.target.classList.contains('pending-decoding')) { item.decoding = event.target.value; updatePendingSummary(id); }
 });
 
 uploadBtn.addEventListener('click', async () => {
@@ -1611,30 +1985,38 @@ uploadBtn.addEventListener('click', async () => {
     await startRerunDraft();
     return;
   }
-  const file = fileInput.files[0];
-  if (!file) return;
-  const form = new FormData();
-  form.append('file', file);
-  form.append('prompt', promptInput.value);
-  if (maxNewTokensInput.value) form.append('max_new_tokens', maxNewTokensInput.value);
-  if (maxLenInput.value) form.append('max_len', maxLenInput.value);
-  form.append('decoding', decodingSelect.value);
-  if (temperatureInput.value) form.append('temperature', temperatureInput.value);
+  if (!pendingUploads.length) return;
   uploadBtn.disabled = true;
-  advancedDetails.open = false;
   importErrorEl.textContent = '';
-  showProcessingPlaceholder(file.name);
-  const res = await fetch(apiUrl('api/jobs'), { method: 'POST', body: form });
-  const job = await res.json();
-  uploadBtn.disabled = false;
-  if (!res.ok) {
-    importErrorEl.textContent = job.detail || '上传失败';
-    showImportView({ preserveError: true });
-    return;
+  const total = pendingUploads.length;
+  let created = 0;
+  for (const item of pendingUploads) {
+    uploadBtn.textContent = '上传中 ' + (created + 1) + '/' + total;
+    const form = new FormData();
+    form.append('file', item.file);
+    form.append('prompt', item.prompt);
+    if (item.maxNewTokens) form.append('max_new_tokens', item.maxNewTokens);
+    if (item.maxLen) form.append('max_len', item.maxLen);
+    form.append('decoding', item.decoding);
+    if (item.temperature) form.append('temperature', item.temperature);
+    try {
+      const res = await fetch(apiUrl('api/jobs'), { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        importErrorEl.textContent = (data && data.detail) || '上传失败';
+        break;
+      }
+      created += 1;
+    } catch (err) {
+      importErrorEl.textContent = '上传失败：' + (err && err.message ? err.message : String(err));
+      break;
+    }
   }
-  currentJob = job;
+  pendingUploads = [];
+  renderPendingList();
+  uploadBtn.disabled = false;
+  updateUploadBtnLabel();
   await refreshJobs({ keepSelection: true });
-  await selectJob(job.id);
 });
 
 saveBtn.addEventListener('click', async () => {
@@ -1702,12 +2084,14 @@ timelineScroll.addEventListener('pointerup', (event) => {
   if (!timelineDragging) return;
   event.preventDefault();
   timelineDragging = false;
+  hideTimelineGuide();
   try {
     timelineScroll.releasePointerCapture(event.pointerId);
   } catch (err) {}
 });
 timelineScroll.addEventListener('pointercancel', () => {
   timelineDragging = false;
+  hideTimelineGuide();
 });
 timelineScroll.addEventListener('dragstart', (event) => event.preventDefault());
 window.addEventListener('resize', () => {
@@ -1856,10 +2240,12 @@ function showImportView(options = {}) {
 
 function resetImportMode() {
   rerunDraftJob = null;
-  importTitleEl.textContent = '导入媒体';
+  importTitleEl.textContent = '任务管理';
   rerunSourceEl.textContent = '';
   fileInput.disabled = false;
-  uploadBtn.textContent = '开始转写';
+  pendingUploads = [];
+  renderPendingList();
+  updateUploadBtnLabel();
 }
 
 function showProcessingPlaceholder(name) {
@@ -1886,6 +2272,7 @@ async function showEditor(job, options = {}) {
   applySubtitleStyle(job.subtitle_style || {});
   updateEditorChrome(job);
   setVisible(workbench);
+  closeSettings();
   const mediaUrl = apiUrl(`api/jobs/${job.id}/media`);
   if (preview.dataset.jobId !== job.id) {
     preview.dataset.jobId = job.id;
@@ -2203,9 +2590,17 @@ function renderTimeline(segments) {
   const duration = timelineDuration(segments);
   const scrollWidth = timelineScroll.clientWidth || 1;
   const pixelsPerSecond = timelinePixelsPerSecond(duration, scrollWidth);
+  currentPixelsPerSecond = pixelsPerSecond;
   const trackWidth = Math.max(scrollWidth, Math.ceil(duration * pixelsPerSecond));
+  const layout = timelineLaneLayout(segments);
+  const laneHeight = 44;
+  const laneTop = 42;
+  const laneCount = Math.max(1, layout.count);
+  const laneAreaHeight = laneTop + laneCount * laneHeight + 14;
   timelineTrack.style.width = trackWidth + 'px';
-  timelineMeta.textContent = segments.length + ' 段' + (duration ? ' · ' + formatTimelineTime(duration) : '');
+  timelineTrack.style.height = Math.max(timelineScroll.clientHeight, 32 + laneAreaHeight) + 'px';
+  timelineLane.style.height = laneAreaHeight + 'px';
+  timelineMeta.textContent = segments.length + ' 段' + (duration ? ' · ' + formatTimelineTime(duration) : '') + (laneCount > 1 ? ' · ' + laneCount + ' 层' : '');
   timelineRuler.innerHTML = '';
   timelineLane.innerHTML = '';
   renderTimelineTicks(duration, pixelsPerSecond);
@@ -2217,15 +2612,19 @@ function renderTimeline(segments) {
     item.className = 'timeline-segment';
     item.dataset.index = String(index);
     item.style.left = Math.max(0, start * pixelsPerSecond) + 'px';
+    item.style.top = (laneTop + (layout.lanes.get(index) || 0) * laneHeight) + 'px';
     item.style.width = Math.max(8, (end - start) * pixelsPerSecond) + 'px';
     item.title = `${formatTimelineTime(start)} - ${formatTimelineTime(end)} ${segment.text || ''}`;
     item.innerHTML = `
       <span class="timeline-segment-speaker">${escapeHtml(segment.speaker || 'S--')}</span>
       <span class="timeline-segment-text">${escapeHtml(segment.text || '')}</span>
     `;
-    item.addEventListener('pointerdown', (event) => event.preventDefault());
+    item.addEventListener('pointerdown', (event) => onSegmentPointerDown(event, index, item));
     item.addEventListener('click', (event) => {
       event.preventDefault();
+      if (segmentDragState && segmentDragState.moved) {
+        return;
+      }
       preview.currentTime = start;
       setActiveSegment(index, true);
       updateSubtitlePreview();
@@ -2235,6 +2634,193 @@ function renderTimeline(segments) {
   }
   timelineTrack.appendChild(timelinePlayhead);
   updateTimelinePlayhead(segments);
+}
+
+function onSegmentPointerDown(event, index, segment) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const rect = segment.getBoundingClientRect();
+  const offsetX = event.clientX - rect.left;
+  let mode = 'move';
+  if (rect.width > SEGMENT_EDGE_PX * 3) {
+    if (offsetX <= SEGMENT_EDGE_PX) mode = 'start';
+    else if (offsetX >= rect.width - SEGMENT_EDGE_PX) mode = 'end';
+  }
+  const segments = collectSegments();
+  const seg = segments[index];
+  if (!seg) return;
+  const duration = timelineDuration(segments);
+  const pps = currentPixelsPerSecond || timelinePixelsPerSecond(duration, timelineScroll.clientWidth || 1);
+  segmentDragState = {
+    index,
+    mode,
+    segment,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    origStart: Math.max(0, Number(seg.start) || 0),
+    origEnd: Math.max(Number(seg.start) || 0, Number(seg.end) || 0),
+    duration,
+    pps,
+    segments,
+    moved: false,
+    newStart: null,
+    newEnd: null
+  };
+  const moveHandler = (ev) => onSegmentPointerMove(ev, segmentDragState);
+  const upHandler = (ev) => {
+    onSegmentPointerUp(ev, segmentDragState);
+    window.removeEventListener('pointermove', moveHandler);
+    window.removeEventListener('pointerup', upHandler);
+  };
+  window.addEventListener('pointermove', moveHandler);
+  window.addEventListener('pointerup', upHandler);
+}
+
+function onSegmentPointerMove(event, state) {
+  if (!state) return;
+  const dx = event.clientX - state.startX;
+  if (!state.moved && Math.abs(dx) < SEGMENT_DRAG_THRESHOLD) return;
+  if (!state.moved) {
+    state.moved = true;
+    state.segment.classList.add('dragging');
+  }
+  const deltaSec = dx / state.pps;
+  let newStart = state.origStart;
+  let newEnd = state.origEnd;
+  if (state.mode === 'move') {
+    newStart = state.origStart + deltaSec;
+    newEnd = state.origEnd + deltaSec;
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (state.duration > 0 && newEnd > state.duration) {
+      newStart -= (newEnd - state.duration);
+      newEnd = state.duration;
+    }
+  } else if (state.mode === 'start') {
+    newStart = Math.max(0, Math.min(state.origEnd - 0.1, state.origStart + deltaSec));
+  } else {
+    newEnd = Math.max(state.origStart + 0.1, state.origEnd + deltaSec);
+    if (state.duration > 0) newEnd = Math.min(state.duration, newEnd);
+  }
+  const snap = computeSegmentSnap(state, newStart, newEnd);
+  if (snap) {
+    if (snap.edge === 'start') {
+      const shift = snap.time - newStart;
+      newStart = snap.time;
+      if (state.mode === 'move') newEnd += shift;
+    } else {
+      const shift = snap.time - newEnd;
+      newEnd = snap.time;
+      if (state.mode === 'move') newStart += shift;
+    }
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (state.duration > 0 && newEnd > state.duration) {
+      newStart -= (newEnd - state.duration);
+      newEnd = state.duration;
+    }
+  }
+  if (snap) showTimelineGuide(snap.time, snap.label);
+  else hideTimelineGuide();
+  state.newStart = newStart;
+  state.newEnd = newEnd;
+  state.segment.style.left = Math.max(0, newStart * state.pps) + 'px';
+  state.segment.style.width = Math.max(8, (newEnd - newStart) * state.pps) + 'px';
+}
+
+function computeSegmentSnap(state, newStart, newEnd) {
+  const pps = state.pps || 1;
+  const threshold = Math.max(0.05, SNAP_PX / pps);
+  const candidates = [
+    { time: 0, label: '起点' },
+    { time: Number(preview.currentTime || 0), label: '播放头' }
+  ];
+  const segments = state.segments;
+  for (let i = 0; i < segments.length; i++) {
+    if (i === state.index) continue;
+    candidates.push(
+      { time: Number(segments[i].start) || 0, label: '头对齐' },
+      { time: Number(segments[i].end) || 0, label: '尾对齐' }
+    );
+  }
+  const edges = state.mode === 'end'
+    ? [{ edge: 'end', time: newEnd }]
+    : state.mode === 'start'
+      ? [{ edge: 'start', time: newStart }]
+      : [{ edge: 'start', time: newStart }, { edge: 'end', time: newEnd }];
+  let best = null;
+  for (const edge of edges) {
+    for (const cand of candidates) {
+      if (!Number.isFinite(cand.time)) continue;
+      const d = Math.abs(edge.time - cand.time);
+      if (d <= threshold && (!best || d < best.dist)) {
+        best = { edge: edge.edge, time: cand.time, label: cand.label, dist: d };
+      }
+    }
+  }
+  return best;
+}
+
+function onSegmentPointerUp(event, state) {
+  if (!state) return;
+  state.segment.classList.remove('dragging');
+  hideTimelineGuide();
+  try { state.segment.releasePointerCapture(event.pointerId); } catch (err) {}
+  if (state.moved && state.newStart != null && state.newEnd != null) {
+    const tr = tbody.querySelector('tr[data-index="' + state.index + '"]');
+    if (tr) {
+      tr.querySelector('.start').value = roundTime(state.newStart);
+      tr.querySelector('.end').value = roundTime(state.newEnd);
+    }
+    markEditorDirty();
+    renderTimeline(collectSegments());
+    updateSubtitlePreview();
+    updateTimelinePlayhead();
+  }
+  const moved = state.moved;
+  segmentDragState = moved ? { moved: true } : null;
+  if (moved) {
+    const st = segmentDragState;
+    setTimeout(() => { if (segmentDragState === st) segmentDragState = null; }, 60);
+  }
+}
+
+function showTimelineGuide(time, label) {
+  const left = timelineTimeToX(time);
+  timelineGuide.style.left = left + 'px';
+  const minLabelOffset = 28;
+  const maxLabelOffset = Math.max(minLabelOffset, timelineScroll.clientWidth - 44);
+  const viewportLeft = left - timelineScroll.scrollLeft;
+  const clampedOffset = Math.max(minLabelOffset, Math.min(maxLabelOffset, viewportLeft));
+  timelineGuide.style.setProperty('--guide-label-offset', (clampedOffset - viewportLeft) + 'px');
+  timelineGuide.dataset.label = label || '对齐';
+  timelineGuide.classList.add('visible');
+  timelineGuide.classList.add('snapped');
+}
+
+function hideTimelineGuide() {
+  timelineGuide.classList.remove('visible');
+  timelineGuide.classList.remove('snapped');
+}
+
+function timelineLaneLayout(segments) {
+  const items = segments
+    .map((segment, index) => ({
+      index,
+      start: Math.max(0, Number(segment.start) || 0),
+      end: Math.max(Number(segment.start) || 0, Number(segment.end) || Number(segment.start) || 0)
+    }))
+    .sort((a, b) => a.start - b.start || a.end - b.end || a.index - b.index);
+  const laneEnds = [];
+  const lanes = new Map();
+  for (const item of items) {
+    let lane = laneEnds.findIndex((end) => end <= item.start + 0.001);
+    if (lane < 0) {
+      lane = laneEnds.length;
+      laneEnds.push(0);
+    }
+    laneEnds[lane] = Math.max(item.end, item.start + 0.01);
+    lanes.set(item.index, lane);
+  }
+  return { lanes, count: laneEnds.length };
 }
 
 function timelinePixelsPerSecond(duration, scrollWidth) {
@@ -2424,15 +3010,48 @@ function roundTime(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function timelineTimeToX(time) {
+  return Math.max(0, Number(time || 0) * (currentPixelsPerSecond || 1));
+}
+
+function timelineXToTime(x, duration) {
+  const pps = currentPixelsPerSecond || 1;
+  return Math.max(0, Math.min(duration, Number(x || 0) / pps));
+}
+
 function seekTimelineFromPointer(event) {
   const segments = collectSegments();
   const duration = timelineDuration(segments);
   if (!duration) return;
   const rect = timelineTrack.getBoundingClientRect();
   const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-  const time = roundTime((x / Math.max(1, rect.width)) * duration);
+  const rawTime = roundTime(timelineXToTime(x, duration));
+  const snap = computePlayheadSnap(rawTime, segments);
+  const time = snap ? snap.time : rawTime;
   preview.currentTime = Math.max(0, Math.min(duration, time));
+  if (timelineDragging && snap) showTimelineGuide(time, snap.label);
+  else hideTimelineGuide();
   syncActiveSegment();
+}
+
+function computePlayheadSnap(time, segments) {
+  const pps = currentPixelsPerSecond || 1;
+  const threshold = Math.max(0.05, SNAP_PX / pps);
+  const candidates = [{ time: 0, label: '起点' }];
+  for (const segment of segments) {
+    const start = Number(segment.start);
+    const end = Number(segment.end);
+    if (Number.isFinite(start)) candidates.push({ time: start, label: '头对齐' });
+    if (Number.isFinite(end)) candidates.push({ time: end, label: '尾对齐' });
+  }
+  let best = null;
+  for (const candidate of candidates) {
+    const dist = Math.abs(time - candidate.time);
+    if (dist <= threshold && (!best || dist < best.dist)) {
+      best = { ...candidate, dist };
+    }
+  }
+  return best;
 }
 
 function syncMaskPreviewTime() {
@@ -2499,12 +3118,20 @@ function syncActiveSegment() {
   syncMaskPreviewTime();
   const time = Number(preview.currentTime || 0);
   const segments = collectSegments();
-  const index = segments.findIndex((segment) => {
+  const previousIndex = activeSegmentIndex;
+  const index = segments.findIndex((segment, segmentIndex) => {
     const start = Number(segment.start);
     const end = Number(segment.end);
-    return Number.isFinite(start) && Number.isFinite(end) && start <= time && time <= end;
+    return (
+      segmentIndex === previousIndex
+      && Number.isFinite(start)
+      && Number.isFinite(end)
+      && start <= time
+      && time <= end
+    );
   });
-  setActiveSegment(index, true);
+  const nextIndex = index >= 0 ? index : segments.findIndex((segment) => isSegmentVisibleAtTime(segment, time));
+  setActiveSegment(nextIndex, true);
   updateTimelinePlayhead(segments);
   updateSubtitlePreview(segments);
 }
@@ -2528,7 +3155,7 @@ function updateTimelinePlayhead(segments) {
   const duration = timelineDuration(segments);
   const trackWidth = Number.parseFloat(timelineTrack.style.width) || timelineTrack.clientWidth || timelineScroll.clientWidth || 1;
   const time = Math.max(0, Number(preview.currentTime || 0));
-  const left = duration > 0 ? Math.min(trackWidth, (time / duration) * trackWidth) : 0;
+  const left = duration > 0 ? Math.min(trackWidth, timelineTimeToX(time)) : 0;
   timelinePlayhead.style.left = left + 'px';
   if (time > 0 && timelineScroll.clientWidth) {
     const visibleLeft = timelineScroll.scrollLeft;
@@ -2557,8 +3184,16 @@ function scrollSegmentRowIntoView(tr) {
 function updateSubtitlePreview(segments) {
   segments = segments || collectSegments();
   updateSourceMaskPreview();
-  const segment = segments[activeSegmentIndex];
-  if (!segment || !segment.text || activeSegmentIndex < 0) {
+  const time = Number(preview.currentTime || 0);
+  const visibleSegments = segments
+    .map((segment, index) => ({ segment, index }))
+    .filter((item) => isSegmentVisibleAtTime(item.segment, time) && String(item.segment.text || '').trim())
+    .sort((a, b) => {
+      if (a.index === activeSegmentIndex) return -1;
+      if (b.index === activeSegmentIndex) return 1;
+      return Number(a.segment.start) - Number(b.segment.start);
+    });
+  if (!visibleSegments.length) {
     subtitleOverlay.classList.remove('visible');
     subtitleOverlay.textContent = '';
     return;
@@ -2567,18 +3202,26 @@ function updateSubtitlePreview(segments) {
   const useSpeakerColors = document.querySelector('#speakerColors').value === 'true';
   const fontSize = Math.max(12, Number(document.querySelector('#fontSize').value || 48));
   const marginV = Math.max(0, Number(document.querySelector('#marginV').value || 56));
-  const text = showSpeaker && segment.speaker ? speakerDisplayName(segment.speaker) + ': ' + segment.text : segment.text;
+  const lines = visibleSegments.map(({ segment }) => (
+    showSpeaker && segment.speaker ? speakerDisplayName(segment.speaker) + ': ' + segment.text : segment.text
+  ));
   const scale = assScriptScale();
-  subtitleOverlay.textContent = text;
+  subtitleOverlay.textContent = lines.join('\\n');
   subtitleOverlay.style.fontSize = Math.max(10, fontSize * scale / assFontLineHeightFactor) + 'px';
   subtitleOverlay.style.lineHeight = String(assFontLineHeightFactor);
   subtitleOverlay.style.bottom = Math.max(0, marginV * scale) + 'px';
   subtitleOverlay.style.webkitTextStroke = subtitleTextStroke(scale);
   subtitleOverlay.style.textShadow = subtitleTextShadow(scale);
-  const color = useSpeakerColors ? speakerColor(segment.speaker, segments) : '#ffffff';
+  const color = useSpeakerColors && visibleSegments.length === 1 ? speakerColor(visibleSegments[0].segment.speaker, segments) : '#ffffff';
   subtitleOverlay.style.color = color;
   subtitleOverlay.style.webkitTextFillColor = color;
   subtitleOverlay.classList.add('visible');
+}
+
+function isSegmentVisibleAtTime(segment, time) {
+  const start = Number(segment.start);
+  const end = Number(segment.end);
+  return Number.isFinite(start) && Number.isFinite(end) && start <= time && time < end;
 }
 
 function updateSourceMaskPreview() {
@@ -2741,9 +3384,8 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
-restoreSidebarState();
 refreshRuntime();
-refreshJobs({ selectLatest: true });
+refreshJobs();
 </script>
 </body>
 </html>

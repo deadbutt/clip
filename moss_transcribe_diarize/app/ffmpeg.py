@@ -102,7 +102,7 @@ def burn_ass_subtitles(
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     filter_args = _build_filter_args(ass_path, style=style)
-    duration = _media_duration(input_media)
+    duration = probe_media_duration(input_media)
     command = [
         tools.ffmpeg or "ffmpeg",
         "-y" if overwrite else "-n",
@@ -174,7 +174,8 @@ def _run_ffmpeg_with_progress(
         progress_callback(1.0)
 
 
-def _media_duration(path: Path) -> float | None:
+def probe_media_duration(path: str | Path) -> float | None:
+    """Return media duration in seconds via ffprobe, or ``None`` if unavailable."""
     try:
         media = probe_media(path)
         duration = (media.get("format") or {}).get("duration")

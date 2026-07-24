@@ -61,14 +61,10 @@ def export_ass(
             color = SPEAKER_COLORS[index % len(SPEAKER_COLORS)]
             style_lines.append(_ass_style_line(_speaker_style_name(speaker), style, font_size, color))
 
-    dialogue_lines = []
-    for segment in segments:
-        style_name = _speaker_style_name(segment.speaker) if style.speaker_colors else "Default"
-        text = _ass_escape(_display_text(segment, show_speaker=style.show_speaker, speaker_names=style.speaker_names))
-        dialogue_lines.append(
-            f"Dialogue: 0,{format_ass_time(segment.start)},{format_ass_time(segment.end)},"
-            f"{style_name},,0,0,0,,{text}"
-        )
+    dialogue_lines = [
+        _ass_dialogue_line(start, end, style_name, text)
+        for start, end, style_name, text in _ass_dialogue_events(segments, style)
+    ]
 
     return "\n".join(
         [
@@ -126,6 +122,50 @@ def _ass_style_line(name: str, style: SubtitleStyle, font_size: int, primary_col
 
 def _speaker_style_name(speaker: str) -> str:
     return f"Speaker_{''.join(ch if ch.isalnum() else '_' for ch in speaker)}"
+
+
+def _ass_dialogue_line(start: float, end: float, style_name: str, text: str) -> str:
+    return (
+        f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},"
+        f"{style_name},,0,0,0,,{text}"
+    )
+
+
+def _ass_dialogue_events(
+    segments: list[SubtitleSegment],
+    style: SubtitleStyle,
+) -> list[tuple[float, float, str, str]]:
+    ordered = sorted(
+        [segment for segment in segments if segment.text and segment.end > segment.start],
+        key=lambda segment: (segment.start, segment.end),
+    )
+    if not ordered:
+        return []
+
+    boundaries = sorted({time for segment in ordered for time in (segment.start, segment.end)})
+    events: list[tuple[float, float, str, str]] = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end <= start:
+            continue
+        active = [segment for segment in ordered if segment.start < end and segment.end > start]
+        if not active:
+            continue
+        style_name = _event_style_name(active, style)
+        text = r"\N".join(
+            _ass_escape(_display_text(segment, show_speaker=style.show_speaker, speaker_names=style.speaker_names))
+            for segment in active
+        )
+        if events and events[-1][1] == start and events[-1][2] == style_name and events[-1][3] == text:
+            events[-1] = (events[-1][0], end, style_name, text)
+        else:
+            events.append((start, end, style_name, text))
+    return events
+
+
+def _event_style_name(active: list[SubtitleSegment], style: SubtitleStyle) -> str:
+    if len(active) == 1 and style.speaker_colors:
+        return _speaker_style_name(active[0].speaker)
+    return "Default"
 
 
 def _display_text(
