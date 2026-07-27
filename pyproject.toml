@@ -3,22 +3,18 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "moss-transcribe-diarize"
+name = "dieshang-workbench"
 version = "0.1.0"
-description = "MOSS-Transcribe-Diarize inference code and Transformers remote-code model implementation"
+description = "Local Whisper subtitle, speaker labeling, and clip export workbench"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "OpenMOSS Team" }]
+authors = [{ name = "DieShang Workbench" }]
 dependencies = [
-  "transformers>=5.0.0,<6.0.0",
-  "safetensors>=0.6.2",
+  "faster-whisper>=1.1.0",
   "numpy>=1.26,<3",
   "av>=14.0",
-  "librosa>=0.11.0",
-  "numba>=0.61.0",
   "soundfile>=0.12",
-  "soxr>=0.5",
   "packaging",
   "fastapi>=0.115",
   "uvicorn>=0.30",
@@ -34,6 +30,15 @@ mtd-serve = "moss_transcribe_diarize.app.serve:main"
 torch-runtime = [
   "torch>=2.8",
   "torchaudio>=2.8",
+  "transformers>=5.0.0,<6.0.0",
+  "safetensors>=0.6.2",
+  "librosa>=0.11.0",
+  "numba>=0.61.0",
+  "soxr>=0.5",
+  "openai-whisper>=20231117",
+]
+diarization = [
+  "pyannote.audio>=3.1",
 ]
 flash-attn = ["flash-attn"]
 dev = ["pytest"]

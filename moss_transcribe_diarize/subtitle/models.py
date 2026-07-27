@@ -32,8 +32,8 @@ class SubtitleStyle:
     font_size: int | None = None
     alignment: int = 2
     margin_v: int = 56
-    show_speaker: bool = True
-    speaker_colors: bool = True
+    show_speaker: bool = False
+    speaker_colors: bool = False
     primary_color: str = "&H00FFFFFF"
     outline_color: str = "&H00000000"
     back_color: str = "&H64000000"

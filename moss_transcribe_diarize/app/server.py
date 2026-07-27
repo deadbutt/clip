@@ -1,13 +1,26 @@
+import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from moss_transcribe_diarize.inference_utils import DEFAULT_PROMPT
+from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
 
 from .ffmpeg import detect_ffmpeg
 from .jobs import JobManager
-from .model_runner import ModelRunner
-from .vllm_runner import VllmRunner
+from .whisper_runner import WhisperRunner
+
+
+def _parse_protected_terms(value: Any) -> tuple[str, ...]:
+    if value in ("", None):
+        return ()
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+    return tuple(str(item).strip() for item in items if str(item).strip())
 
 
 def create_app(
@@ -21,11 +34,22 @@ def create_app(
     max_new_tokens: int = 8192,
     decoding: str = "greedy",
     temperature: float | None = None,
-    backend: str = "hf",
+    backend: str = "whisper",
     vllm_base_url: str | None = None,
     vllm_model: str | None = None,
     vllm_api_key: str | None = None,
     vllm_timeout: float = 600.0,
+    translator_base_url: str | None = None,
+    translator_model: str | None = None,
+    translator_api_key: str | None = None,
+    translator_timeout: float | None = None,
+    translator_provider: str = "openai",
+    translator_protected_terms: tuple[str, ...] = (),
+    speaker_count: int | None = None,
+    diarization_backend: str = "none",
+    hf_token: str | None = None,
+    pyannote_model: str = "pyannote/speaker-diarization-3.1",
+    diarization_device: str = "auto",
 ):
     try:
         from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -33,18 +57,24 @@ def create_app(
     except ImportError as exc:
         raise RuntimeError("Install fastapi, uvicorn, and python-multipart to run the local web app.") from exc
 
-    app = FastAPI(title="MOSS Subtitle Studio")
+    app = FastAPI(title="蝶殇工作台")
     if backend == "vllm":
         if not vllm_base_url:
             raise ValueError("--vllm-base-url is required when backend='vllm'.")
+        from .vllm_runner import VllmRunner
+
         runner = VllmRunner(
             base_url=vllm_base_url,
             model=vllm_model or str(model_path),
             api_key=vllm_api_key,
             timeout=vllm_timeout,
         )
-    else:
+    elif backend == "hf":
+        from .model_runner import ModelRunner
+
         runner = ModelRunner(model_path, device=device, dtype=dtype)
+    else:
+        runner = WhisperRunner(model_path, device=device, dtype=dtype)
     manager = JobManager(
         runs_dir,
         runner,
@@ -53,8 +83,27 @@ def create_app(
         max_new_tokens=max_new_tokens,
         decoding=decoding,
         temperature=temperature,
+        speaker_count=speaker_count,
+        diarization_backend=diarization_backend,
+        hf_token=hf_token,
+        pyannote_model=pyannote_model,
+        diarization_device=diarization_device,
     )
     app.state.manager = manager
+    translator = None
+    translator_url = translator_base_url or (vllm_base_url if backend != "vllm" else None)
+    if translator_url:
+        from .text_translator import PROTECTED_TERMS, TextTranslator
+
+        translator = TextTranslator(
+            base_url=translator_url,
+            model=translator_model or vllm_model or "local",
+            api_key=translator_api_key or vllm_api_key or "EMPTY",
+            timeout=translator_timeout if translator_timeout is not None else vllm_timeout,
+            provider=translator_provider,
+            protected_terms=translator_protected_terms or tuple(PROTECTED_TERMS),
+        )
+    app.state.translator = translator
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -76,6 +125,12 @@ def create_app(
                 "decoding": manager.decoding,
                 "temperature": manager.temperature,
             },
+            "speaker_labeling": {
+                "default_speaker_count": manager.speaker_count,
+                "default_backend": manager.diarization_backend,
+                "pyannote_model": manager.pyannote_model,
+            },
+            "translator": translator.runtime_info() if translator is not None else {"available": False},
         }
 
     @app.get("/api/jobs")
@@ -90,6 +145,8 @@ def create_app(
         max_len: int | None = Form(None),
         decoding: str | None = Form(None),
         temperature: float | None = Form(None),
+        speaker_count: int | None = Form(None),
+        diarization_backend: str | None = Form(None),
     ):
         try:
             job, input_path = manager.create_job_for_upload(
@@ -99,6 +156,8 @@ def create_app(
                 max_new_tokens=max_new_tokens,
                 decoding=decoding,
                 temperature=temperature,
+                speaker_count=speaker_count,
+                diarization_backend=diarization_backend,
             )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -147,6 +206,8 @@ def create_app(
                 max_new_tokens=payload.get("max_new_tokens"),
                 decoding=payload.get("decoding"),
                 temperature=payload.get("temperature"),
+                speaker_count=payload.get("speaker_count"),
+                diarization_backend=payload.get("diarization_backend"),
             )
             return job.to_dict()
         except KeyError as exc:
@@ -205,6 +266,117 @@ def create_app(
             return JSONResponse({"detail": str(exc)}, status_code=503)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/translate")
+    async def translate(job_id: str, request: Request):
+        translator = app.state.translator
+        if translator is None:
+            return JSONResponse({"detail": "Translation model is not configured. Start with start_ollama.bat, start_vllm.bat, or pass --translator-base-url."}, status_code=503)
+        try:
+            try:
+                payload: Any = await request.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            protected_terms = _parse_protected_terms(payload.get("protected_terms"))
+            request_translator = translator
+            if "protected_terms" in payload and hasattr(translator, "protected_terms"):
+                try:
+                    request_translator = replace(translator, protected_terms=protected_terms)
+                except TypeError:
+                    request_translator = translator
+            batch_size = payload.get("batch_size")
+            batch_size = None if batch_size in ("", None) else max(1, int(batch_size))
+            return await asyncio.to_thread(
+                manager.translate,
+                job_id,
+                request_translator,
+                target_language=str(payload.get("target_language") or "简体中文"),
+                mode=str(payload.get("mode") or "bilingual"),
+                batch_size=batch_size,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/translate/restore")
+    def restore_translation(job_id: str):
+        try:
+            return manager.restore_source_segments(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.get("/api/jobs/{job_id}/clips")
+    def list_clips(
+        job_id: str,
+        min_duration: float = 45.0,
+        target_duration: float = 120.0,
+        max_duration: float = 180.0,
+        limit: int = 24,
+        strategy: str = "rules",
+    ):
+        try:
+            if strategy not in {"rules", "model"}:
+                raise ValueError("strategy must be 'rules' or 'model'.")
+            selector = app.state.translator if strategy == "model" else None
+            if strategy == "model" and selector is None:
+                return JSONResponse(
+                    {"detail": "AI highlight selection is not configured. Start with start_ollama.bat or start_vllm.bat."},
+                    status_code=503,
+                )
+            return {
+                "clips": manager.list_clip_candidates(
+                    job_id,
+                    min_duration=min_duration,
+                    target_duration=target_duration,
+                    max_duration=max_duration,
+                    limit=limit,
+                    selector=selector,
+                )
+            }
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/clips/render")
+    async def render_clip(job_id: str, request: Request):
+        try:
+            payload: Any = await request.json()
+            payload = payload if isinstance(payload, dict) else {}
+            clip = await asyncio.to_thread(
+                manager.render_clip,
+                job_id,
+                start=payload.get("start"),
+                end=payload.get("end"),
+                style_payload=payload.get("style") if isinstance(payload.get("style"), dict) else None,
+                name=payload.get("name"),
+            )
+            clip["download_url"] = f"/api/jobs/{job_id}/clips/{clip['filename']}"
+            return clip
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/jobs/{job_id}/clips/{filename}")
+    def download_clip(job_id: str, filename: str):
+        try:
+            path = manager.clip_download_path(job_id, filename)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Clip file is not ready.") from exc
+        return FileResponse(path, filename=path.name)
 
     @app.get("/api/jobs/{job_id}/download")
     def download(job_id: str, kind: str):
@@ -268,7 +440,7 @@ INDEX_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MOSS 字幕工作台</title>
+  <title>蝶殇工作台</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <style>
     :root {
@@ -426,6 +598,15 @@ INDEX_HTML = """<!doctype html>
       overflow: hidden;
     }
     .bar { width: 0%; height: 100%; background: var(--teal); transition: width 160ms ease; }
+    .bar.indeterminate {
+      width: 38%;
+      background: linear-gradient(90deg, rgba(0, 125, 119, 0.25), var(--teal), rgba(0, 125, 119, 0.25));
+      animation: progress-slide 1.1s ease-in-out infinite;
+    }
+    @keyframes progress-slide {
+      0% { transform: translateX(-110%); }
+      100% { transform: translateX(280%); }
+    }
     .sidebar {
       position: relative;
       border-right: 1px solid var(--line);
@@ -785,6 +966,7 @@ INDEX_HTML = """<!doctype html>
       box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
       overflow: hidden;
     }
+    .settings-modal-card.wide { width: min(760px, 100%); }
     .settings-modal-head {
       display: flex;
       align-items: center;
@@ -1394,6 +1576,67 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
       line-height: 1.35;
     }
+    .clip-tools {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 0;
+    }
+    .clip-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .clip-panel-head strong { font-size: 14px; }
+    .clip-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .clip-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 260px;
+      overflow: auto;
+    }
+    .clip-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+    .clip-card.selected { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal); }
+    .clip-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .clip-title {
+      margin-top: 6px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.35;
+    }
+    .clip-reason {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .timeline-clip-range {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      display: none;
+      pointer-events: none;
+      border-left: 2px solid #008f83;
+      border-right: 2px solid #008f83;
+      background: rgba(0, 143, 131, 0.12);
+      z-index: 1;
+    }
+    .timeline-clip-range.visible { display: block; }
+    .model-state { margin-bottom: 10px; }
     @media (max-width: 900px) {
       body { overflow: auto; }
       main { height: auto; grid-template-columns: 1fr; }
@@ -1406,7 +1649,7 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>MOSS 字幕工作台</h1>
+    <h1>蝶殇工作台</h1>
     <span id="runtime" class="pill">检测中</span>
   </header>
   <main>
@@ -1446,6 +1689,21 @@ INDEX_HTML = """<!doctype html>
                   <div>
                     <label for="temperature">温度</label>
                     <input id="temperature" type="number" min="0.01" step="0.05" value="1.0" />
+                  </div>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="speakerCount">目标说话人数</label>
+                    <input id="speakerCount" type="number" min="0" max="12" step="1" placeholder="自动；已知 4 人就填 4" />
+                  </div>
+                  <div>
+                    <label for="diarizationBackend">说话人识别后端</label>
+                    <select id="diarizationBackend">
+                      <option value="none" selected>none：不标说话人</option>
+                      <option value="auto">auto：优先 pyannote，失败回退</option>
+                      <option value="pyannote">pyannote：更强，需要 HF token</option>
+                      <option value="cluster">cluster：轻量本地聚类</option>
+                    </select>
                   </div>
                 </div>
                 <div id="modelinfo" class="meta" style="margin-top:8px"></div>
@@ -1492,6 +1750,8 @@ INDEX_HTML = """<!doctype html>
           <div class="bar-spacer"></div>
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
+          <button id="openTranslate" class="ghost" type="button">英译中</button>
+          <button id="openClips" class="ghost" type="button">精华切片</button>
           <button id="render" class="warn" disabled>检测 FFmpeg...</button>
           <button id="openSettings" class="ghost icon-btn" type="button" title="设置" aria-label="设置">⚙</button>
         </div>
@@ -1518,6 +1778,7 @@ INDEX_HTML = """<!doctype html>
                 <div id="timelineTrack" class="timeline-track">
                   <div id="timelineRuler" class="timeline-ruler"></div>
                   <div id="timelineLane" class="timeline-lane"></div>
+                  <div id="timelineClipRange" class="timeline-clip-range"></div>
                   <div id="timelinePlayhead" class="timeline-playhead"></div>
                   <div id="timelineGuide" class="timeline-guide"></div>
                 </div>
@@ -1541,6 +1802,66 @@ INDEX_HTML = """<!doctype html>
                 </thead>
                 <tbody id="segments"></tbody>
               </table>
+            </div>
+          </div>
+        </div>
+        <div id="translateModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card">
+            <div class="settings-modal-head">
+              <strong>英译中</strong>
+              <button id="closeTranslate" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="translateModelStatus" class="meta model-state"></div>
+              <div class="row">
+                <div>
+                  <label for="translateMode">字幕模式</label>
+                  <select id="translateMode"><option value="bilingual" selected>中英双语</option><option value="replace">只保留中文</option></select>
+                </div>
+                <div>
+                  <label for="targetLanguage">目标语言</label>
+                  <input id="targetLanguage" type="text" value="简体中文" />
+                </div>
+              </div>
+              <label for="translateProtectedTerms" style="margin-top:10px">Protected terms</label>
+              <textarea id="translateProtectedTerms" class="prompt-input" rows="2" placeholder="Twitter, Twitch, OBS, names..."></textarea>
+              <div id="translateProgressMeta" class="render-progress-meta is-hidden" style="margin-top:10px"><span>翻译进度</span><strong id="translateProgressText">0%</strong></div>
+              <div id="translateProgress" class="progress is-hidden"><div id="translateProgressBar" class="bar"></div></div>
+              <div class="actions" style="margin-top:12px">
+                <button id="translateZh" class="primary small" type="button">开始翻译</button>
+                <button id="restoreTranslation" class="ghost small" type="button">恢复翻译前字幕</button>
+              </div>
+              <div id="translateStatus" class="export-status"></div>
+            </div>
+          </div>
+        </div>
+        <div id="clipsModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card wide">
+            <div class="settings-modal-head">
+              <strong>精华切片</strong>
+              <button id="closeClips" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="clipModelStatus" class="meta model-state"></div>
+              <div class="clip-tools">
+                <div class="row">
+                  <div><label for="clipStart">原片开始秒数</label><input id="clipStart" type="number" min="0" step="0.1" value="0" /></div>
+                  <div><label for="clipEnd">原片结束秒数</label><input id="clipEnd" type="number" min="0.1" step="0.1" value="120" /></div>
+                </div>
+                <div class="row">
+                  <div><label for="clipMinDuration">最短秒数</label><input id="clipMinDuration" type="number" min="10" step="5" value="60" /></div>
+                  <div><label for="clipTargetDuration">目标秒数</label><input id="clipTargetDuration" type="number" min="20" step="5" value="120" /></div>
+                  <div><label for="clipMaxDuration">最长秒数</label><input id="clipMaxDuration" type="number" min="30" step="5" value="180" /></div>
+                </div>
+                <div class="clip-actions">
+                  <button id="useActiveSegment" class="ghost small" type="button">使用当前字幕时间</button>
+                  <button id="findClips" class="primary small" type="button">AI 精选</button>
+                  <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
+                  <button id="renderClip" class="warn small" type="button">导出带字幕切片</button>
+                </div>
+                <div id="clipStatus" class="export-status"></div>
+                <div id="clipList" class="clip-list"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -1574,11 +1895,11 @@ INDEX_HTML = """<!doctype html>
                 <div class="row" style="margin-top:10px">
                   <div>
                     <label for="showSpeaker">说话人</label>
-                    <select id="showSpeaker"><option value="true">显示</option><option value="false">隐藏</option></select>
+                    <select id="showSpeaker"><option value="false" selected>隐藏</option><option value="true">显示</option></select>
                   </div>
                   <div>
                     <label for="speakerColors">颜色</label>
-                    <select id="speakerColors"><option value="true">按说话人</option><option value="false">统一</option></select>
+                    <select id="speakerColors"><option value="false" selected>统一</option><option value="true">按说话人</option></select>
                   </div>
                 </div>
               </div>
@@ -1632,7 +1953,7 @@ INDEX_HTML = """<!doctype html>
     </section>
   </main>
 <script>
-const RUNNING_STATES = new Set(['queued', 'loading_model', 'transcribing', 'postprocessing', 'rendering']);
+const RUNNING_STATES = new Set(['queued', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'rendering']);
 const EDIT_STATES = new Set(['waiting_review', 'rendering', 'done']);
 const TERMINAL_STATES = new Set(['waiting_review', 'done', 'failed', 'cancelled']);
 const fileInput = document.querySelector('#file');
@@ -1644,6 +1965,11 @@ const maxNewTokensInput = document.querySelector('#maxNewTokens');
 const maxLenInput = document.querySelector('#maxLen');
 const decodingSelect = document.querySelector('#decoding');
 const temperatureInput = document.querySelector('#temperature');
+const speakerCountInput = document.querySelector('#speakerCount');
+speakerCountInput.min = '1';
+speakerCountInput.max = '2';
+speakerCountInput.placeholder = 'auto; 1-2 speakers';
+const diarizationBackendSelect = document.querySelector('#diarizationBackend');
 const uploadBtn = document.querySelector('#upload');
 const newTaskBtn = document.querySelector('#newTask');
 const refreshJobsBtn = document.querySelector('#refreshJobs');
@@ -1653,6 +1979,12 @@ const backToTasksBtn = document.querySelector('#backToTasks');
 const openSettingsBtn = document.querySelector('#openSettings');
 const closeSettingsBtn = document.querySelector('#closeSettings');
 const settingsModal = document.querySelector('#settingsModal');
+const openTranslateBtn = document.querySelector('#openTranslate');
+const closeTranslateBtn = document.querySelector('#closeTranslate');
+const translateModal = document.querySelector('#translateModal');
+const openClipsBtn = document.querySelector('#openClips');
+const closeClipsBtn = document.querySelector('#closeClips');
+const clipsModal = document.querySelector('#clipsModal');
 const pendingListEl = document.querySelector('#pendingList');
 const saveBtn = document.querySelector('#save');
 const renderBtn = document.querySelector('#render');
@@ -1697,9 +2029,33 @@ const timelineRuler = document.querySelector('#timelineRuler');
 const timelineLane = document.querySelector('#timelineLane');
 const timelinePlayhead = document.querySelector('#timelinePlayhead');
 const timelineGuide = document.querySelector('#timelineGuide');
+const timelineClipRange = document.querySelector('#timelineClipRange');
 const timelineMeta = document.querySelector('#timelineMeta');
 const downloads = document.querySelector('#downloads');
 const exportStatusEl = document.querySelector('#exportStatus');
+const translateModeSelect = document.querySelector('#translateMode');
+const targetLanguageInput = document.querySelector('#targetLanguage');
+const translateZhBtn = document.querySelector('#translateZh');
+const translateStatusEl = document.querySelector('#translateStatus');
+const translateModelStatusEl = document.querySelector('#translateModelStatus');
+const translateProtectedTermsInput = document.querySelector('#translateProtectedTerms');
+const translateProgressMetaEl = document.querySelector('#translateProgressMeta');
+const translateProgressTextEl = document.querySelector('#translateProgressText');
+const translateProgressEl = document.querySelector('#translateProgress');
+const translateProgressBarEl = document.querySelector('#translateProgressBar');
+const restoreTranslationBtn = document.querySelector('#restoreTranslation');
+const clipStartInput = document.querySelector('#clipStart');
+const clipEndInput = document.querySelector('#clipEnd');
+const clipMinDurationInput = document.querySelector('#clipMinDuration');
+const clipTargetDurationInput = document.querySelector('#clipTargetDuration');
+const clipMaxDurationInput = document.querySelector('#clipMaxDuration');
+const useActiveSegmentBtn = document.querySelector('#useActiveSegment');
+const findClipsBtn = document.querySelector('#findClips');
+const findClipsRulesBtn = document.querySelector('#findClipsRules');
+const renderClipBtn = document.querySelector('#renderClip');
+const clipStatusEl = document.querySelector('#clipStatus');
+const clipListEl = document.querySelector('#clipList');
+const clipModelStatusEl = document.querySelector('#clipModelStatus');
 let jobs = [];
 let currentJob = null;
 let rerunDraftJob = null;
@@ -1708,6 +2064,8 @@ let pendingIdCounter = 0;
 let pollTimer = null;
 let runtimeChecked = false;
 let ffmpegAvailable = false;
+let translatorAvailable = false;
+let translatorInfo = {};
 let activeSegmentIndex = -1;
 let assPlayRes = { x: 1920, y: 1080 };
 let layoutFitFrame = 0;
@@ -1744,16 +2102,26 @@ async function refreshRuntime() {
     const data = await res.json();
     runtimeChecked = true;
     ffmpegAvailable = !!(data.ffmpeg && data.ffmpeg.available);
+    translatorAvailable = !!(data.translator && data.translator.available);
+    translatorInfo = data.translator || {};
     runtimeEl.textContent = ffmpegAvailable ? 'FFmpeg 可用' : 'FFmpeg 缺失';
     runtimeEl.className = 'pill ' + (ffmpegAvailable ? 'ok' : 'bad');
+    updateTranslateAction();
+    updateClipActions();
     updateRenderAction(currentJob);
     applyInferenceDefaults(data.inference || {});
+    applySpeakerDefaults(data.speaker_labeling || {});
+    applyTranslatorDefaults(data.translator || {});
     renderModelInfo(data.model || {});
   } catch (err) {
     runtimeChecked = true;
     ffmpegAvailable = false;
+    translatorAvailable = false;
+    translatorInfo = {};
     runtimeEl.textContent = 'API 连接失败';
     runtimeEl.className = 'pill bad';
+    updateTranslateAction();
+    updateClipActions();
     updateRenderAction(currentJob);
     importErrorEl.textContent = '无法连接 api/runtime，请确认页面来自 mtd-subtitle-web 服务。';
   }
@@ -1766,6 +2134,28 @@ function applyInferenceDefaults(defaults) {
   if (defaults.decoding) decodingSelect.value = defaults.decoding;
   if (defaults.temperature) temperatureInput.value = defaults.temperature;
   updateDecodingControls();
+}
+
+function applySpeakerDefaults(defaults) {
+  if (!speakerCountInput.value && defaults.default_speaker_count) {
+    speakerCountInput.value = defaults.default_speaker_count;
+  }
+  if (defaults.default_backend) {
+    diarizationBackendSelect.value = defaults.default_backend;
+  }
+}
+
+function applyTranslatorDefaults(defaults) {
+  if (!translateProtectedTermsInput || translateProtectedTermsInput.value) return;
+  const terms = Array.isArray(defaults.protected_terms) ? defaults.protected_terms : [];
+  translateProtectedTermsInput.value = terms.join(', ');
+}
+
+function normalizedSpeakerCount(value) {
+  if (value === '' || value == null) return '';
+  const count = Number(value);
+  if (!Number.isFinite(count) || count <= 0) return '';
+  return String(Math.max(1, Math.min(2, Math.round(count))));
 }
 
 function renderModelInfo(model) {
@@ -1795,6 +2185,10 @@ function scheduleLayoutFit() {
 
 function openSettings() { settingsModal.classList.remove('is-hidden'); }
 function closeSettings() { settingsModal.classList.add('is-hidden'); }
+function openTranslate() { updateTranslateAction(); translateModal.classList.remove('is-hidden'); }
+function closeTranslate() { translateModal.classList.add('is-hidden'); }
+function openClips() { updateClipActions(); updateTimelineClipRange(); clipsModal.classList.remove('is-hidden'); }
+function closeClips() { clipsModal.classList.add('is-hidden'); }
 
 function setSaveState(state, message) {
   if (saveStatusTimer) {
@@ -1833,8 +2227,18 @@ refreshJobsBtn.addEventListener('click', () => refreshJobs());
 backToTasksBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 openSettingsBtn.addEventListener('click', openSettings);
 closeSettingsBtn.addEventListener('click', closeSettings);
+openTranslateBtn.addEventListener('click', openTranslate);
+closeTranslateBtn.addEventListener('click', closeTranslate);
+openClipsBtn.addEventListener('click', openClips);
+closeClipsBtn.addEventListener('click', closeClips);
 settingsModal.addEventListener('click', (event) => {
   if (event.target === settingsModal) closeSettings();
+});
+translateModal.addEventListener('click', (event) => {
+  if (event.target === translateModal) closeTranslate();
+});
+clipsModal.addEventListener('click', (event) => {
+  if (event.target === clipsModal) closeClips();
 });
 deleteCurrentBtn.addEventListener('click', async () => {
   if (currentJob) await deleteJob(currentJob.id);
@@ -1857,12 +2261,16 @@ function defaultPendingParams() {
     maxNewTokens: maxNewTokensInput.value,
     maxLen: maxLenInput.value,
     decoding: decodingSelect.value,
-    temperature: temperatureInput.value
+    temperature: temperatureInput.value,
+    speakerCount: normalizedSpeakerCount(speakerCountInput.value),
+    diarizationBackend: diarizationBackendSelect.value
   };
 }
 
 function pendingSummary(item) {
-  return 'tokens ' + (item.maxNewTokens || '8192') + ' · ' + (item.decoding || 'greedy');
+  const speakers = item.speakerCount ? ' · speakers ' + item.speakerCount : '';
+  const diarization = ' · ' + diarizationBackendLabel(item.diarizationBackend || 'auto');
+  return 'tokens ' + (item.maxNewTokens || '8192') + ' · ' + (item.decoding || 'greedy') + speakers + diarization;
 }
 
 function renderPendingList() {
@@ -1903,6 +2311,19 @@ function renderPendingList() {
             <input class="pending-temp" type="number" min="0.01" step="0.05" value="${escapeHtml(String(item.temperature || ''))}" />
           </div>
         </div>
+        <div>
+          <label>目标说话人数</label>
+          <input class="pending-speakers" type="number" min="0" max="12" step="1" value="${escapeHtml(String(item.speakerCount || ''))}" />
+        </div>
+        <div>
+          <label>说话人识别后端</label>
+          <select class="pending-diarization">
+            <option value="auto"${(item.diarizationBackend || 'auto') === 'auto' ? ' selected' : ''}>auto：优先 pyannote，失败回退</option>
+            <option value="pyannote"${item.diarizationBackend === 'pyannote' ? ' selected' : ''}>pyannote：更强，需要 HF token</option>
+            <option value="cluster"${item.diarizationBackend === 'cluster' ? ' selected' : ''}>cluster：轻量本地聚类</option>
+            <option value="none"${item.diarizationBackend === 'none' ? ' selected' : ''}>none：不标说话人</option>
+          </select>
+        </div>
       </div>
     </div>`).join('');
 }
@@ -1912,6 +2333,16 @@ function updatePendingSummary(id) {
   if (!item) return;
   const row = pendingListEl.querySelector('.pending-item[data-id="' + id + '"] .pending-item-summary');
   if (row) row.textContent = pendingSummary(item);
+}
+
+function diarizationBackendLabel(value) {
+  const labels = {
+    auto: '说话人 auto',
+    pyannote: '说话人 pyannote',
+    cluster: '说话人 cluster',
+    none: '不标说话人'
+  };
+  return labels[value] || ('说话人 ' + value);
 }
 
 function updateUploadBtnLabel() {
@@ -1969,6 +2400,7 @@ pendingListEl.addEventListener('input', (event) => {
   else if (event.target.classList.contains('pending-tokens')) { item.maxNewTokens = event.target.value; updatePendingSummary(id); }
   else if (event.target.classList.contains('pending-maxlen')) item.maxLen = event.target.value;
   else if (event.target.classList.contains('pending-temp')) item.temperature = event.target.value;
+  else if (event.target.classList.contains('pending-speakers')) { item.speakerCount = event.target.value; updatePendingSummary(id); }
 });
 
 pendingListEl.addEventListener('change', (event) => {
@@ -1978,6 +2410,7 @@ pendingListEl.addEventListener('change', (event) => {
   const item = pendingUploads.find((p) => p.id === id);
   if (!item) return;
   if (event.target.classList.contains('pending-decoding')) { item.decoding = event.target.value; updatePendingSummary(id); }
+  else if (event.target.classList.contains('pending-diarization')) { item.diarizationBackend = event.target.value; updatePendingSummary(id); }
 });
 
 uploadBtn.addEventListener('click', async () => {
@@ -1999,6 +2432,8 @@ uploadBtn.addEventListener('click', async () => {
     if (item.maxLen) form.append('max_len', item.maxLen);
     form.append('decoding', item.decoding);
     if (item.temperature) form.append('temperature', item.temperature);
+    if (item.speakerCount) form.append('speaker_count', item.speakerCount);
+    form.append('diarization_backend', item.diarizationBackend || 'auto');
     try {
       const res = await fetch(apiUrl('api/jobs'), { method: 'POST', body: form });
       const data = await res.json();
@@ -2026,6 +2461,14 @@ saveBtn.addEventListener('click', async () => {
 addSegmentBtn.addEventListener('click', addSegmentAtPlayhead);
 deleteSegmentBtn.addEventListener('click', deleteActiveSegment);
 exportFolderBtn.addEventListener('click', exportCurrentJobToFolder);
+useActiveSegmentBtn.addEventListener('click', useActiveSegmentAsClipRange);
+findClipsBtn.addEventListener('click', () => findClipCandidates('model'));
+findClipsRulesBtn.addEventListener('click', () => findClipCandidates('rules'));
+renderClipBtn.addEventListener('click', renderSelectedClip);
+translateZhBtn.addEventListener('click', translateCurrentSubtitles);
+restoreTranslationBtn.addEventListener('click', restoreSourceSubtitles);
+clipStartInput.addEventListener('input', updateTimelineClipRange);
+clipEndInput.addEventListener('input', updateTimelineClipRange);
 
 renderBtn.addEventListener('click', async () => {
   if (!currentJob || !ffmpegAvailable) return;
@@ -2189,7 +2632,7 @@ function renderJobList() {
   }
   jobListEl.innerHTML = jobs.map((job) => {
     const active = currentJob && currentJob.id === job.id ? ' active' : '';
-    const canDelete = !RUNNING_STATES.has(job.status);
+    const canDelete = true;
     const percent = Math.round((job.progress || 0) * 100);
     const warning = truncationWarning(job);
     return `
@@ -2203,7 +2646,7 @@ function renderJobList() {
         ${warning ? `<div class="warning">${escapeHtml(warning)}</div>` : ''}
         <div class="task-foot">
           <div class="progress task-progress"><div class="bar" style="width:${percent}%"></div></div>
-          ${canDelete ? `<button class="small ghost" data-delete-id="${escapeHtml(job.id)}">删除</button>` : ''}
+          ${canDelete ? `<button class="small ghost" data-delete-id="${escapeHtml(job.id)}">${RUNNING_STATES.has(job.status) ? '取消并删除' : '删除'}</button>` : ''}
         </div>
       </div>`;
   }).join('');
@@ -2231,6 +2674,9 @@ function renderCurrentJob(job, options = {}) {
 function showImportView(options = {}) {
   if (options.clearDraft !== false) resetImportMode();
   currentJob = null;
+  closeSettings();
+  closeTranslate();
+  closeClips();
   setEditorDirty(false);
   fileInput.value = '';
   if (!options.preserveError) importErrorEl.textContent = '';
@@ -2250,9 +2696,13 @@ function resetImportMode() {
 
 function showProcessingPlaceholder(name) {
   currentJob = null;
+  closeSettings();
+  closeTranslate();
+  closeClips();
   processTitleEl.textContent = '创建任务';
   processNameEl.textContent = name;
   processMetaEl.textContent = '上传媒体并准备转写';
+  processBarEl.classList.remove('indeterminate');
   processBarEl.style.width = '2%';
   processErrorEl.textContent = '';
   setVisible(processingView);
@@ -2262,9 +2712,13 @@ function showProcessing(job) {
   processTitleEl.textContent = job.status === 'failed' ? '任务失败' : '转写中';
   processNameEl.textContent = job.media_name || 'input.media';
   processMetaEl.textContent = jobSummary(job);
-  processBarEl.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+  const rawPercent = Math.round((job.progress || 0) * 100);
+  const isIndeterminate = job.status === 'transcribing' && rawPercent <= 12;
+  processBarEl.classList.toggle('indeterminate', isIndeterminate);
+  processBarEl.style.width = isIndeterminate ? '38%' : `${rawPercent}%`;
   processErrorEl.textContent = job.error || truncationWarning(job);
-  deleteCurrentBtn.disabled = RUNNING_STATES.has(job.status);
+  updateTranslateProgress(job);
+  deleteCurrentBtn.disabled = false;
   setVisible(processingView);
 }
 
@@ -2273,6 +2727,8 @@ async function showEditor(job, options = {}) {
   updateEditorChrome(job);
   setVisible(workbench);
   closeSettings();
+  closeTranslate();
+  closeClips();
   const mediaUrl = apiUrl(`api/jobs/${job.id}/media`);
   if (preview.dataset.jobId !== job.id) {
     preview.dataset.jobId = job.id;
@@ -2291,10 +2747,13 @@ function updateEditorChrome(job) {
   taskUsageEl.textContent = tokenUsageSummary(job);
   taskParamsEl.textContent = parameterSummary(job);
   updateRenderProgress(job);
+  updateTranslateProgress(job);
   if (job.error) setTaskNotice(job.error, 'error');
   else if (truncationWarning(job)) setTaskNotice('可能截断，建议提高输出 tokens 后重新转写。', 'warning');
   else setTaskNotice('', '');
   updateRenderAction(job);
+  updateTranslateAction();
+  updateClipActions();
   updateRerunAction(job);
   setSaveState(editorDirty ? 'dirty' : 'saved', editorDirty ? '有未保存修改' : '已保存');
   renderDownloads(job.status);
@@ -2320,6 +2779,37 @@ function updateRenderProgress(job) {
   const percent = Math.round(renderRatio * 100);
   renderProgressBarEl.style.width = `${percent}%`;
   renderProgressTextEl.textContent = `${percent}%`;
+}
+
+function translationProgressSummary(job) {
+  const translation = (job && job.translation) || {};
+  const done = Number(translation.done || 0);
+  const total = Number(translation.total || 0);
+  const percent = translation.percent == null
+    ? (total > 0 ? Math.round(done * 1000 / total) / 10 : 0)
+    : Number(translation.percent || 0);
+  const elapsed = Number(translation.elapsed_sec || 0);
+  const elapsedText = elapsed > 0 ? ' · ' + formatDuration(elapsed) : '';
+  if (total > 0) return `翻译 ${done}/${total} (${Math.round(percent)}%)${elapsedText}`;
+  return `翻译中${elapsedText}`;
+}
+
+function updateTranslateProgress(job) {
+  const translation = (job && job.translation) || {};
+  const showProgress = job && (job.status === 'translating' || translation.in_progress || translation.percent != null);
+  translateProgressMetaEl.classList.toggle('is-hidden', !showProgress);
+  translateProgressEl.classList.toggle('is-hidden', !showProgress);
+  if (!showProgress) return;
+  const done = Number(translation.done || 0);
+  const total = Number(translation.total || 0);
+  const percent = Math.max(0, Math.min(100, translation.percent == null
+    ? (total > 0 ? done * 100 / total : 0)
+    : Number(translation.percent || 0)));
+  translateProgressBarEl.style.width = `${percent}%`;
+  translateProgressTextEl.textContent = total > 0
+    ? `${done}/${total} (${Math.round(percent)}%)`
+    : `${Math.round(percent)}%`;
+  if (job.status === 'translating') translateStatusEl.textContent = translationProgressSummary(job);
 }
 
 function setTaskNotice(message, kind) {
@@ -2350,6 +2840,8 @@ function showRerunDraft(job) {
   maxLenInput.value = inference.max_length || '';
   decodingSelect.value = inference.decoding || 'greedy';
   temperatureInput.value = inference.temperature == null ? '1.0' : inference.temperature;
+  speakerCountInput.value = job.speaker_count || '';
+  diarizationBackendSelect.value = job.diarization_backend || 'auto';
   updateDecodingControls();
   advancedDetails.open = true;
   uploadBtn.textContent = '开始重跑';
@@ -2368,6 +2860,8 @@ async function startRerunDraft() {
     decoding: decodingSelect.value,
   };
   if (temperatureInput.value) payload.temperature = Number(temperatureInput.value);
+  if (normalizedSpeakerCount(speakerCountInput.value)) payload.speaker_count = Number(normalizedSpeakerCount(speakerCountInput.value));
+  payload.diarization_backend = diarizationBackendSelect.value || 'auto';
   uploadBtn.disabled = true;
   advancedDetails.open = false;
   importErrorEl.textContent = '';
@@ -2410,6 +2904,8 @@ async function deleteJob(jobId) {
     maskPreviewVideo.load();
     tbody.innerHTML = '';
     downloads.innerHTML = '';
+    clipListEl.innerHTML = '';
+    clipStatusEl.textContent = '';
     setEditorDirty(false);
     showImportView();
   }
@@ -2632,8 +3128,23 @@ function renderTimeline(segments) {
     });
     timelineLane.appendChild(item);
   }
+  timelineTrack.appendChild(timelineClipRange);
   timelineTrack.appendChild(timelinePlayhead);
+  updateTimelineClipRange();
   updateTimelinePlayhead(segments);
+}
+
+function updateTimelineClipRange() {
+  if (!timelineClipRange || !currentJob) return;
+  const start = Math.max(0, Number(clipStartInput.value || 0));
+  const end = Math.max(start, Number(clipEndInput.value || 0));
+  if (!(end > start)) {
+    timelineClipRange.classList.remove('visible');
+    return;
+  }
+  timelineClipRange.style.left = Math.round(start * currentPixelsPerSecond) + 'px';
+  timelineClipRange.style.width = Math.max(2, Math.round((end - start) * currentPixelsPerSecond)) + 'px';
+  timelineClipRange.classList.add('visible');
 }
 
 function onSegmentPointerDown(event, index, segment) {
@@ -3329,14 +3840,238 @@ async function exportCurrentJobToFolder() {
   }
 }
 
+async function translateCurrentSubtitles() {
+  if (!currentJob || !translatorAvailable) {
+    translateStatusEl.textContent = '翻译服务未启动。请用 start_ollama.bat 或 start_vllm.bat 启动。';
+    return;
+  }
+  const saved = await saveSegments();
+  if (!saved) return;
+  translateZhBtn.disabled = true;
+  translateStatusEl.textContent = '翻译中...';
+  const total = collectSegments().length;
+  currentJob = {
+    ...currentJob,
+    status: 'translating',
+    progress: 0.95,
+    error: null,
+    translation: {
+      ...(currentJob.translation || {}),
+      in_progress: true,
+      done: 0,
+      total,
+      percent: 0
+    }
+  };
+  jobs = jobs.map((job) => job.id === currentJob.id ? currentJob : job);
+  renderCurrentJob(currentJob, { skipSegments: true });
+  ensurePolling();
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/translate`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target_language: targetLanguageInput.value || '简体中文',
+        mode: translateModeSelect.value || 'bilingual',
+        protected_terms: translateProtectedTermsInput.value || ''
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '翻译失败');
+    renderSegments(data.segments || [], activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
+    setEditorDirty(false);
+    translateStatusEl.textContent = '已翻译 ' + (data.count || 0) + ' 条字幕。';
+    await refreshJobs({ keepSelection: true, skipSegments: true });
+  } catch (err) {
+    translateStatusEl.textContent = '翻译失败：' + (err.message || err);
+  } finally {
+    updateTranslateAction();
+  }
+}
+
+function updateTranslateAction() {
+  const busy = currentJob && RUNNING_STATES.has(currentJob.status);
+  translateZhBtn.disabled = !translatorAvailable || !currentJob || busy;
+  translateZhBtn.textContent = translatorAvailable ? '开始翻译' : '翻译模型未启动';
+  openTranslateBtn.disabled = !currentJob;
+  const model = translatorInfo.model || 'Qwen2.5-3B-Instruct-AWQ';
+  translateModelStatusEl.textContent = translatorAvailable
+    ? `已配置本地模型：${model}。翻译前会自动保留英文底稿。`
+    : '未配置本地翻译模型。请在前台运行 start_ollama.bat 或 start_vllm.bat 后重新打开工作台。';
+  const translation = (currentJob && currentJob.translation) || {};
+  restoreTranslationBtn.disabled = !currentJob || !translation.source_available || busy;
+  updateTranslateProgress(currentJob);
+}
+
+async function restoreSourceSubtitles() {
+  if (!currentJob) return;
+  restoreTranslationBtn.disabled = true;
+  translateStatusEl.textContent = '正在恢复翻译前字幕...';
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/translate/restore`), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '恢复失败');
+    renderSegments(data.segments || [], 0);
+    setEditorDirty(false);
+    translateStatusEl.textContent = `已恢复 ${data.count || 0} 条翻译前字幕。`;
+    await refreshJobs({ keepSelection: true, skipSegments: true });
+  } catch (err) {
+    translateStatusEl.textContent = '恢复失败：' + (err.message || err);
+  } finally {
+    updateTranslateAction();
+  }
+}
+
+function useActiveSegmentAsClipRange() {
+  const segments = collectSegments();
+  const segment = segments[activeSegmentIndex];
+  if (!segment) {
+    clipStatusEl.textContent = '先选中一行字幕。';
+    return;
+  }
+  setClipRange(segment.start, segment.end, true);
+  clipStatusEl.textContent = '已使用当前字幕时间。';
+}
+
+async function findClipCandidates(strategy = 'model') {
+  if (!currentJob) return;
+  if (strategy === 'model' && !translatorAvailable) {
+    clipStatusEl.textContent = 'AI 精选需要本地文本模型。请在前台运行 start_ollama.bat 或 start_vllm.bat；也可以先用规则粗筛。';
+    return;
+  }
+  const saved = await saveSegments();
+  if (!saved) return;
+  findClipsBtn.disabled = true;
+  findClipsRulesBtn.disabled = true;
+  clipStatusEl.textContent = strategy === 'model' ? '正在生成候选并让模型评选...' : '正在按结构和时长粗筛...';
+  try {
+    const minDuration = Math.max(10, Number(clipMinDurationInput.value || 60));
+    const targetDuration = Math.max(minDuration, Number(clipTargetDurationInput.value || 120));
+    const maxDuration = Math.max(targetDuration, Number(clipMaxDurationInput.value || 180));
+    const limit = strategy === 'model' ? 8 : 24;
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips?min_duration=${minDuration}&target_duration=${targetDuration}&max_duration=${maxDuration}&limit=${limit}&strategy=${strategy}`), { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '查找候选片段失败');
+    renderClipCandidates(data.clips || []);
+    clipStatusEl.textContent = (data.clips || []).length
+      ? (strategy === 'model' ? 'AI 精选完成。仍建议回看原片并微调边界。' : '规则粗筛完成，这些不是模型判断结果。')
+      : '没有找到合适候选片段。';
+  } catch (err) {
+    clipStatusEl.textContent = '查找候选片段失败：' + (err.message || err);
+  } finally {
+    findClipsBtn.disabled = false;
+    findClipsRulesBtn.disabled = false;
+    updateClipActions();
+  }
+}
+
+function updateClipActions() {
+  openClipsBtn.disabled = !currentJob;
+  findClipsBtn.disabled = !translatorAvailable || !currentJob;
+  findClipsRulesBtn.disabled = !currentJob;
+  renderClipBtn.disabled = !currentJob || !ffmpegAvailable;
+  const model = translatorInfo.model || 'Qwen2.5-3B-Instruct-AWQ';
+  clipModelStatusEl.textContent = translatorAvailable
+    ? `AI 精选使用本地 ${model}；规则粗筛只生成候选，不代表内容质量。`
+    : 'AI 精选模型未启动；当前只能规则粗筛。';
+}
+
+function renderClipCandidates(clips) {
+  if (!clips.length) {
+    clipListEl.innerHTML = '';
+    return;
+  }
+  clipListEl.innerHTML = clips.map((clip) => `
+    <div class="clip-card" data-clip-start="${Number(clip.start) || 0}" data-clip-end="${Number(clip.end) || 0}">
+      <div class="clip-card-head">
+        <span>原片 ${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round(Number(clip.duration) || 0)}s</span>
+        <strong>${clip.selection_method === 'model' ? 'AI ' : '规则 '}${Math.round(Number(clip.score) || 0)}</strong>
+      </div>
+      <div class="clip-title">${escapeHtml(clip.title || '未命名片段')}</div>
+      <div class="clip-reason">${escapeHtml(clip.reason || '')}</div>
+      <div class="clip-actions" style="margin-top:8px">
+        <button class="ghost small preview-clip" type="button">回看原片</button>
+        <button class="primary small pick-clip" type="button">选用并微调</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+clipListEl.addEventListener('click', (event) => {
+  const button = event.target.closest('.pick-clip, .preview-clip');
+  if (!button) return;
+  const card = button.closest('.clip-card');
+  if (!card) return;
+  const start = Number(card.dataset.clipStart || 0);
+  if (button.classList.contains('preview-clip')) {
+    preview.currentTime = start;
+    preview.play().catch(() => {});
+    return;
+  }
+  clipListEl.querySelectorAll('.clip-card').forEach((item) => item.classList.toggle('selected', item === card));
+  setClipRange(start, Number(card.dataset.clipEnd || 0), true);
+  clipStatusEl.textContent = `已选原片 ${formatTimelineTime(start)} - ${formatTimelineTime(card.dataset.clipEnd)}，可直接修改起止秒数。`;
+});
+
+function setClipRange(start, end, seek) {
+  start = Math.max(0, Number(start) || 0);
+  end = Math.max(start + 0.25, Number(end) || start + 120);
+  clipStartInput.value = start.toFixed(1);
+  clipEndInput.value = end.toFixed(1);
+  updateTimelineClipRange();
+  if (seek) preview.currentTime = start;
+}
+
+async function renderSelectedClip() {
+  if (!currentJob || !ffmpegAvailable) return;
+  const saved = await saveSegments();
+  if (!saved) return;
+  const start = Number(clipStartInput.value || 0);
+  const end = Number(clipEndInput.value || 0);
+  if (!(end > start)) {
+    clipStatusEl.textContent = '结束时间必须大于开始时间。';
+    return;
+  }
+  renderClipBtn.disabled = true;
+  clipStatusEl.textContent = '正在导出切片...';
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        start,
+        end,
+        style: collectSubtitleStyle(),
+        name: `clip_${start.toFixed(1)}_${end.toFixed(1)}`
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '导出切片失败');
+    const files = data.files || { mp4: data.filename };
+    const links = Object.entries(files).map(([kind, filename]) => {
+      const label = kind === 'metadata' ? '原片时间映射 JSON' : kind.toUpperCase();
+      const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(filename)}`);
+      return `<a href="${href}" target="_blank">${escapeHtml(label)}</a>`;
+    }).join(' · ');
+    clipStatusEl.innerHTML = `已导出原片 ${formatTimelineTime(data.start)} - ${formatTimelineTime(data.end)}；切片内时间从 00:00 开始：${links}`;
+  } catch (err) {
+    clipStatusEl.textContent = '导出切片失败：' + (err.message || err);
+  } finally {
+    updateClipActions();
+  }
+}
+
 function jobSummary(job) {
   const inference = job.inference || {};
+  if (job.status === 'translating') return translationProgressSummary(job);
+  if (isWhisperJob(job)) return tokenUsageSummary(job);
   const temp = inference.temperature ? (' · temp ' + inference.temperature) : '';
   return tokenUsageSummary(job) + ' · max_len ' + inference.max_length + ' · ' + inference.decoding + temp;
 }
 
 function parameterSummary(job) {
   const inference = job.inference || {};
+  if (isWhisperJob(job)) return 'Whisper backend' + speakerLabelSummary(job);
   const temp = inference.temperature ? (' · temp ' + inference.temperature) : '';
   return 'max_len ' + inference.max_length + ' · ' + inference.decoding + temp;
 }
@@ -3344,16 +4079,50 @@ function parameterSummary(job) {
 function tokenUsageSummary(job) {
   const usage = job.usage || {};
   const inference = job.inference || {};
+  if (isWhisperJob(job)) {
+    const elapsed = job.elapsed_sec == null ? elapsedJobSeconds(job) : Number(job.elapsed_sec || 0);
+    const elapsedText = elapsed > 0 ? ' · ' + formatDuration(elapsed) : '';
+    if (usage.generated_tokens == null) return 'Whisper 转写' + elapsedText;
+    return 'Whisper 已返回 ' + usage.generated_tokens + ' 段' + elapsedText + speakerLabelSummary(job);
+  }
   const maxNewTokens = usage.max_new_tokens || inference.max_new_tokens || 0;
   if (usage.generated_tokens == null) return '生成 tokens ' + maxNewTokens;
   const prompt = usage.prompt_tokens == null ? '' : (' · prompt ' + usage.prompt_tokens);
   return '生成 ' + usage.generated_tokens + '/' + maxNewTokens + ' tokens' + prompt;
 }
 
+function speakerLabelSummary(job) {
+  const info = job.speaker_labeling || {};
+  if (!info.enabled) return '';
+  const backend = info.method ? ' · ' + info.method : (job.diarization_backend ? ' · ' + job.diarization_backend : '');
+  const fallback = info.fallback ? ' · fallback' : '';
+  if (info.applied && info.speakers) return ' · speakers ' + info.speakers + backend + fallback;
+  if (info.reason) return ' · speakers pending' + backend;
+  return '';
+}
+
 function truncationWarning(job) {
   const usage = job.usage || {};
+  if (isWhisperJob(job)) return '';
   if (!usage.possibly_truncated) return '';
   return '可能截断：生成 token 已达到上限，请检查字幕末尾或提高输出 tokens 后重跑。';
+}
+
+function isWhisperJob(job) {
+  return job && job.backend === 'whisper';
+}
+
+function elapsedJobSeconds(job) {
+  if (!job || !job.created_at) return 0;
+  return Math.max(0, (Date.now() / 1000) - Number(job.created_at || 0));
+}
+
+function formatDuration(seconds) {
+  seconds = Math.max(0, Math.round(Number(seconds) || 0));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes <= 0) return rest + 's';
+  return minutes + 'm ' + String(rest).padStart(2, '0') + 's';
 }
 
 function statusClass(status) {
@@ -3366,6 +4135,8 @@ function statusLabel(status) {
     loading_model: '加载模型',
     transcribing: '转写中',
     postprocessing: '处理中',
+    labeling_speakers: '标记说话人',
+    translating: '翻译中',
     waiting_review: '待校对',
     rendering: '烧录中',
     done: '已完成',

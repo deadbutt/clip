@@ -21,11 +21,18 @@ from moss_transcribe_diarize.subtitle import (
     write_text,
 )
 
-from .ffmpeg import burn_ass_subtitles, detect_ffmpeg, probe_media_duration, probe_video_size
-from .model_runner import ModelRunner
+from .clips import generate_clip_candidates, rebase_segments_for_clip
+from .ffmpeg import burn_ass_subtitles, burn_ass_subtitles_clip, detect_ffmpeg, probe_media_duration, probe_video_size
+from .speaker_labeler import label_speakers
+from .text_translator import apply_translations
 
 
+RUNNING_STATES = {"queued", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "rendering"}
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
+
+
+class JobCancelled(RuntimeError):
+    pass
 
 # Audio consumes ~12.5 prompt tokens/sec (Whisper 30s -> 375 tokens after 4x merge).
 # Transcript output is ~10 generated tokens/sec of speech; use 14 with a safety margin
@@ -80,6 +87,11 @@ class JobRecord:
     generated_tokens: int | None = None
     elapsed_sec: float | None = None
     subtitle_style: dict[str, Any] = field(default_factory=dict)
+    backend: str = ""
+    speaker_labeling: dict[str, Any] = field(default_factory=dict)
+    speaker_count: int | None = None
+    diarization_backend: str = "none"
+    translation_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -88,6 +100,10 @@ class JobRecord:
     @property
     def segments_path(self) -> Path:
         return Path(self.job_dir) / "segments.json"
+
+    @property
+    def source_segments_path(self) -> Path:
+        return Path(self.job_dir) / "segments.source.json"
 
     @property
     def srt_path(self) -> Path:
@@ -100,6 +116,10 @@ class JobRecord:
     @property
     def output_path(self) -> Path:
         return Path(self.job_dir) / "output.mp4"
+
+    @property
+    def clips_dir(self) -> Path:
+        return Path(self.job_dir) / "clips"
 
     @property
     def job_path(self) -> Path:
@@ -132,6 +152,12 @@ class JobRecord:
             "srt": str(self.srt_path),
             "ass": str(self.ass_path),
             "mp4": str(self.output_path),
+            "clips": str(self.clips_dir),
+        }
+        data["backend"] = self.backend
+        data["translation"] = {
+            **self.translation_info,
+            "source_available": self.source_segments_path.exists(),
         }
         return data
 
@@ -159,6 +185,11 @@ class JobRecord:
             generated_tokens=data.get("generated_tokens"),
             elapsed_sec=data.get("elapsed_sec"),
             subtitle_style=dict(data.get("subtitle_style") or {}),
+            backend=str(data.get("backend") or ""),
+            speaker_labeling=dict(data.get("speaker_labeling") or {}),
+            speaker_count=None if data.get("speaker_count") in ("", None) else int(data.get("speaker_count")),
+            diarization_backend=str(data.get("diarization_backend") or "auto"),
+            translation_info=dict(data.get("translation_info") or data.get("translation") or {}),
         )
 
 
@@ -166,13 +197,18 @@ class JobManager:
     def __init__(
         self,
         runs_dir: str | Path,
-        model_runner: ModelRunner,
+        model_runner: Any,
         *,
         prompt: str,
         max_length: int,
         max_new_tokens: int,
         decoding: str = "greedy",
         temperature: float | None = None,
+        speaker_count: int | None = None,
+        diarization_backend: str = "none",
+        hf_token: str | None = None,
+        pyannote_model: str = "pyannote/speaker-diarization-3.1",
+        diarization_device: str = "auto",
     ):
         self.runs_dir = Path(runs_dir)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -182,10 +218,17 @@ class JobManager:
         self.max_new_tokens = max_new_tokens
         self.decoding = decoding
         self.temperature = temperature
+        self.speaker_count = self._resolve_speaker_count(speaker_count)
+        self.diarization_backend = diarization_backend
+        self.hf_token = hf_token
+        self.pyannote_model = pyannote_model
+        self.diarization_device = diarization_device
         self._jobs: dict[str, JobRecord] = {}
         self._queue: queue.Queue[str] = queue.Queue()
         self._render_lock = threading.Lock()
+        self._translate_lock = threading.Lock()
         self._progress_save_times: dict[str, float] = {}
+        self._cancelled_jobs: set[str] = set()
         self._load_existing_jobs()
         self._worker = threading.Thread(target=self._worker_loop, name="mtd-job-worker", daemon=True)
         self._worker.start()
@@ -200,6 +243,8 @@ class JobManager:
         max_new_tokens: int | None = None,
         decoding: str | None = None,
         temperature: float | None = None,
+        speaker_count: int | None = None,
+        diarization_backend: str | None = None,
     ) -> JobRecord:
         options = self._resolve_inference_options(
             prompt=prompt,
@@ -228,6 +273,9 @@ class JobManager:
             decoding=options["decoding"],
             temperature=options["temperature"],
             model=self.model_runner.model_path,
+            backend=self._runner_backend(),
+            speaker_count=self._resolve_speaker_count(speaker_count),
+            diarization_backend=self._resolve_diarization_backend(diarization_backend),
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -243,6 +291,8 @@ class JobManager:
         max_new_tokens: int | None = None,
         decoding: str | None = None,
         temperature: float | None = None,
+        speaker_count: int | None = None,
+        diarization_backend: str | None = None,
     ) -> tuple[JobRecord, Path]:
         options = self._resolve_inference_options(
             prompt=prompt,
@@ -269,6 +319,9 @@ class JobManager:
             decoding=options["decoding"],
             temperature=options["temperature"],
             model=self.model_runner.model_path,
+            backend=self._runner_backend(),
+            speaker_count=self._resolve_speaker_count(speaker_count),
+            diarization_backend=self._resolve_diarization_backend(diarization_backend),
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -286,6 +339,8 @@ class JobManager:
         max_new_tokens: int | None = None,
         decoding: str | None = None,
         temperature: float | None = None,
+        speaker_count: int | None = None,
+        diarization_backend: str | None = None,
     ) -> JobRecord:
         source = self.get_job(job_id)
         input_path = Path(source.input_path)
@@ -299,6 +354,8 @@ class JobManager:
             max_new_tokens=source.max_new_tokens if max_new_tokens is None else max_new_tokens,
             decoding=source.decoding if decoding is None else decoding,
             temperature=source.temperature if temperature is None else temperature,
+            speaker_count=source.speaker_count if speaker_count is None else speaker_count,
+            diarization_backend=source.diarization_backend if diarization_backend is None else diarization_backend,
         )
 
     def list_jobs(self) -> list[JobRecord]:
@@ -312,8 +369,8 @@ class JobManager:
 
     def delete_job(self, job_id: str) -> None:
         job = self.get_job(job_id)
-        if job.status in {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}:
-            raise RuntimeError("Cannot delete a job while it is running.")
+        if job.status in RUNNING_STATES:
+            self._cancelled_jobs.add(job_id)
         self._jobs.pop(job_id, None)
         shutil.rmtree(job.job_dir, ignore_errors=True)
 
@@ -349,7 +406,7 @@ class JobManager:
             raise RuntimeError("No subtitle segments are available for this job.")
         if job.status == "rendering":
             return job
-        if job.status in {"queued", "loading_model", "transcribing", "postprocessing"}:
+        if job.status in RUNNING_STATES - {"rendering"}:
             raise RuntimeError("Cannot render before transcription is ready.")
         self._set_status(job, "rendering", 0.95, error=None)
         threading.Thread(
@@ -359,6 +416,221 @@ class JobManager:
             daemon=True,
         ).start()
         return job
+
+    def list_clip_candidates(
+        self,
+        job_id: str,
+        *,
+        min_duration: float = 45.0,
+        target_duration: float = 120.0,
+        max_duration: float = 180.0,
+        limit: int = 24,
+        selector: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job_id)]
+        rule_limit = max(limit, min(48, limit * 4)) if selector is not None else limit
+        candidates = [
+            candidate.to_dict()
+            for candidate in generate_clip_candidates(
+                segments,
+                min_duration=min_duration,
+                target_duration=target_duration,
+                max_duration=max_duration,
+                limit=rule_limit,
+            )
+        ]
+        if selector is not None:
+            return selector.rank_clip_candidates(candidates, limit=limit)
+        return candidates
+
+    def render_clip(
+        self,
+        job_id: str,
+        *,
+        start: float,
+        end: float,
+        style_payload: dict[str, Any] | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if not detect_ffmpeg().available:
+            raise RuntimeError("ffmpeg and ffprobe are not available on PATH.")
+        if not job.segments_path.exists():
+            raise RuntimeError("No subtitle segments are available for this job.")
+
+        start = max(0.0, float(start))
+        end = max(start + 0.25, float(end))
+        style = SubtitleStyle.from_dict(style_payload)
+        clip_id = _safe_clip_name(name or f"clip_{start:.2f}_{end:.2f}")
+        job.clips_dir.mkdir(parents=True, exist_ok=True)
+        ass_path = job.clips_dir / f"{clip_id}.ass"
+        srt_path = job.clips_dir / f"{clip_id}.srt"
+        metadata_path = job.clips_dir / f"{clip_id}.json"
+        output_path = job.clips_dir / f"{clip_id}.mp4"
+        segments = self._clip_segments(job, start=start, end=end)
+        if not segments:
+            raise RuntimeError("The selected range does not contain any subtitle segments.")
+        width, height = probe_video_size(job.input_path)
+        write_text(
+            ass_path,
+            export_ass(segments, style=style, video_width=width, video_height=height),
+            encoding="utf-8-sig",
+        )
+        write_text(
+            srt_path,
+            export_srt(segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
+            encoding="utf-8-sig",
+        )
+        write_text(
+            metadata_path,
+            json.dumps(
+                {
+                    "source_media": job.media_name,
+                    "source_start": start,
+                    "source_end": end,
+                    "duration": end - start,
+                    "clip_timeline_start": 0.0,
+                    "clip_timeline_end": end - start,
+                    "segments": [segment.to_dict() for segment in segments],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        burn_ass_subtitles_clip(job.input_path, ass_path, output_path, start=start, end=end, style=style)
+        return {
+            "filename": output_path.name,
+            "path": str(output_path),
+            "start": start,
+            "end": end,
+            "duration": end - start,
+            "segments": len(segments),
+            "files": {
+                "mp4": output_path.name,
+                "srt": srt_path.name,
+                "ass": ass_path.name,
+                "metadata": metadata_path.name,
+            },
+        }
+
+    def translate(
+        self,
+        job_id: str,
+        translator: Any,
+        *,
+        target_language: str = "简体中文",
+        mode: str = "replace",
+        batch_size: int | None = None,
+    ) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot translate while the job is running.")
+        if not job.segments_path.exists():
+            raise RuntimeError("No subtitle segments are available for this job.")
+
+        with self._translate_lock:
+            self._set_status(job, "translating", max(job.progress, 0.95), error=None)
+            try:
+                if not job.source_segments_path.exists():
+                    shutil.copyfile(job.segments_path, job.source_segments_path)
+                source_payload = json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+                segments = [SubtitleSegment.from_dict(item) for item in source_payload]
+                started = time.time()
+
+                def update_translation_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
+                    ratio = 1.0 if total <= 0 else max(0.0, min(1.0, done / total))
+                    job.translation_info = {
+                        "applied": False,
+                        "in_progress": True,
+                        "model": getattr(translator, "model", None),
+                        "target_language": target_language,
+                        "mode": mode,
+                        "done": done,
+                        "total": total,
+                        "batch_start": batch_start,
+                        "batch_count": batch_count,
+                        "percent": round(ratio * 100, 1),
+                        "elapsed_sec": round(time.time() - started, 3),
+                    }
+                    self._set_status(job, "translating", 0.95 + 0.04 * ratio, error=None)
+
+                job.translation_info = {
+                    "applied": False,
+                    "in_progress": True,
+                    "model": getattr(translator, "model", None),
+                    "target_language": target_language,
+                    "mode": mode,
+                    "done": 0,
+                    "total": len(segments),
+                    "percent": 0.0,
+                    "elapsed_sec": 0.0,
+                }
+                self._touch(job, error=None)
+                translate_kwargs = {
+                    "target_language": target_language,
+                    "progress_callback": update_translation_progress,
+                }
+                if batch_size is not None:
+                    translate_kwargs["batch_size"] = batch_size
+                translations = translator.translate_segments(segments, **translate_kwargs)
+                elapsed = time.time() - started
+                translated = apply_translations(segments, translations, mode=mode)
+                self._write_subtitle_files(job, translated)
+                job.translation_info = {
+                    "applied": True,
+                    "in_progress": False,
+                    "model": getattr(translator, "model", None),
+                    "target_language": target_language,
+                    "mode": mode,
+                    "done": len(translated),
+                    "total": len(segments),
+                    "percent": 100.0,
+                    "elapsed_sec": round(elapsed, 3),
+                }
+                job.status = "waiting_review"
+                job.progress = 0.95
+                self._touch(job, error=None)
+                return {
+                    "segments": [segment.to_dict() for segment in translated],
+                    "count": len(translated),
+                    "target_language": target_language,
+                    "mode": mode,
+                    "elapsed_sec": round(elapsed, 3),
+                }
+            except Exception as exc:
+                job.translation_info = {
+                    **job.translation_info,
+                    "in_progress": False,
+                    "error": str(exc),
+                }
+                self._set_status(job, "waiting_review", max(job.progress, 0.95), error=f"Translation failed: {exc}")
+                raise
+
+    def restore_source_segments(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot restore subtitles while the job is running.")
+        if not job.source_segments_path.exists():
+            raise FileNotFoundError("No source subtitle backup is available.")
+        segments = [
+            SubtitleSegment.from_dict(item)
+            for item in json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+        ]
+        self._write_subtitle_files(job, segments)
+        job.translation_info = {"applied": False}
+        self._touch(job, error=None)
+        return {"segments": [segment.to_dict() for segment in segments], "count": len(segments)}
+
+    def clip_download_path(self, job_id: str, filename: str) -> Path:
+        job = self.get_job(job_id)
+        path = (job.clips_dir / Path(filename).name).resolve()
+        root = job.clips_dir.resolve()
+        if root not in path.parents or path.suffix.lower() not in {".mp4", ".srt", ".ass", ".json"}:
+            raise FileNotFoundError(filename)
+        if not path.exists():
+            raise FileNotFoundError(filename)
+        return path
 
     def download_path(self, job_id: str, kind: str) -> Path:
         job = self.get_job(job_id)
@@ -392,7 +664,7 @@ class JobManager:
                 job = JobRecord.from_dict(data)
                 if not job.job_dir:
                     job.job_dir = str(path.parent)
-                if job.status in {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}:
+                if job.status in RUNNING_STATES:
                     job.status = "failed"
                     job.progress = 1.0
                     job.error = "Interrupted by previous server shutdown."
@@ -405,6 +677,7 @@ class JobManager:
     def _process_job(self, job: JobRecord) -> None:
         try:
             def update(status: str, progress: float | None, generated_tokens: int | None = None) -> None:
+                self._raise_if_cancelled(job.id)
                 if status == "transcribing" and job.generated_tokens is None:
                     job.generated_tokens = 0
                 if generated_tokens is not None:
@@ -413,6 +686,7 @@ class JobManager:
                 self._set_status(job, status, progress if progress is not None else job.progress, save=save)
 
             self._apply_auto_max_new_tokens(job)
+            self._raise_if_cancelled(job.id)
 
             result = self.model_runner.transcribe(
                 job.input_path,
@@ -423,16 +697,38 @@ class JobManager:
                 temperature=job.temperature,
                 status_callback=update,
             )
+            self._raise_if_cancelled(job.id)
             job.generated_tokens = result.generated_tokens
             self._set_status(job, "postprocessing", 0.85, error=None)
             job.raw_transcript_path.write_text(result.text, encoding="utf-8")
             segments = subtitle_segments_from_transcript(result.text, postprocess=False)
+            self._raise_if_cancelled(job.id)
+            self._set_status(job, "labeling_speakers", 0.88, error=None)
+            segments, speaker_info = label_speakers(
+                job.input_path,
+                segments,
+                work_dir=job.job_dir,
+                max_speakers=max(2, int(job.speaker_count or 0)),
+                target_speakers=job.speaker_count,
+                backend=job.diarization_backend,
+                hf_token=self.hf_token,
+                pyannote_model=self.pyannote_model,
+                device=self.diarization_device,
+            )
+            job.speaker_labeling = speaker_info.to_dict()
             self._write_subtitle_files(job, segments)
             job.prompt_len = result.prompt_len
             job.elapsed_sec = result.elapsed_sec
             self._set_status(job, "waiting_review", 0.95, error=None)
             self._progress_save_times.pop(job.id, None)
+        except JobCancelled:
+            self._cancelled_jobs.discard(job.id)
+            self._progress_save_times.pop(job.id, None)
         except Exception as exc:
+            if job.id in self._cancelled_jobs:
+                self._cancelled_jobs.discard(job.id)
+                self._progress_save_times.pop(job.id, None)
+                return
             self._set_status(job, "failed", 1.0, error=str(exc))
             self._progress_save_times.pop(job.id, None)
 
@@ -478,6 +774,10 @@ class JobManager:
             except Exception as exc:
                 self._set_status(job, "waiting_review", 0.95, error=f"Render failed: {exc}")
 
+    def _clip_segments(self, job: JobRecord, *, start: float, end: float) -> list[SubtitleSegment]:
+        source = [SubtitleSegment.from_dict(item) for item in self.list_segments(job.id)]
+        return rebase_segments_for_clip(source, start=start, end=end)
+
     def _write_subtitle_files(
         self,
         job: JobRecord,
@@ -509,6 +809,7 @@ class JobManager:
         error: str | None = None,
         save: bool = True,
     ) -> None:
+        self._raise_if_cancelled(job.id)
         job.status = status
         job.progress = max(0.0, min(1.0, progress))
         self._touch(job, error=error, save=save)
@@ -550,6 +851,21 @@ class JobManager:
             "temperature": temperature_value,
         }
 
+    def _resolve_speaker_count(self, speaker_count: int | None) -> int | None:
+        value = getattr(self, "speaker_count", None) if speaker_count is None else speaker_count
+        if value in ("", None):
+            return None
+        value = int(value)
+        if value <= 0:
+            return None
+        return max(1, min(value, 2))
+
+    def _resolve_diarization_backend(self, diarization_backend: str | None) -> str:
+        value = (diarization_backend or self.diarization_backend or "auto").lower()
+        if value in {"auto", "pyannote", "cluster", "none", "off", "disabled"}:
+            return "none" if value in {"off", "disabled"} else value
+        return "auto"
+
     def _touch(self, job: JobRecord, *, error: str | None = None, save: bool = True) -> None:
         job.error = error
         job.updated_at = time.time()
@@ -566,3 +882,21 @@ class JobManager:
             return False
         self._progress_save_times[job_id] = now
         return True
+
+    def _runner_backend(self) -> str:
+        if hasattr(self.model_runner, "runtime_info"):
+            try:
+                return str(self.model_runner.runtime_info().get("backend") or "")
+            except Exception:
+                return ""
+        return ""
+
+    def _raise_if_cancelled(self, job_id: str) -> None:
+        if job_id in self._cancelled_jobs or job_id not in self._jobs:
+            raise JobCancelled(job_id)
+
+
+def _safe_clip_name(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(name).strip())
+    safe = safe.strip("._")
+    return safe[:80] or f"clip_{uuid.uuid4().hex[:8]}"

@@ -6,16 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
-
-from moss_transcribe_diarize.inference_utils import (
-    DEFAULT_PROMPT,
-    build_transcription_messages,
-    dtype_from_name,
-    generate_transcription,
-    resolve_device,
-)
+from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
 
 
 StatusCallback = Callable[[str, float | None, int | None], None]
@@ -71,8 +62,8 @@ class ModelRunner:
         self.dtype_name = dtype
         self._model = None
         self._processor = None
-        self._device: torch.device | None = None
-        self._dtype: torch.dtype | None = None
+        self._device = None
+        self._dtype = None
         self._lock = threading.Lock()
 
     @property
@@ -116,6 +107,8 @@ class ModelRunner:
                 if status_callback is not None:
                     status_callback("transcribing", generation_progress(generated_tokens, max_new_tokens), generated_tokens)
 
+            from moss_transcribe_diarize.inference_utils import build_transcription_messages, generate_transcription
+
             started = time.time()
             result = generate_transcription(
                 self._model,
@@ -150,6 +143,14 @@ class ModelRunner:
     def _ensure_loaded(self) -> None:
         if self.is_loaded:
             return
+        torch = _torch()
+        try:
+            from transformers import AutoModelForCausalLM, AutoProcessor
+        except ImportError as exc:
+            raise RuntimeError(
+                "The legacy HF/MOSS backend requires transformers. Install the torch-runtime extra "
+                "or use the default Whisper backend."
+            ) from exc
         device = resolve_device(self.device_name)
         dtype = dtype_from_name(self.dtype_name)
         if device.type == "cpu":
@@ -160,3 +161,40 @@ class ModelRunner:
         self._processor = processor
         self._device = device
         self._dtype = dtype
+
+
+def dtype_from_name(name: str):
+    torch = _torch()
+    table = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    try:
+        return table[name.lower()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported dtype: {name}") from exc
+
+
+def resolve_device(device: str):
+    torch = _torch()
+    if device == "auto":
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return resolved
+
+
+def _torch():
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "The legacy HF/MOSS backend requires torch. Install the torch-runtime extra "
+            "or use the default Whisper backend."
+        ) from exc
+    return torch

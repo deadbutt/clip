@@ -176,7 +176,9 @@ def _media_to_wav_bytes(path: str | Path) -> bytes:
     path = Path(path).expanduser()
     audio = load_audio_item(str(path), sampling_rate=16000)
     buffer = io.BytesIO()
-    sf.write(buffer, audio, 16000, format="WAV")
+    # PCM_16 is the most widely readable WAV subtype; vLLM's soundfile/PyAV
+    # loader can reject float32 WAV received via BytesIO.
+    sf.write(buffer, audio, 16000, format="WAV", subtype="PCM_16")
     return buffer.getvalue()
 
 

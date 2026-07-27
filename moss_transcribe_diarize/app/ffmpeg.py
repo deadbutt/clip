@@ -67,7 +67,7 @@ def probe_media(path: str | Path) -> dict[str, Any]:
         "-show_format",
         str(path),
     ]
-    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    completed = subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return json.loads(completed.stdout or "{}")
 
 
@@ -117,6 +117,61 @@ def burn_ass_subtitles(
         "18",
         "-c:a",
         "copy",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        str(output_path),
+    ]
+    _run_ffmpeg_with_progress(command, cwd=ass_path.parent, duration=duration, progress_callback=progress_callback)
+    return output_path
+
+
+def burn_ass_subtitles_clip(
+    input_media: str | Path,
+    ass_path: str | Path,
+    output_path: str | Path,
+    *,
+    start: float,
+    end: float,
+    style: Any | None = None,
+    progress_callback: ProgressCallback | None = None,
+    overwrite: bool = True,
+) -> Path:
+    tools = detect_ffmpeg()
+    if not tools.available:
+        raise RuntimeError("ffmpeg and ffprobe are required for video rendering.")
+
+    start = max(0.0, float(start))
+    end = max(start + 0.1, float(end))
+    duration = end - start
+    input_media = Path(input_media).resolve()
+    ass_path = Path(ass_path).resolve()
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    has_audio = _has_audio_stream(input_media)
+    filter_graph = _build_clip_filter_graph(ass_path, start=start, end=end, style=style, has_audio=has_audio)
+    command = [
+        tools.ffmpeg or "ffmpeg",
+        "-y" if overwrite else "-n",
+        "-i",
+        str(input_media),
+        "-filter_complex",
+        filter_graph,
+        "-map",
+        "[v]",
+        *(["-map", "[a]"] if has_audio else []),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
         "-movflags",
         "+faststart",
         "-progress",
@@ -184,6 +239,14 @@ def probe_media_duration(path: str | Path) -> float | None:
         return None
 
 
+def _has_audio_stream(path: str | Path) -> bool:
+    try:
+        media = probe_media(path)
+    except Exception:
+        return True
+    return any(stream.get("codec_type") == "audio" for stream in media.get("streams", []))
+
+
 def _parse_ffmpeg_time(value: str) -> float | None:
     try:
         hours, minutes, seconds = value.split(":")
@@ -197,7 +260,34 @@ def _build_filter_args(ass_path: Path, *, style: Any | None = None) -> list[str]
     return ["-filter_complex", filter_graph, "-map", "[v]", "-map", "0:a?"]
 
 
+def _build_clip_filter_graph(
+    ass_path: Path,
+    *,
+    start: float,
+    end: float,
+    style: Any | None = None,
+    has_audio: bool = True,
+) -> str:
+    duration = max(0.1, end - start)
+    trimmed = f"[0:v]trim=start={start:.3f}:duration={duration:.3f},setpts=PTS-STARTPTS[clipv]"
+    video_chain = _build_video_filter_graph(ass_path, style=style, input_label="[clipv]", output_label="[v]")
+    if not has_audio:
+        return f"{trimmed};{video_chain}"
+    audio_chain = f"[0:a]atrim=start={start:.3f}:duration={duration:.3f},asetpts=PTS-STARTPTS[a]"
+    return f"{trimmed};{video_chain};{audio_chain}"
+
+
 def _build_filter_graph(ass_path: Path, *, style: Any | None = None) -> str:
+    return _build_video_filter_graph(ass_path, style=style, input_label="[0:v]", output_label="[v]")
+
+
+def _build_video_filter_graph(
+    ass_path: Path,
+    *,
+    style: Any | None,
+    input_label: str,
+    output_label: str,
+) -> str:
     subtitles = f"subtitles={_escape_filter_path(ass_path.name)}"
     if style is not None and bool(getattr(style, "mask_enabled", False)):
         height = max(1, int(getattr(style, "mask_height", 120)))
@@ -206,27 +296,27 @@ def _build_filter_graph(ass_path: Path, *, style: Any | None = None) -> str:
         mode = str(getattr(style, "mask_mode", "blur") or "blur")
         if mode == "bar":
             return (
-                "[0:v]"
+                f"{input_label}"
                 "drawbox="
                 "x=0:"
                 f"y=max(0\\,ih-{height + margin_v}):"
                 "w=iw:"
                 f"h=min({height}\\,ih-{margin_v}):"
                 f"color=black@{opacity:.3f}:"
-                f"t=fill,{subtitles}[v]"
+                f"t=fill,{subtitles}{output_label}"
             )
         blur = max(1, int(getattr(style, "mask_blur", 24)))
         region_y = f"max(0\\,ih-{height + margin_v})"
         region_h = f"min({height}\\,ih-{margin_v})"
         overlay_y = f"H-h-{margin_v}"
         return (
-            f"[0:v]split=2[base][region];"
+            f"{input_label}split=2[base][region];"
             f"[region]crop=iw:{region_h}:0:{region_y},boxblur={blur}:1[blurred];"
             f"[base][blurred]overlay=0:{overlay_y},"
             f"drawbox=x=0:y={region_y}:w=iw:h={region_h}:color=black@0.180:t=fill,"
-            f"{subtitles}[v]"
+            f"{subtitles}{output_label}"
         )
-    return f"[0:v]{subtitles}[v]"
+    return f"{input_label}{subtitles}{output_label}"
 
 
 def _escape_filter_path(path: str) -> str:
