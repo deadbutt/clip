@@ -1608,6 +1608,19 @@ INDEX_HTML = """<!doctype html>
       gap: 10px;
       margin-top: 0;
     }
+    .clip-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+      gap: 14px;
+      align-items: start;
+    }
+    .clip-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.78);
+      min-width: 0;
+    }
     .clip-panel-head {
       display: flex;
       align-items: center;
@@ -1616,6 +1629,11 @@ INDEX_HTML = """<!doctype html>
       margin-bottom: 8px;
     }
     .clip-panel-head strong { font-size: 14px; }
+    .clip-panel-head span {
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
     .clip-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .clip-list {
       display: flex;
@@ -1631,6 +1649,61 @@ INDEX_HTML = """<!doctype html>
       background: #fff;
     }
     .clip-card.selected { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal); }
+    .clip-card.queue {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: start;
+      cursor: pointer;
+    }
+    .clip-order {
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: #eef7f5;
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+    }
+    .clip-card-actions {
+      display: grid;
+      grid-template-columns: repeat(2, 30px);
+      gap: 6px;
+    }
+    .clip-card-actions .small {
+      width: 30px;
+      min-width: 30px;
+      padding-left: 0;
+      padding-right: 0;
+    }
+    .clip-empty {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 18px 12px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+      background: rgba(255,255,255,0.55);
+    }
+    .clip-editor {
+      margin-top: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .clip-nudge-actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .clip-nudge-actions .small {
+      min-width: 0;
+      padding-left: 8px;
+      padding-right: 8px;
+    }
     .translation-review {
       margin-top: 12px;
       border-top: 1px solid var(--line);
@@ -1704,18 +1777,63 @@ INDEX_HTML = """<!doctype html>
       top: 0;
       bottom: 0;
       display: none;
-      pointer-events: none;
+      pointer-events: auto;
       border-left: 2px solid #008f83;
       border-right: 2px solid #008f83;
       background: rgba(0, 143, 131, 0.12);
       z-index: 1;
+      cursor: grab;
+      touch-action: none;
     }
     .timeline-clip-range.visible { display: block; }
+    .timeline-clip-range.dragging { cursor: grabbing; }
+    .timeline-clip-handle {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 14px;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: ew-resize;
+    }
+    .timeline-clip-handle::after {
+      content: "";
+      position: absolute;
+      top: 8px;
+      bottom: 8px;
+      left: 5px;
+      width: 4px;
+      border-radius: 999px;
+      background: #00b8aa;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.22), 0 0 0 4px rgba(0,143,131,0.18);
+    }
+    .timeline-clip-handle.start { left: -8px; }
+    .timeline-clip-handle.end { right: -8px; }
+    .timeline-clip-label {
+      position: absolute;
+      top: 6px;
+      left: 50%;
+      transform: translateX(-50%);
+      max-width: calc(100% - 28px);
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.62);
+      color: #eafdfb;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
+      font-variant-numeric: tabular-nums;
+    }
     .model-state { margin-bottom: 10px; }
     @media (max-width: 900px) {
       body { overflow: auto; }
       main { height: auto; grid-template-columns: 1fr; }
       .view, .workbench { height: auto; }
+      .clip-grid { grid-template-columns: 1fr; }
       .editor-grid { grid-template-columns: 1fr; }
       .table-column { border: 0; }
       .task-view-inner { grid-template-columns: 1fr; }
@@ -1859,7 +1977,11 @@ INDEX_HTML = """<!doctype html>
                 <div id="timelineTrack" class="timeline-track">
                   <div id="timelineRuler" class="timeline-ruler"></div>
                   <div id="timelineLane" class="timeline-lane"></div>
-                  <div id="timelineClipRange" class="timeline-clip-range"></div>
+                  <div id="timelineClipRange" class="timeline-clip-range">
+                    <button class="timeline-clip-handle start" type="button" data-clip-drag="start" aria-label="拖动切片开头"></button>
+                    <span class="timeline-clip-label"></span>
+                    <button class="timeline-clip-handle end" type="button" data-clip-drag="end" aria-label="拖动切片结尾"></button>
+                  </div>
                   <div id="timelinePlayhead" class="timeline-playhead"></div>
                   <div id="timelineGuide" class="timeline-guide"></div>
                 </div>
@@ -1932,23 +2054,53 @@ INDEX_HTML = """<!doctype html>
             <div class="settings-modal-body">
               <div id="clipModelStatus" class="meta model-state"></div>
               <div class="clip-tools">
-                <div class="row">
-                  <div><label for="clipStart">原片开始秒数</label><input id="clipStart" type="number" min="0" step="0.1" value="0" /></div>
-                  <div><label for="clipEnd">原片结束秒数</label><input id="clipEnd" type="number" min="0.1" step="0.1" value="120" /></div>
-                </div>
-                <div class="row">
-                  <div><label for="clipMinDuration">最短秒数</label><input id="clipMinDuration" type="number" min="10" step="5" value="60" /></div>
-                  <div><label for="clipTargetDuration">目标秒数</label><input id="clipTargetDuration" type="number" min="20" step="5" value="120" /></div>
-                  <div><label for="clipMaxDuration">最长秒数</label><input id="clipMaxDuration" type="number" min="30" step="5" value="180" /></div>
-                </div>
-                <div class="clip-actions">
-                  <button id="useActiveSegment" class="ghost small" type="button">使用当前字幕时间</button>
-                  <button id="findClips" class="primary small" type="button">AI 精选</button>
-                  <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
-                  <button id="renderClip" class="warn small" type="button">导出带字幕切片</button>
+                <div class="clip-grid">
+                  <section class="clip-panel">
+                    <div class="clip-panel-head">
+                      <strong>候选片段</strong>
+                      <span id="clipCandidateCount">0 个</span>
+                    </div>
+                    <div class="row">
+                      <div><label for="clipMinDuration">最短秒数</label><input id="clipMinDuration" type="number" min="10" step="5" value="60" /></div>
+                      <div><label for="clipTargetDuration">目标秒数</label><input id="clipTargetDuration" type="number" min="20" step="5" value="120" /></div>
+                      <div><label for="clipMaxDuration">最长秒数</label><input id="clipMaxDuration" type="number" min="30" step="5" value="180" /></div>
+                    </div>
+                    <div class="clip-actions" style="margin-top:10px">
+                      <button id="findClips" class="primary small" type="button">AI 精选</button>
+                      <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
+                    </div>
+                    <div id="clipList" class="clip-list" style="margin-top:10px"></div>
+                  </section>
+                  <section class="clip-panel">
+                    <div class="clip-panel-head">
+                      <strong>已选切片</strong>
+                      <span id="clipQueueCount">0 个</span>
+                    </div>
+                    <div id="clipQueueList" class="clip-list"></div>
+                    <div class="clip-editor">
+                      <div class="row">
+                        <div><label for="clipTitleInput">切片名称</label><input id="clipTitleInput" type="text" value="" placeholder="clip name" /></div>
+                      </div>
+                      <div class="row" style="margin-top:10px">
+                        <div><label for="clipStart">原片开始秒数</label><input id="clipStart" type="number" min="0" step="0.1" value="0" /></div>
+                        <div><label for="clipEnd">原片结束秒数</label><input id="clipEnd" type="number" min="0.1" step="0.1" value="120" /></div>
+                        <div><label for="clipDuration">切片时长</label><input id="clipDuration" type="number" min="0.25" step="0.1" value="120" /></div>
+                      </div>
+                      <div class="clip-nudge-actions">
+                        <button id="clipMoveBack" class="ghost small" type="button">整体 -1s</button>
+                        <button id="clipMoveForward" class="ghost small" type="button">整体 +1s</button>
+                        <button id="clipStartEarlier" class="ghost small" type="button">开头 -0.5s</button>
+                        <button id="clipEndLater" class="ghost small" type="button">结尾 +0.5s</button>
+                      </div>
+                      <div class="clip-actions" style="margin-top:10px">
+                        <button id="useActiveSegment" class="ghost small" type="button">使用当前字幕时间</button>
+                        <button id="renderClip" class="warn small" type="button">导出当前切片</button>
+                        <button id="renderClipQueue" class="ghost small" type="button">按顺序导出全部</button>
+                      </div>
+                    </div>
+                  </section>
                 </div>
                 <div id="clipStatus" class="export-status"></div>
-                <div id="clipList" class="clip-list"></div>
               </div>
             </div>
           </div>
@@ -2142,8 +2294,10 @@ const restoreTranslationBtn = document.querySelector('#restoreTranslation');
 const translationReviewEl = document.querySelector('#translationReview');
 const translationReviewMetaEl = document.querySelector('#translationReviewMeta');
 const translationReviewListEl = document.querySelector('#translationReviewList');
+const clipTitleInput = document.querySelector('#clipTitleInput');
 const clipStartInput = document.querySelector('#clipStart');
 const clipEndInput = document.querySelector('#clipEnd');
+const clipDurationInput = document.querySelector('#clipDuration');
 const clipMinDurationInput = document.querySelector('#clipMinDuration');
 const clipTargetDurationInput = document.querySelector('#clipTargetDuration');
 const clipMaxDurationInput = document.querySelector('#clipMaxDuration');
@@ -2151,8 +2305,16 @@ const useActiveSegmentBtn = document.querySelector('#useActiveSegment');
 const findClipsBtn = document.querySelector('#findClips');
 const findClipsRulesBtn = document.querySelector('#findClipsRules');
 const renderClipBtn = document.querySelector('#renderClip');
+const renderClipQueueBtn = document.querySelector('#renderClipQueue');
+const clipMoveBackBtn = document.querySelector('#clipMoveBack');
+const clipMoveForwardBtn = document.querySelector('#clipMoveForward');
+const clipStartEarlierBtn = document.querySelector('#clipStartEarlier');
+const clipEndLaterBtn = document.querySelector('#clipEndLater');
 const clipStatusEl = document.querySelector('#clipStatus');
 const clipListEl = document.querySelector('#clipList');
+const clipQueueListEl = document.querySelector('#clipQueueList');
+const clipCandidateCountEl = document.querySelector('#clipCandidateCount');
+const clipQueueCountEl = document.querySelector('#clipQueueCount');
 const clipModelStatusEl = document.querySelector('#clipModelStatus');
 let jobs = [];
 let currentJob = null;
@@ -2173,6 +2335,7 @@ let speakerNameMap = {};
 let timelineDragging = false;
 let currentPixelsPerSecond = 12;
 let segmentDragState = null;
+let clipDragState = null;
 let cachedSegments = null;
 let cachedTimelineSegments = [];
 let cachedTimelineLayout = { lanes: new Map(), count: 1 };
@@ -2186,6 +2349,9 @@ let timelineAutoScrollMode = '';
 let timelineFollowHoldUntil = 0;
 let dismissedTranslationReviewItems = new Set();
 let translationReviewJobId = '';
+let clipQueueJobId = '';
+let selectedClips = [];
+let activeClipId = '';
 const SEGMENT_EDGE_PX = 8;
 const SEGMENT_DRAG_THRESHOLD = 3;
 const SEGMENT_DRAG_SENSITIVITY = 5;
@@ -2302,7 +2468,7 @@ function openSettings() { settingsModal.classList.remove('is-hidden'); }
 function closeSettings() { settingsModal.classList.add('is-hidden'); }
 function openTranslate() { updateTranslateAction(); translateModal.classList.remove('is-hidden'); }
 function closeTranslate() { translateModal.classList.add('is-hidden'); }
-function openClips() { updateClipActions(); updateTimelineClipRange(); clipsModal.classList.remove('is-hidden'); }
+function openClips() { ensureClipQueueForJob(); updateClipActions(); updateTimelineClipRange(); clipsModal.classList.remove('is-hidden'); }
 function closeClips() { clipsModal.classList.add('is-hidden'); }
 
 function setSaveState(state, message) {
@@ -2586,6 +2752,7 @@ useActiveSegmentBtn.addEventListener('click', useActiveSegmentAsClipRange);
 findClipsBtn.addEventListener('click', () => findClipCandidates('model'));
 findClipsRulesBtn.addEventListener('click', () => findClipCandidates('rules'));
 renderClipBtn.addEventListener('click', renderSelectedClip);
+renderClipQueueBtn.addEventListener('click', renderQueuedClips);
 translateZhBtn.addEventListener('click', translateCurrentSubtitles);
 restoreTranslationBtn.addEventListener('click', restoreSourceSubtitles);
 translationReviewListEl.addEventListener('click', (event) => {
@@ -2608,8 +2775,37 @@ translationReviewListEl.addEventListener('click', (event) => {
   if (action === 'jump') closeTranslate();
   updateSubtitlePreview();
 });
-clipStartInput.addEventListener('input', updateTimelineClipRange);
-clipEndInput.addEventListener('input', updateTimelineClipRange);
+clipTitleInput.addEventListener('input', () => {
+  const clip = activeClip();
+  if (!clip) return;
+  updateClipFromValues(clip.id, { title: clipTitleInput.value });
+});
+clipStartInput.addEventListener('change', () => {
+  const clip = activeClip();
+  if (!clip) {
+    updateTimelineClipRange();
+    return;
+  }
+  updateClipFromValues(clip.id, { start: Number(clipStartInput.value || 0), end: Number(clipEndInput.value || 0), seek: true });
+});
+clipEndInput.addEventListener('change', () => {
+  const clip = activeClip();
+  if (!clip) {
+    updateTimelineClipRange();
+    return;
+  }
+  updateClipFromValues(clip.id, { start: Number(clipStartInput.value || 0), end: Number(clipEndInput.value || 0) });
+});
+clipDurationInput.addEventListener('change', () => {
+  const clip = activeClip();
+  if (!clip) return;
+  const duration = Math.max(0.25, Number(clipDurationInput.value || 0));
+  updateClipFromValues(clip.id, { start: clip.start, end: clip.start + duration });
+});
+clipMoveBackBtn.addEventListener('click', () => nudgeActiveClip({ shift: -1 }));
+clipMoveForwardBtn.addEventListener('click', () => nudgeActiveClip({ shift: 1 }));
+clipStartEarlierBtn.addEventListener('click', () => nudgeActiveClip({ startDelta: -0.5 }));
+clipEndLaterBtn.addEventListener('click', () => nudgeActiveClip({ endDelta: 0.5 }));
 
 renderBtn.addEventListener('click', async () => {
   if (!currentJob || !ffmpegAvailable) return;
@@ -2656,12 +2852,13 @@ preview.addEventListener('loadedmetadata', () => {
   syncMaskPreviewPlaybackRate();
 });
 timelineScroll.addEventListener('pointerdown', (event) => {
-  if (!currentJob || event.target.closest('.timeline-segment')) return;
+  if (!currentJob || event.target.closest('.timeline-segment, .timeline-clip-range')) return;
   event.preventDefault();
   timelineDragging = true;
   timelineScroll.setPointerCapture(event.pointerId);
   seekTimelineFromPointer(event);
 });
+timelineClipRange.addEventListener('pointerdown', onClipRangePointerDown);
 timelineScroll.addEventListener('pointermove', (event) => {
   if (!timelineDragging) return;
   event.preventDefault();
@@ -2836,6 +3033,7 @@ function renderCurrentJob(job, options = {}) {
     translationReviewJobId = job.id;
     dismissedTranslationReviewItems = new Set();
   }
+  ensureClipQueueForJob();
   renderJobList();
   if (EDIT_STATES.has(job.status)) showEditor(job, options);
   else showProcessing(job);
@@ -2846,6 +3044,7 @@ function showImportView(options = {}) {
   currentJob = null;
   cachedSegments = null;
   cachedTimelineSegments = [];
+  ensureClipQueueForJob();
   closeSettings();
   closeTranslate();
   closeClips();
@@ -3475,7 +3674,137 @@ function updateTimelineClipRange() {
   }
   timelineClipRange.style.left = Math.round(start * currentPixelsPerSecond) + 'px';
   timelineClipRange.style.width = Math.max(2, Math.round((end - start) * currentPixelsPerSecond)) + 'px';
+  const label = timelineClipRange.querySelector('.timeline-clip-label');
+  if (label) label.textContent = `${formatTimelineTime(start)} - ${formatTimelineTime(end)}`;
   timelineClipRange.classList.add('visible');
+}
+
+function onClipRangePointerDown(event) {
+  if (event.button !== 0 || !currentJob) return;
+  const clip = activeClip();
+  if (!clip) {
+    clipStatusEl.textContent = '先从已选切片里选中一个片段。';
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = timelineClipRange.getBoundingClientRect();
+  const offsetX = event.clientX - rect.left;
+  const edgeZone = Math.min(18, Math.max(8, rect.width / 3));
+  let mode = event.target.dataset.clipDrag || 'move';
+  if (mode !== 'start' && mode !== 'end') {
+    if (offsetX <= edgeZone) mode = 'start';
+    else if (offsetX >= rect.width - edgeZone) mode = 'end';
+    else mode = 'move';
+  }
+  const segments = collectSegments();
+  const duration = timelineDuration(segments);
+  clipDragState = {
+    clipId: clip.id,
+    mode,
+    pointerId: event.pointerId,
+    startX: timelineContentXFromPointer(event),
+    origStart: Math.max(0, Number(clip.start) || 0),
+    origEnd: Math.max(Number(clip.start) || 0.25, Number(clip.end) || 0.25),
+    duration,
+    pps: currentPixelsPerSecond || timelinePixelsPerSecond(duration, timelineScroll.clientWidth || 1),
+    segments,
+    moved: false,
+    newStart: null,
+    newEnd: null
+  };
+  timelineClipRange.classList.add('dragging');
+  try { timelineClipRange.setPointerCapture(event.pointerId); } catch (err) {}
+  const moveHandler = (ev) => onClipRangePointerMove(ev, clipDragState);
+  const upHandler = (ev) => {
+    onClipRangePointerUp(ev, clipDragState);
+    window.removeEventListener('pointermove', moveHandler);
+    window.removeEventListener('pointerup', upHandler);
+    window.removeEventListener('pointercancel', upHandler);
+  };
+  window.addEventListener('pointermove', moveHandler);
+  window.addEventListener('pointerup', upHandler);
+  window.addEventListener('pointercancel', upHandler);
+}
+
+function onClipRangePointerMove(event, state, options = {}) {
+  if (!state) return;
+  if (!options.fromAutoScroll) updateTimelineEdgeAutoScroll(event, 'clip');
+  const dx = timelineContentXFromPointer(event) - state.startX;
+  if (!state.moved && Math.abs(dx) < SEGMENT_DRAG_THRESHOLD) return;
+  state.moved = true;
+  const deltaSec = dx / Math.max(1, state.pps);
+  const minDuration = 0.25;
+  let newStart = state.origStart;
+  let newEnd = state.origEnd;
+  if (state.mode === 'move') {
+    const clipDuration = state.origEnd - state.origStart;
+    newStart = state.origStart + deltaSec;
+    newEnd = state.origEnd + deltaSec;
+    if (newStart < 0) { newStart = 0; newEnd = clipDuration; }
+    if (state.duration > 0 && newEnd > state.duration) {
+      newEnd = state.duration;
+      newStart = Math.max(0, newEnd - clipDuration);
+    }
+  } else if (state.mode === 'start') {
+    newStart = Math.max(0, Math.min(state.origEnd - minDuration, state.origStart + deltaSec));
+  } else {
+    newEnd = Math.max(state.origStart + minDuration, state.origEnd + deltaSec);
+    if (state.duration > 0) newEnd = Math.min(state.duration, newEnd);
+  }
+  const snap = computeClipSnap(state, newStart, newEnd);
+  if (snap) {
+    if (snap.edge === 'start') {
+      const shift = snap.time - newStart;
+      newStart = snap.time;
+      if (state.mode === 'move') newEnd += shift;
+    } else {
+      const shift = snap.time - newEnd;
+      newEnd = snap.time;
+      if (state.mode === 'move') newStart += shift;
+    }
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (state.duration > 0 && newEnd > state.duration) {
+      newStart -= (newEnd - state.duration);
+      newEnd = state.duration;
+    }
+    if (newEnd - newStart < minDuration) {
+      if (snap.edge === 'start') newStart = newEnd - minDuration;
+      else newEnd = newStart + minDuration;
+    }
+  }
+  if (snap) showTimelineGuide(snap.time, snap.label);
+  else hideTimelineGuide();
+  state.newStart = Math.max(0, newStart);
+  state.newEnd = Math.max(state.newStart + minDuration, newEnd);
+  updateClipFromValues(state.clipId, { start: state.newStart, end: state.newEnd, seek: state.mode !== 'end' });
+  clipStatusEl.textContent = `正在调整切片：${formatTimelineTime(state.newStart)} - ${formatTimelineTime(state.newEnd)}`;
+}
+
+function computeClipSnap(state, newStart, newEnd) {
+  return computeSegmentSnap(
+    {
+      index: -1,
+      mode: state.mode,
+      pps: state.pps,
+      segments: state.segments || [],
+    },
+    newStart,
+    newEnd
+  );
+}
+
+function onClipRangePointerUp(event, state) {
+  if (!state) return;
+  timelineClipRange.classList.remove('dragging');
+  stopTimelineEdgeAutoScroll();
+  hideTimelineGuide();
+  try { timelineClipRange.releasePointerCapture(event.pointerId); } catch (err) {}
+  if (state.moved && state.newStart != null && state.newEnd != null) {
+    updateClipFromValues(state.clipId, { start: state.newStart, end: state.newEnd, seek: state.mode !== 'end' });
+    clipStatusEl.textContent = `已调整切片：${formatTimelineTime(state.newStart)} - ${formatTimelineTime(state.newEnd)}。`;
+  }
+  clipDragState = null;
 }
 
 function onSegmentPointerDown(event, index, segment) {
@@ -3994,7 +4323,7 @@ function timelineEdgeScrollSpeed(event) {
 function runTimelineEdgeAutoScroll() {
   timelineAutoScrollFrame = 0;
   const pointer = timelineAutoScrollPointer;
-  if (!pointer || (!timelineDragging && !(segmentDragState && segmentDragState.moved))) return;
+  if (!pointer || (!timelineDragging && !(segmentDragState && segmentDragState.moved) && !(clipDragState && clipDragState.moved))) return;
   const speed = timelineEdgeScrollSpeed(pointer);
   if (speed === 0) return;
   const maxScroll = Math.max(0, (timelineTrack.scrollWidth || timelineTrack.clientWidth || 0) - timelineScroll.clientWidth);
@@ -4005,6 +4334,8 @@ function runTimelineEdgeAutoScroll() {
       seekTimelineFromPointer(pointer);
     } else if (timelineAutoScrollMode === 'segment' && segmentDragState) {
       onSegmentPointerMove(pointer, segmentDragState, { fromAutoScroll: true });
+    } else if (timelineAutoScrollMode === 'clip' && clipDragState) {
+      onClipRangePointerMove(pointer, clipDragState, { fromAutoScroll: true });
     }
   }
   timelineAutoScrollFrame = requestAnimationFrame(runTimelineEdgeAutoScroll);
@@ -4191,7 +4522,7 @@ function updateTimelinePlayhead(segments) {
   const left = duration > 0 ? Math.min(trackWidth, timelineTimeToX(time)) : 0;
   timelinePlayhead.style.left = left + 'px';
   const now = performance.now();
-  if (time > 0 && timelineScroll.clientWidth && now >= timelineFollowHoldUntil && !timelineDragging && !(segmentDragState && segmentDragState.moved)) {
+  if (time > 0 && timelineScroll.clientWidth && now >= timelineFollowHoldUntil && !timelineDragging && !(segmentDragState && segmentDragState.moved) && !(clipDragState && clipDragState.moved)) {
     const visibleLeft = timelineScroll.scrollLeft;
     const visibleRight = visibleLeft + timelineScroll.clientWidth;
     if (left < visibleLeft + 24 || left > visibleRight - 24) {
@@ -4520,8 +4851,17 @@ function useActiveSegmentAsClipRange() {
     clipStatusEl.textContent = '先选中一行字幕。';
     return;
   }
-  setClipRange(segment.start, segment.end, true);
-  clipStatusEl.textContent = '已使用当前字幕时间。';
+  const clip = activeClip() || addClipToQueue({
+    id: 'manual',
+    start: segment.start,
+    end: segment.end,
+    title: segment.text || '当前字幕切片',
+    reason: 'manual range from selected subtitle',
+    score: 0,
+    selection_method: 'manual'
+  }, { silent: true });
+  updateClipFromValues(clip.id, { start: segment.start, end: segment.end, seek: true });
+  clipStatusEl.textContent = '已把当前字幕时间写入当前切片。';
 }
 
 async function findClipCandidates(strategy = 'model') {
@@ -4560,20 +4900,25 @@ function updateClipActions() {
   openClipsBtn.disabled = !currentJob;
   findClipsBtn.disabled = !translatorAvailable || !currentJob;
   findClipsRulesBtn.disabled = !currentJob;
-  renderClipBtn.disabled = !currentJob || !ffmpegAvailable;
+  renderClipBtn.disabled = !currentJob || !ffmpegAvailable || !activeClip();
+  renderClipQueueBtn.disabled = !currentJob || !ffmpegAvailable || !selectedClips.length;
   const model = translatorInfo.model || 'Qwen2.5-3B-Instruct-AWQ';
   clipModelStatusEl.textContent = translatorAvailable
     ? `AI 精选使用本地 ${model}；规则粗筛只生成候选，不代表内容质量。`
     : 'AI 精选模型未启动；当前只能规则粗筛。';
+  if (clipQueueCountEl) clipQueueCountEl.textContent = `${selectedClips.length} 个`;
 }
 
 function renderClipCandidates(clips) {
+  if (clipCandidateCountEl) clipCandidateCountEl.textContent = `${clips.length} 个`;
   if (!clips.length) {
-    clipListEl.innerHTML = '';
+    clipListEl.innerHTML = '<div class="clip-empty">没有候选片段</div>';
     return;
   }
-  clipListEl.innerHTML = clips.map((clip) => `
-    <div class="clip-card" data-clip-start="${Number(clip.start) || 0}" data-clip-end="${Number(clip.end) || 0}">
+  clipListEl.innerHTML = clips.map((clip) => {
+    const encoded = encodeClipPayload(clip);
+    return `
+    <div class="clip-card" data-clip-start="${Number(clip.start) || 0}" data-clip-end="${Number(clip.end) || 0}" data-clip-payload="${encoded}">
       <div class="clip-card-head">
         <span>原片 ${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round(Number(clip.duration) || 0)}s</span>
         <strong>${clip.selection_method === 'model' ? 'AI ' : '规则 '}${Math.round(Number(clip.score) || 0)}</strong>
@@ -4585,7 +4930,8 @@ function renderClipCandidates(clips) {
         <button class="primary small pick-clip" type="button">选用并微调</button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 clipListEl.addEventListener('click', (event) => {
@@ -4600,25 +4946,223 @@ clipListEl.addEventListener('click', (event) => {
     return;
   }
   clipListEl.querySelectorAll('.clip-card').forEach((item) => item.classList.toggle('selected', item === card));
-  setClipRange(start, Number(card.dataset.clipEnd || 0), true);
-  clipStatusEl.textContent = `已选原片 ${formatTimelineTime(start)} - ${formatTimelineTime(card.dataset.clipEnd)}，可直接修改起止秒数。`;
+  const clip = decodeClipPayload(card.dataset.clipPayload) || {
+    start,
+    end: Number(card.dataset.clipEnd || 0),
+    title: '未命名片段',
+    reason: '',
+    score: 0,
+    selection_method: 'rules'
+  };
+  addClipToQueue(clip);
 });
+
+clipQueueListEl.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-clip-action]');
+  const card = event.target.closest('.clip-card.queue');
+  if (!card) return;
+  const id = card.dataset.clipId;
+  if (!id) return;
+  if (!button) {
+    selectClip(id, { seek: true });
+    return;
+  }
+  event.stopPropagation();
+  const action = button.dataset.clipAction;
+  if (action === 'select') selectClip(id, { seek: true });
+  if (action === 'up') moveQueuedClip(id, -1);
+  if (action === 'down') moveQueuedClip(id, 1);
+  if (action === 'remove') removeQueuedClip(id);
+});
+
+function ensureClipQueueForJob() {
+  const jobId = currentJob ? currentJob.id : '';
+  if (clipQueueJobId === jobId) return;
+  clipQueueJobId = jobId;
+  selectedClips = [];
+  activeClipId = '';
+  renderClipQueue();
+  syncClipEditor();
+}
+
+function encodeClipPayload(clip) {
+  try {
+    return escapeHtml(JSON.stringify(clip));
+  } catch (_) {
+    return '';
+  }
+}
+
+function decodeClipPayload(value) {
+  try {
+    return JSON.parse(value || '{}');
+  } catch (_) {
+    return null;
+  }
+}
+
+function makeClipId() {
+  return 'clip_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
+}
+
+function normalizeQueuedClip(source) {
+  const start = Math.max(0, Number(source.start) || 0);
+  const fallbackEnd = start + Math.max(0.25, Number(source.duration) || 120);
+  const end = Math.max(start + 0.25, Number(source.end) || fallbackEnd);
+  return {
+    id: makeClipId(),
+    sourceId: source.id || '',
+    start,
+    end,
+    title: String(source.title || '未命名片段').trim() || '未命名片段',
+    reason: String(source.reason || ''),
+    score: Number(source.score) || 0,
+    selectionMethod: source.selection_method || source.selectionMethod || 'rules'
+  };
+}
+
+function activeClip() {
+  return selectedClips.find((clip) => clip.id === activeClipId) || null;
+}
+
+function addClipToQueue(source, options = {}) {
+  const clip = normalizeQueuedClip(source);
+  selectedClips.push(clip);
+  selectClip(clip.id, { seek: true });
+  if (!options.silent) {
+    clipStatusEl.textContent = `已加入已选切片：${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)}。可以改时间、改顺序再导出。`;
+  }
+  return clip;
+}
+
+function selectClip(id, options = {}) {
+  activeClipId = id;
+  const clip = activeClip();
+  renderClipQueue();
+  syncClipEditor();
+  if (clip) setClipRange(clip.start, clip.end, options.seek);
+  updateClipActions();
+}
+
+function moveQueuedClip(id, delta) {
+  const index = selectedClips.findIndex((clip) => clip.id === id);
+  const next = index + delta;
+  if (index < 0 || next < 0 || next >= selectedClips.length) return;
+  const [clip] = selectedClips.splice(index, 1);
+  selectedClips.splice(next, 0, clip);
+  activeClipId = id;
+  renderClipQueue();
+}
+
+function removeQueuedClip(id) {
+  const index = selectedClips.findIndex((clip) => clip.id === id);
+  if (index < 0) return;
+  selectedClips.splice(index, 1);
+  if (activeClipId === id) {
+    activeClipId = selectedClips[Math.min(index, selectedClips.length - 1)]?.id || '';
+  }
+  renderClipQueue();
+  syncClipEditor();
+  const clip = activeClip();
+  if (clip) setClipRange(clip.start, clip.end, false);
+  else updateTimelineClipRange();
+  updateClipActions();
+}
+
+function renderClipQueue() {
+  if (clipQueueCountEl) clipQueueCountEl.textContent = `${selectedClips.length} 个`;
+  if (!selectedClips.length) {
+    clipQueueListEl.innerHTML = '<div class="clip-empty">从左侧候选点“选用并微调”，或用当前字幕创建一个切片。</div>';
+    return;
+  }
+  clipQueueListEl.innerHTML = selectedClips.map((clip, index) => `
+    <div class="clip-card queue${clip.id === activeClipId ? ' selected' : ''}" data-clip-id="${escapeHtml(clip.id)}">
+      <div class="clip-order">${index + 1}</div>
+      <div>
+        <div class="clip-card-head">
+          <span>${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round((clip.end - clip.start) * 10) / 10}s</span>
+          <strong>${clip.selectionMethod === 'model' ? 'AI ' : clip.selectionMethod === 'manual' ? '手动' : '规则 '}${clip.score ? Math.round(clip.score) : ''}</strong>
+        </div>
+        <div class="clip-title">${escapeHtml(clip.title)}</div>
+        <div class="clip-reason">${escapeHtml(clip.reason || '手动微调')}</div>
+      </div>
+      <div class="clip-card-actions">
+        <button class="ghost small" type="button" data-clip-action="up" title="上移">↑</button>
+        <button class="ghost small" type="button" data-clip-action="down" title="下移">↓</button>
+        <button class="ghost small" type="button" data-clip-action="select" title="选中">◎</button>
+        <button class="ghost small" type="button" data-clip-action="remove" title="移除">×</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function syncClipEditor() {
+  const clip = activeClip();
+  const disabled = !clip;
+  [clipTitleInput, clipStartInput, clipEndInput, clipDurationInput, clipMoveBackBtn, clipMoveForwardBtn, clipStartEarlierBtn, clipEndLaterBtn].forEach((el) => {
+    if (el) el.disabled = disabled;
+  });
+  if (!clip) {
+    clipTitleInput.value = '';
+    clipStartInput.value = '0';
+    clipEndInput.value = '0';
+    clipDurationInput.value = '';
+    return;
+  }
+  clipTitleInput.value = clip.title;
+  clipStartInput.value = clip.start.toFixed(1);
+  clipEndInput.value = clip.end.toFixed(1);
+  clipDurationInput.value = Math.max(0.25, clip.end - clip.start).toFixed(1);
+}
+
+function updateClipFromValues(id, values = {}) {
+  const clip = selectedClips.find((item) => item.id === id);
+  if (!clip) return;
+  let start = values.start == null ? Number(clipStartInput.value || clip.start) : Number(values.start);
+  let end = values.end == null ? Number(clipEndInput.value || clip.end) : Number(values.end);
+  start = Math.max(0, Number.isFinite(start) ? start : clip.start);
+  end = Math.max(start + 0.25, Number.isFinite(end) ? end : clip.end);
+  clip.start = Math.round(start * 10) / 10;
+  clip.end = Math.round(end * 10) / 10;
+  if (values.title != null) clip.title = String(values.title).trim() || '未命名片段';
+  activeClipId = id;
+  syncClipEditor();
+  renderClipQueue();
+  setClipRange(clip.start, clip.end, values.seek);
+  updateClipActions();
+}
+
+function nudgeActiveClip({ shift = 0, startDelta = 0, endDelta = 0 }) {
+  const clip = activeClip();
+  if (!clip) return;
+  updateClipFromValues(clip.id, {
+    start: Math.max(0, clip.start + shift + startDelta),
+    end: Math.max(clip.start + shift + startDelta + 0.25, clip.end + shift + endDelta),
+    seek: true
+  });
+}
 
 function setClipRange(start, end, seek) {
   start = Math.max(0, Number(start) || 0);
   end = Math.max(start + 0.25, Number(end) || start + 120);
   clipStartInput.value = start.toFixed(1);
   clipEndInput.value = end.toFixed(1);
+  clipDurationInput.value = (end - start).toFixed(1);
   updateTimelineClipRange();
   if (seek) preview.currentTime = start;
 }
 
 async function renderSelectedClip() {
   if (!currentJob || !ffmpegAvailable) return;
+  const clip = activeClip();
+  if (!clip) {
+    clipStatusEl.textContent = '先从已选切片里选中一个片段。';
+    return;
+  }
   const saved = await saveSegments();
   if (!saved) return;
-  const start = Number(clipStartInput.value || 0);
-  const end = Number(clipEndInput.value || 0);
+  const start = Number(clip.start || 0);
+  const end = Number(clip.end || 0);
   if (!(end > start)) {
     clipStatusEl.textContent = '结束时间必须大于开始时间。';
     return;
@@ -4633,7 +5177,7 @@ async function renderSelectedClip() {
         start,
         end,
         style: collectSubtitleStyle(),
-        name: `clip_${start.toFixed(1)}_${end.toFixed(1)}`
+        name: clip.title || `clip_${start.toFixed(1)}_${end.toFixed(1)}`
       })
     });
     const data = await res.json();
@@ -4647,6 +5191,47 @@ async function renderSelectedClip() {
     clipStatusEl.innerHTML = `已导出原片 ${formatTimelineTime(data.start)} - ${formatTimelineTime(data.end)}；切片内时间从 00:00 开始：${links}`;
   } catch (err) {
     clipStatusEl.textContent = '导出切片失败：' + (err.message || err);
+  } finally {
+    updateClipActions();
+  }
+}
+
+async function renderQueuedClips() {
+  if (!currentJob || !ffmpegAvailable || !selectedClips.length) return;
+  const saved = await saveSegments();
+  if (!saved) return;
+  renderClipBtn.disabled = true;
+  renderClipQueueBtn.disabled = true;
+  const outputs = [];
+  try {
+    for (let index = 0; index < selectedClips.length; index += 1) {
+      const clip = selectedClips[index];
+      activeClipId = clip.id;
+      renderClipQueue();
+      setClipRange(clip.start, clip.end, true);
+      clipStatusEl.textContent = `正在导出 ${index + 1}/${selectedClips.length}：${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)}...`;
+      const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start: clip.start,
+          end: clip.end,
+          style: collectSubtitleStyle(),
+          name: `${String(index + 1).padStart(2, '0')}_${clip.title || `clip_${clip.start.toFixed(1)}_${clip.end.toFixed(1)}`}`
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '导出切片失败');
+      outputs.push(data);
+    }
+    const links = outputs.map((data, index) => {
+      const filename = data.filename || (data.files || {}).mp4;
+      const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(filename)}`);
+      return `<a href="${href}" target="_blank">#${index + 1} MP4</a>`;
+    }).join(' · ');
+    clipStatusEl.innerHTML = `已按当前顺序导出 ${outputs.length} 个切片：${links}`;
+  } catch (err) {
+    clipStatusEl.textContent = '批量导出失败：' + (err.message || err);
   } finally {
     updateClipActions();
   }
