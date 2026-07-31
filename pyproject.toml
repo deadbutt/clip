@@ -19,12 +19,14 @@ dependencies = [
   "fastapi>=0.115",
   "uvicorn>=0.30",
   "python-multipart>=0.0.9",
+  "sentencepiece>=0.2.0",
 ]
 
 [project.scripts]
 mtd-subtitle = "moss_transcribe_diarize.app.cli:main"
 mtd-subtitle-web = "moss_transcribe_diarize.app.web_cli:main"
 mtd-serve = "moss_transcribe_diarize.app.serve:main"
+mtd-translate-opus-run = "moss_transcribe_diarize.app.opus_run_translator:main"
 
 [project.optional-dependencies]
 torch-runtime = [

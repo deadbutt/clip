@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from moss_transcribe_diarize.app.whisper_runner import WhisperRunner
+from moss_transcribe_diarize.app.whisper_runner import WhisperRunner, _RepeatedPhraseGuard
 
 
 class FakeSegment:
@@ -19,13 +19,23 @@ class FakeInfo:
 
 
 class FakeWhisperModel:
+    last_kwargs = None
+
     def __init__(self, model, *, device, compute_type):
         self.model = model
         self.device = device
         self.compute_type = compute_type
 
     def transcribe(self, path, **kwargs):
+        FakeWhisperModel.last_kwargs = kwargs
         return iter([FakeSegment(0.0, 1.25, " hello "), FakeSegment(1.5, 3.0, "world")]), FakeInfo()
+
+
+class FakeLoopWhisperModel(FakeWhisperModel):
+    def transcribe(self, path, **kwargs):
+        FakeLoopWhisperModel.last_kwargs = kwargs
+        segments = [FakeSegment(float(i), float(i + 1), "Annie's foot.") for i in range(12)]
+        return iter(segments), FakeInfo()
 
 
 class WhisperRunnerTest(unittest.TestCase):
@@ -57,6 +67,24 @@ class WhisperRunnerTest(unittest.TestCase):
         self.assertEqual(result.generated_tokens, 2)
         self.assertEqual(result.model, "small")
         self.assertEqual(status[-1], ("transcribing", 0.85, 2))
+        self.assertIs(FakeWhisperModel.last_kwargs["condition_on_previous_text"], False)
+        self.assertEqual(FakeWhisperModel.last_kwargs["beam_size"], 5)
+        self.assertEqual(FakeWhisperModel.last_kwargs["no_repeat_ngram_size"], 3)
+
+    def test_repeated_phrase_guard_skips_looped_short_hallucinations(self):
+        guard = _RepeatedPhraseGuard(max_consecutive=3, max_total=24)
+        decisions = [guard.should_skip("Annie's foot.") for _ in range(6)]
+
+        self.assertEqual(decisions, [False, False, False, True, True, True])
+
+    def test_transcribe_filters_repeated_short_hallucination_loop(self):
+        module = types.SimpleNamespace(WhisperModel=FakeLoopWhisperModel)
+        with patch.dict(sys.modules, {"faster_whisper": module}):
+            runner = WhisperRunner("small", device="cpu", dtype="int8", beam_size=3)
+            result = runner.transcribe("sample.mp4")
+
+        self.assertEqual(result.generated_tokens, 12)
+        self.assertEqual(result.text.count("Annie's foot."), 3)
 
 
 if __name__ == "__main__":

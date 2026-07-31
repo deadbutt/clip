@@ -29,6 +29,8 @@ def create_app(
     runs_dir: str | Path = "runs",
     device: str = "auto",
     dtype: str = "bf16",
+    language: str | None = None,
+    whisper_beam_size: int = 5,
     prompt: str = DEFAULT_PROMPT,
     max_length: int = 131072,
     max_new_tokens: int = 8192,
@@ -44,6 +46,9 @@ def create_app(
     translator_api_key: str | None = None,
     translator_timeout: float | None = None,
     translator_provider: str = "openai",
+    translator_tokenizer_dir: str | Path | None = "models/opus-mt-en-zh",
+    translator_device: str = "auto",
+    translator_compute_type: str = "auto",
     translator_protected_terms: tuple[str, ...] = (),
     speaker_count: int | None = None,
     diarization_backend: str = "none",
@@ -74,7 +79,7 @@ def create_app(
 
         runner = ModelRunner(model_path, device=device, dtype=dtype)
     else:
-        runner = WhisperRunner(model_path, device=device, dtype=dtype)
+        runner = WhisperRunner(model_path, device=device, dtype=dtype, language=language, beam_size=whisper_beam_size)
     manager = JobManager(
         runs_dir,
         runner,
@@ -92,7 +97,16 @@ def create_app(
     app.state.manager = manager
     translator = None
     translator_url = translator_base_url or (vllm_base_url if backend != "vllm" else None)
-    if translator_url:
+    if translator_provider == "opus-mt":
+        from .local_mt_translator import LocalMtTranslator
+
+        translator = LocalMtTranslator(
+            model_dir=translator_model or "models/opus-mt-en-zh-ct2-int8",
+            tokenizer_dir=translator_tokenizer_dir,
+            device=translator_device,
+            compute_type=translator_compute_type,
+        )
+    elif translator_url:
         from .text_translator import PROTECTED_TERMS, TextTranslator
 
         translator = TextTranslator(
@@ -271,7 +285,7 @@ def create_app(
     async def translate(job_id: str, request: Request):
         translator = app.state.translator
         if translator is None:
-            return JSONResponse({"detail": "Translation model is not configured. Start with start_ollama.bat, start_vllm.bat, or pass --translator-base-url."}, status_code=503)
+            return JSONResponse({"detail": "Translation model is not configured. Start with start_ollama.bat, start_vllm.bat, --translator-provider opus-mt, or pass --translator-base-url."}, status_code=503)
         try:
             try:
                 payload: Any = await request.json()
@@ -1441,6 +1455,16 @@ INDEX_HTML = """<!doctype html>
     }
     .subtitle-table tbody tr.active td:first-child { box-shadow: inset 3px 0 0 var(--teal); }
     .subtitle-table tbody tr.active td:not(:first-child) { box-shadow: none; }
+    .subtitle-table tbody tr.virtual-spacer,
+    .subtitle-table tbody tr.virtual-spacer:hover {
+      background: transparent;
+      cursor: default;
+    }
+    .subtitle-table tbody tr.virtual-spacer td {
+      padding: 0;
+      border: 0;
+      height: 0;
+    }
     .subtitle-table input,
     .subtitle-table textarea {
       width: 100%;
@@ -1605,6 +1629,55 @@ INDEX_HTML = """<!doctype html>
       background: #fff;
     }
     .clip-card.selected { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal); }
+    .translation-review {
+      margin-top: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .translation-review-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .translation-review-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .translation-review-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .translation-review-item.warning { border-color: rgba(255, 174, 71, 0.7); }
+    .translation-review-item.info { border-color: rgba(0, 143, 131, 0.35); }
+    .translation-review-item-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .translation-review-text {
+      margin-top: 5px;
+      font-size: 13px;
+      line-height: 1.45;
+      max-height: 70px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .translation-review-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
     .clip-card-head {
       display: flex;
       align-items: center;
@@ -1832,6 +1905,13 @@ INDEX_HTML = """<!doctype html>
                 <button id="restoreTranslation" class="ghost small" type="button">恢复翻译前字幕</button>
               </div>
               <div id="translateStatus" class="export-status"></div>
+              <div id="translationReview" class="translation-review is-hidden">
+                <div class="translation-review-head">
+                  <strong>翻译审查</strong>
+                  <span id="translationReviewMeta" class="meta"></span>
+                </div>
+                <div id="translationReviewList" class="translation-review-list"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -2016,6 +2096,7 @@ const renderProgressEl = document.querySelector('#renderProgress');
 const renderProgressBarEl = document.querySelector('#renderProgressBar');
 const modelInfoEl = document.querySelector('#modelinfo');
 const tbody = document.querySelector('#segments');
+const tableWrap = document.querySelector('.table-column .table-wrap');
 const speakerMapEl = document.querySelector('#speakerMap');
 const videoStage = document.querySelector('#videoStage');
 const videoShell = document.querySelector('.video-shell');
@@ -2044,6 +2125,9 @@ const translateProgressTextEl = document.querySelector('#translateProgressText')
 const translateProgressEl = document.querySelector('#translateProgress');
 const translateProgressBarEl = document.querySelector('#translateProgressBar');
 const restoreTranslationBtn = document.querySelector('#restoreTranslation');
+const translationReviewEl = document.querySelector('#translationReview');
+const translationReviewMetaEl = document.querySelector('#translationReviewMeta');
+const translationReviewListEl = document.querySelector('#translationReviewList');
 const clipStartInput = document.querySelector('#clipStart');
 const clipEndInput = document.querySelector('#clipEnd');
 const clipMinDurationInput = document.querySelector('#clipMinDuration');
@@ -2075,9 +2159,22 @@ let speakerNameMap = {};
 let timelineDragging = false;
 let currentPixelsPerSecond = 12;
 let segmentDragState = null;
+let cachedSegments = null;
+let cachedTimelineSegments = [];
+let cachedTimelineLayout = { lanes: new Map(), count: 1 };
+let syncActiveFrame = 0;
+let lastSyncedTime = -1;
+let tableRenderFrame = 0;
+let timelineRenderFrame = 0;
+let dismissedTranslationReviewItems = new Set();
+let translationReviewJobId = '';
 const SEGMENT_EDGE_PX = 8;
 const SEGMENT_DRAG_THRESHOLD = 3;
+const SEGMENT_DRAG_SENSITIVITY = 5;
 const SNAP_PX = 18;
+const TABLE_ROW_HEIGHT = 52;
+const TABLE_BUFFER_ROWS = 24;
+const TIMELINE_BUFFER_PX = 700;
 const assFontLineHeightFactor = 1.448;
 const speakerPalette = ['#ffffff', '#ffe75b', '#8ff286', '#ffa7bb', '#ffd700', '#6bb5ff', '#db8eff', '#d8d8d8'];
 const RENDER_PROGRESS_BASE = 0.95;
@@ -2091,7 +2188,7 @@ function apiUrl(path) {
 
 function setPreviewSource(src) {
   preview.src = src;
-  maskPreviewVideo.src = src;
+  maskPreviewVideo.removeAttribute('src');
   maskPreviewVideo.load();
 }
 
@@ -2467,6 +2564,26 @@ findClipsRulesBtn.addEventListener('click', () => findClipCandidates('rules'));
 renderClipBtn.addEventListener('click', renderSelectedClip);
 translateZhBtn.addEventListener('click', translateCurrentSubtitles);
 restoreTranslationBtn.addEventListener('click', restoreSourceSubtitles);
+translationReviewListEl.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-review-action]');
+  if (!button) return;
+  const item = button.closest('.translation-review-item');
+  if (!item) return;
+  const index = Number(item.dataset.index);
+  const start = Number(item.dataset.start || 0);
+  const key = item.dataset.key || '';
+  const action = button.dataset.reviewAction;
+  if (action === 'dismiss') {
+    if (key) dismissedTranslationReviewItems.add(key);
+    renderTranslationReview(currentJob);
+    return;
+  }
+  if (Number.isFinite(index) && index >= 0) setActiveSegment(index, true);
+  if (Number.isFinite(start)) preview.currentTime = Math.max(0, start);
+  if (action === 'play') preview.play().catch(() => {});
+  if (action === 'jump') closeTranslate();
+  updateSubtitlePreview();
+});
 clipStartInput.addEventListener('input', updateTimelineClipRange);
 clipEndInput.addEventListener('input', updateTimelineClipRange);
 
@@ -2498,8 +2615,8 @@ rerunBtn.addEventListener('click', () => {
   if (currentJob) showRerunDraft(currentJob);
 });
 
-preview.addEventListener('timeupdate', syncActiveSegment);
-preview.addEventListener('seeked', syncActiveSegment);
+preview.addEventListener('timeupdate', scheduleActiveSegmentSync);
+preview.addEventListener('seeked', () => scheduleActiveSegmentSync(true));
 preview.addEventListener('play', syncMaskPreviewPlayback);
 preview.addEventListener('pause', syncMaskPreviewPlayback);
 preview.addEventListener('seeking', syncMaskPreviewTime);
@@ -2508,7 +2625,7 @@ preview.addEventListener('ratechange', syncMaskPreviewPlaybackRate);
 preview.addEventListener('loadedmetadata', () => {
   fitVideoStageToMedia();
   renderTimeline(collectSegments());
-  syncActiveSegment();
+  scheduleActiveSegmentSync(true);
   syncMaskPreviewPlaybackRate();
 });
 timelineScroll.addEventListener('pointerdown', (event) => {
@@ -2537,9 +2654,12 @@ timelineScroll.addEventListener('pointercancel', () => {
   hideTimelineGuide();
 });
 timelineScroll.addEventListener('dragstart', (event) => event.preventDefault());
+timelineScroll.addEventListener('scroll', scheduleVisibleTimelineRender);
+if (tableWrap) tableWrap.addEventListener('scroll', scheduleVisibleSegmentRowsRender);
 window.addEventListener('resize', () => {
   scheduleLayoutFit();
   renderTimeline(collectSegments());
+  renderVisibleSegmentRows();
 });
 if ('ResizeObserver' in window) {
   const layoutObserver = new ResizeObserver(scheduleLayoutFit);
@@ -2548,19 +2668,29 @@ if ('ResizeObserver' in window) {
   }
 }
 tbody.addEventListener('input', (event) => {
+  const tr = event.target.closest('tr[data-index]');
+  updateCachedSegmentFromRow(tr);
   markEditorDirty();
-  renderTimeline(collectSegments());
   if (event.target.classList.contains('text')) {
-    const tr = event.target.closest('tr');
     resizeSegmentTextarea(event.target, tr && tr.classList.contains('active'));
+    scheduleVisibleTimelineRender();
   }
-  if (event.target.classList.contains('start') || event.target.classList.contains('end')) syncActiveSegment();
+  if (event.target.classList.contains('start') || event.target.classList.contains('end')) {
+    renderTimeline(collectSegments());
+    scheduleActiveSegmentSync(true);
+  }
   else {
-    if (event.target.classList.contains('speaker')) renderSpeakerMap(collectSegments());
+    if (event.target.classList.contains('speaker')) {
+      renderSpeakerMap(collectSegments());
+      renderTimeline(collectSegments());
+    }
     updateSubtitlePreview();
   }
 });
-tbody.addEventListener('change', markEditorDirty);
+tbody.addEventListener('change', (event) => {
+  updateCachedSegmentFromRow(event.target.closest('tr[data-index]'));
+  markEditorDirty();
+});
 tbody.addEventListener('click', (event) => {
   const addAboveButton = event.target.closest('.add-row-above');
   const addBelowButton = event.target.closest('.add-row-below');
@@ -2583,7 +2713,10 @@ speakerMapEl.addEventListener('input', () => {
 tbody.addEventListener('focusin', (event) => {
   const tr = event.target.closest('tr');
   if (!tr) return;
-  setActiveSegment(Number(tr.dataset.index), false);
+  const index = Number(tr.dataset.index);
+  seekPreviewToSegment(index);
+  setActiveSegment(index, true, { align: 'center' });
+  updateTimelinePlayhead();
   resizeSegmentRow(tr, true);
   updateSubtitlePreview();
 });
@@ -2666,6 +2799,10 @@ async function selectJob(jobId) {
 }
 
 function renderCurrentJob(job, options = {}) {
+  if (job.id !== translationReviewJobId) {
+    translationReviewJobId = job.id;
+    dismissedTranslationReviewItems = new Set();
+  }
   renderJobList();
   if (EDIT_STATES.has(job.status)) showEditor(job, options);
   else showProcessing(job);
@@ -2674,6 +2811,8 @@ function renderCurrentJob(job, options = {}) {
 function showImportView(options = {}) {
   if (options.clearDraft !== false) resetImportMode();
   currentJob = null;
+  cachedSegments = null;
+  cachedTimelineSegments = [];
   closeSettings();
   closeTranslate();
   closeClips();
@@ -2812,6 +2951,85 @@ function updateTranslateProgress(job) {
   if (job.status === 'translating') translateStatusEl.textContent = translationProgressSummary(job);
 }
 
+function renderTranslationReview(jobOrPayload) {
+  const translation = translationPayload(jobOrPayload);
+  const issues = Array.isArray(translation.validation_issues) ? translation.validation_issues : [];
+  const skips = Array.isArray(translation.pretranslation_skips) ? translation.pretranslation_skips : [];
+  const reviewItems = [
+    ...issues.map((item) => ({ ...item, severity: 'warning', group: 'issue' })),
+    ...skips.map((item) => ({ ...item, severity: 'info', group: 'skip' })),
+  ].filter((item) => !dismissedTranslationReviewItems.has(reviewItemKey(item)));
+  const issueCount = Number(translation.validation_issue_count == null ? issues.length : translation.validation_issue_count);
+  const skipCount = Number(translation.pretranslation_skip_count == null ? skips.length : translation.pretranslation_skip_count);
+  translationReviewEl.classList.toggle('is-hidden', !issueCount && !skipCount);
+  if (!issueCount && !skipCount) {
+    translationReviewMetaEl.textContent = '';
+    translationReviewListEl.innerHTML = '';
+    return;
+  }
+  translationReviewMetaEl.textContent = `${issueCount} 条可疑 · ${skipCount} 条自动跳过`;
+  if (!reviewItems.length) {
+    translationReviewListEl.innerHTML = '<div class="meta">当前显示项都已标记处理。</div>';
+    return;
+  }
+  translationReviewListEl.innerHTML = reviewItems.map((item) => {
+    const index = Number(item.index);
+    const start = Number(item.start || 0);
+    const key = reviewItemKey(item);
+    const title = item.group === 'skip' ? '自动跳过' : '可疑翻译';
+    const detail = reviewIssueLabel(item);
+    const text = item.text || item.source_text || '';
+    return `
+      <div class="translation-review-item ${item.severity}" data-index="${Number.isFinite(index) ? index : -1}" data-start="${Number.isFinite(start) ? start : 0}" data-key="${escapeHtml(key)}">
+        <div class="translation-review-item-head">
+          <span>${title} · #${Number.isFinite(index) ? index + 1 : '?'} · ${formatTimelineTime(start)}</span>
+          <strong>${escapeHtml(detail)}</strong>
+        </div>
+        <div class="translation-review-text">${escapeHtml(text || '(空)')}</div>
+        <div class="translation-review-actions">
+          <button class="ghost small" type="button" data-review-action="jump">跳到字幕</button>
+          <button class="ghost small" type="button" data-review-action="play">回看原片</button>
+          <button class="primary small" type="button" data-review-action="dismiss">标为已处理</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function translationPayload(jobOrPayload) {
+  if (!jobOrPayload) return {};
+  if (jobOrPayload.translation) return jobOrPayload.translation || {};
+  return jobOrPayload;
+}
+
+function reviewItemKey(item) {
+  return [item.group || item.type || 'review', item.id || '', item.index == null ? '' : item.index, item.reason || ''].join(':');
+}
+
+function reviewIssueLabel(item) {
+  const labels = {
+    pretranslation_skip: item.reason ? skipReasonLabel(item.reason) : '跳过翻译',
+    count_mismatch: '数量不一致',
+    model_artifact: '模型副产物',
+    json_fragment: 'JSON 残片',
+    suspicious_expansion: '译文异常变长',
+    empty_translation: '空译文',
+  };
+  return labels[item.type] || item.reason || item.type || '待检查';
+}
+
+function skipReasonLabel(reason) {
+  const labels = {
+    empty: '空字幕',
+    known_transcript_noise: '已知转写噪声',
+    bracketed_effect: '括号音效',
+    too_short: '过短',
+    short_code_or_noise: '短代码/噪声',
+    repeated_chant: '重复 chant',
+    filler_noise: '语气噪声',
+  };
+  return labels[reason] || reason;
+}
+
 function setTaskNotice(message, kind) {
   taskNoticeEl.textContent = message || '';
   taskNoticeEl.className = 'task-notice ' + (kind || '');
@@ -2903,6 +3121,8 @@ async function deleteJob(jobId) {
     preview.load();
     maskPreviewVideo.load();
     tbody.innerHTML = '';
+    cachedSegments = null;
+    cachedTimelineSegments = [];
     downloads.innerHTML = '';
     clipListEl.innerHTML = '';
     clipStatusEl.textContent = '';
@@ -3044,41 +3264,96 @@ function speakerDisplayName(speaker) {
 function renderSegments(segments, preferredIndex = null) {
   tbody.innerHTML = '';
   activeSegmentIndex = -1;
-  for (const [index, segment] of segments.entries()) {
-    const tr = document.createElement('tr');
-    tr.dataset.id = segment.id;
-    tr.dataset.index = String(index);
-    tr.innerHTML = `
-      <td><input class="start" type="number" min="0" step="0.01" value="${segment.start}"></td>
-      <td><input class="end" type="number" min="0" step="0.01" value="${segment.end}"></td>
-      <td><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
-      <td><textarea class="text" rows="1">${escapeHtml(segment.text)}</textarea></td>
-      <td>
-        <div class="segment-actions">
-          <button class="segment-action add-row-above" type="button" title="在上方添加字幕">↑+</button>
-          <button class="segment-action add-row-below" type="button" title="在下方添加字幕">↓+</button>
-          <button class="segment-action delete-row" type="button" title="删除这条字幕">−</button>
-        </div>
-      </td>
-    `;
-    tr.addEventListener('click', (event) => {
-      if (event.target.closest('input, textarea')) return;
-      const rowIndex = Number(tr.dataset.index);
-      const start = Number(tr.querySelector('.start').value);
-      if (Number.isFinite(start)) preview.currentTime = Math.max(0, start);
-      setActiveSegment(rowIndex, false);
-      updateSubtitlePreview();
-    });
-    tbody.appendChild(tr);
-    resizeSegmentRow(tr, false);
-  }
+  cachedSegments = (segments || []).map((segment) => ({
+    id: segment.id,
+    start: Number(segment.start),
+    end: Number(segment.end),
+    speaker: segment.speaker,
+    text: segment.text
+  }));
   renderSpeakerMap(segments);
   renderTimeline(segments);
+  if (preferredIndex != null && cachedSegments[preferredIndex] && tableWrap) {
+    tableWrap.scrollTop = Math.max(0, preferredIndex * TABLE_ROW_HEIGHT - tableWrap.clientHeight * 0.35);
+  }
+  renderVisibleSegmentRows();
   if (preferredIndex != null && segments[preferredIndex]) {
-    setActiveSegment(preferredIndex, true);
+    setActiveSegment(preferredIndex, false);
     updateSubtitlePreview(segments);
   } else {
     syncActiveSegment();
+  }
+}
+
+function createSegmentRow(segment, index) {
+  const tr = document.createElement('tr');
+  tr.dataset.id = segment.id;
+  tr.dataset.index = String(index);
+  tr.innerHTML = `
+    <td><input class="start" type="number" min="0" step="0.01" value="${segment.start}"></td>
+    <td><input class="end" type="number" min="0" step="0.01" value="${segment.end}"></td>
+    <td><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
+    <td><textarea class="text" rows="1">${escapeHtml(segment.text)}</textarea></td>
+    <td>
+      <div class="segment-actions">
+        <button class="segment-action add-row-above" type="button" title="在上方添加字幕">↑+</button>
+        <button class="segment-action add-row-below" type="button" title="在下方添加字幕">↓+</button>
+        <button class="segment-action delete-row" type="button" title="删除这条字幕">−</button>
+      </div>
+    </td>
+  `;
+  tr.addEventListener('click', (event) => {
+    if (event.target.closest('button')) return;
+    const rowIndex = Number(tr.dataset.index);
+    seekPreviewToSegment(rowIndex);
+    setActiveSegment(rowIndex, true, { align: 'center' });
+    updateTimelinePlayhead();
+    updateSubtitlePreview();
+    if (event.target.closest('input, textarea')) return;
+  });
+  resizeSegmentRow(tr, false);
+  return tr;
+}
+
+function renderVisibleSegmentRows() {
+  if (!cachedSegments) return;
+  const total = cachedSegments.length;
+  const container = tableWrap || tbody.closest('.table-wrap');
+  const scrollTop = container ? container.scrollTop : 0;
+  const viewportHeight = container ? container.clientHeight : 600;
+  const start = Math.max(0, Math.floor(scrollTop / TABLE_ROW_HEIGHT) - TABLE_BUFFER_ROWS);
+  const visibleCount = Math.ceil(viewportHeight / TABLE_ROW_HEIGHT) + TABLE_BUFFER_ROWS * 2;
+  const end = Math.min(total, start + visibleCount);
+  const fragment = document.createDocumentFragment();
+  if (start > 0) fragment.appendChild(createVirtualSpacer(start * TABLE_ROW_HEIGHT));
+  for (let index = start; index < end; index++) {
+    fragment.appendChild(createSegmentRow(cachedSegments[index], index));
+  }
+  if (end < total) fragment.appendChild(createVirtualSpacer((total - end) * TABLE_ROW_HEIGHT));
+  tbody.replaceChildren(fragment);
+  updateRenderedActiveRows();
+}
+
+function createVirtualSpacer(height) {
+  const tr = document.createElement('tr');
+  tr.className = 'virtual-spacer';
+  tr.innerHTML = `<td colspan="5" style="height:${Math.max(0, Math.round(height))}px"></td>`;
+  return tr;
+}
+
+function scheduleVisibleSegmentRowsRender() {
+  if (tableRenderFrame) return;
+  tableRenderFrame = requestAnimationFrame(() => {
+    tableRenderFrame = 0;
+    renderVisibleSegmentRows();
+  });
+}
+
+function updateRenderedActiveRows() {
+  for (const tr of tbody.querySelectorAll('tr[data-index]')) {
+    const active = Number(tr.dataset.index) === activeSegmentIndex;
+    tr.classList.toggle('active', active);
+    resizeSegmentRow(tr, active);
   }
 }
 
@@ -3089,6 +3364,8 @@ function renderTimeline(segments) {
   currentPixelsPerSecond = pixelsPerSecond;
   const trackWidth = Math.max(scrollWidth, Math.ceil(duration * pixelsPerSecond));
   const layout = timelineLaneLayout(segments);
+  cachedTimelineSegments = segments;
+  cachedTimelineLayout = layout;
   const laneHeight = 44;
   const laneTop = 42;
   const laneCount = Math.max(1, layout.count);
@@ -3100,12 +3377,29 @@ function renderTimeline(segments) {
   timelineRuler.innerHTML = '';
   timelineLane.innerHTML = '';
   renderTimelineTicks(duration, pixelsPerSecond);
+  renderVisibleTimelineSegments();
+  timelineTrack.appendChild(timelineClipRange);
+  timelineTrack.appendChild(timelinePlayhead);
+  updateTimelineClipRange();
+  updateTimelinePlayhead(segments);
+}
+
+function renderVisibleTimelineSegments() {
+  const segments = cachedTimelineSegments || [];
+  const layout = cachedTimelineLayout || { lanes: new Map(), count: 1 };
+  const pixelsPerSecond = currentPixelsPerSecond || 1;
+  const laneHeight = 44;
+  const laneTop = 42;
+  const leftTime = Math.max(0, (timelineScroll.scrollLeft - TIMELINE_BUFFER_PX) / pixelsPerSecond);
+  const rightTime = (timelineScroll.scrollLeft + timelineScroll.clientWidth + TIMELINE_BUFFER_PX) / pixelsPerSecond;
+  timelineLane.innerHTML = '';
   for (const [index, segment] of segments.entries()) {
     const start = Math.max(0, Number(segment.start) || 0);
     const end = Math.max(start + 0.01, Number(segment.end) || start + 0.01);
+    if (end < leftTime || start > rightTime) continue;
     const item = document.createElement('button');
     item.type = 'button';
-    item.className = 'timeline-segment';
+    item.className = 'timeline-segment' + (index === activeSegmentIndex ? ' active' : '');
     item.dataset.index = String(index);
     item.style.left = Math.max(0, start * pixelsPerSecond) + 'px';
     item.style.top = (laneTop + (layout.lanes.get(index) || 0) * laneHeight) + 'px';
@@ -3122,16 +3416,20 @@ function renderTimeline(segments) {
         return;
       }
       preview.currentTime = start;
-      setActiveSegment(index, true);
+      setActiveSegment(index, true, { align: 'center' });
       updateSubtitlePreview();
       updateTimelinePlayhead();
     });
     timelineLane.appendChild(item);
   }
-  timelineTrack.appendChild(timelineClipRange);
-  timelineTrack.appendChild(timelinePlayhead);
-  updateTimelineClipRange();
-  updateTimelinePlayhead(segments);
+}
+
+function scheduleVisibleTimelineRender() {
+  if (timelineRenderFrame) return;
+  timelineRenderFrame = requestAnimationFrame(() => {
+    timelineRenderFrame = 0;
+    renderVisibleTimelineSegments();
+  });
 }
 
 function updateTimelineClipRange() {
@@ -3162,12 +3460,16 @@ function onSegmentPointerDown(event, index, segment) {
   if (!seg) return;
   const duration = timelineDuration(segments);
   const pps = currentPixelsPerSecond || timelinePixelsPerSecond(duration, timelineScroll.clientWidth || 1);
+  const timelineRect = timelineScroll.getBoundingClientRect();
+  const startX = Math.max(timelineRect.left, Math.min(timelineRect.right, event.clientX));
   segmentDragState = {
     index,
     mode,
     segment,
     pointerId: event.pointerId,
-    startX: event.clientX,
+    startX,
+    minClientX: timelineRect.left,
+    maxClientX: timelineRect.right,
     origStart: Math.max(0, Number(seg.start) || 0),
     origEnd: Math.max(Number(seg.start) || 0, Number(seg.end) || 0),
     duration,
@@ -3189,13 +3491,14 @@ function onSegmentPointerDown(event, index, segment) {
 
 function onSegmentPointerMove(event, state) {
   if (!state) return;
-  const dx = event.clientX - state.startX;
+  const clientX = Math.max(state.minClientX, Math.min(state.maxClientX, event.clientX));
+  const dx = clientX - state.startX;
   if (!state.moved && Math.abs(dx) < SEGMENT_DRAG_THRESHOLD) return;
   if (!state.moved) {
     state.moved = true;
     state.segment.classList.add('dragging');
   }
-  const deltaSec = dx / state.pps;
+  const deltaSec = dx / (Math.max(1, state.pps) * SEGMENT_DRAG_SENSITIVITY);
   let newStart = state.origStart;
   let newEnd = state.origEnd;
   if (state.mode === 'move') {
@@ -3245,12 +3548,18 @@ function computeSegmentSnap(state, newStart, newEnd) {
     { time: Number(preview.currentTime || 0), label: '播放头' }
   ];
   const segments = state.segments;
-  for (let i = 0; i < segments.length; i++) {
-    if (i === state.index) continue;
+  const addCandidateEdges = (i) => {
+    if (i === state.index || !segments[i]) return;
     candidates.push(
       { time: Number(segments[i].start) || 0, label: '头对齐' },
       { time: Number(segments[i].end) || 0, label: '尾对齐' }
     );
+  };
+  if (segments.length > 800) {
+    const center = findSegmentIndexAtTime(segments, (newStart + newEnd) / 2);
+    for (let i = Math.max(0, center - 8); i < Math.min(segments.length, center + 9); i++) addCandidateEdges(i);
+  } else {
+    for (let i = 0; i < segments.length; i++) addCandidateEdges(i);
   }
   const edges = state.mode === 'end'
     ? [{ edge: 'end', time: newEnd }]
@@ -3280,6 +3589,13 @@ function onSegmentPointerUp(event, state) {
     if (tr) {
       tr.querySelector('.start').value = roundTime(state.newStart);
       tr.querySelector('.end').value = roundTime(state.newEnd);
+      updateCachedSegmentFromRow(tr);
+    } else if (cachedSegments && cachedSegments[state.index]) {
+      cachedSegments[state.index] = {
+        ...cachedSegments[state.index],
+        start: roundTime(state.newStart),
+        end: roundTime(state.newEnd),
+      };
     }
     markEditorDirty();
     renderTimeline(collectSegments());
@@ -3336,7 +3652,11 @@ function timelineLaneLayout(segments) {
 
 function timelinePixelsPerSecond(duration, scrollWidth) {
   if (!duration || duration <= 0) return 12;
-  return Math.max(8, Math.min(32, Math.max(1800, scrollWidth) / duration));
+  const base = Math.max(1800, scrollWidth);
+  if (duration <= 180) {
+    return Math.max(48, Math.min(72, Math.max(base * 2, 4800) / duration));
+  }
+  return Math.max(8, Math.min(32, base / duration));
 }
 
 function renderTimelineTicks(duration, pixelsPerSecond) {
@@ -3395,13 +3715,40 @@ function resizeSegmentRow(tr, expanded) {
 }
 
 function collectSegments() {
-  return [...tbody.querySelectorAll('tr')].map((tr, index) => ({
+  if (cachedSegments) return cachedSegments.map((segment) => ({ ...segment }));
+  cachedSegments = [...tbody.querySelectorAll('tr')].map((tr, index) => ({
     id: tr.dataset.id || `seg_${String(index + 1).padStart(4, '0')}`,
     start: Number(tr.querySelector('.start').value),
     end: Number(tr.querySelector('.end').value),
     speaker: tr.querySelector('.speaker').value,
     text: tr.querySelector('.text').value
   }));
+  return cachedSegments.map((segment) => ({ ...segment }));
+}
+
+function updateCachedSegmentFromRow(tr) {
+  if (!cachedSegments || !tr) return;
+  const index = Number(tr.dataset.index);
+  if (!Number.isInteger(index) || !cachedSegments[index]) return;
+  cachedSegments[index] = {
+    id: tr.dataset.id || cachedSegments[index].id || `seg_${String(index + 1).padStart(4, '0')}`,
+    start: Number(tr.querySelector('.start').value),
+    end: Number(tr.querySelector('.end').value),
+    speaker: tr.querySelector('.speaker').value,
+    text: tr.querySelector('.text').value
+  };
+}
+
+function seekPreviewToSegment(index, options = {}) {
+  const segment = cachedSegments && cachedSegments[index];
+  if (!segment) return false;
+  const start = Number(segment.start);
+  if (!Number.isFinite(start)) return false;
+  if (options.pause !== false) preview.pause();
+  lastSyncedTime = -1;
+  preview.currentTime = Math.max(0, start);
+  syncMaskPreviewTime();
+  return true;
 }
 
 function addSegmentAtPlayhead() {
@@ -3510,6 +3857,7 @@ function deleteSegmentAtIndex(index) {
 }
 
 function focusSegmentText(index) {
+  scrollSegmentIndexIntoView(index);
   const tr = tbody.querySelector(`tr[data-index="${index}"]`);
   const textarea = tr && tr.querySelector('textarea.text');
   if (!textarea) return;
@@ -3549,11 +3897,18 @@ function computePlayheadSnap(time, segments) {
   const pps = currentPixelsPerSecond || 1;
   const threshold = Math.max(0.05, SNAP_PX / pps);
   const candidates = [{ time: 0, label: '起点' }];
-  for (const segment of segments) {
+  const addSegmentSnap = (segment) => {
+    if (!segment) return;
     const start = Number(segment.start);
     const end = Number(segment.end);
     if (Number.isFinite(start)) candidates.push({ time: start, label: '头对齐' });
     if (Number.isFinite(end)) candidates.push({ time: end, label: '尾对齐' });
+  };
+  if (segments.length > 800) {
+    const center = findSegmentIndexAtTime(segments, time);
+    for (let i = Math.max(0, center - 8); i < Math.min(segments.length, center + 9); i++) addSegmentSnap(segments[i]);
+  } else {
+    for (const segment of segments) addSegmentSnap(segment);
   }
   let best = null;
   for (const candidate of candidates) {
@@ -3573,6 +3928,23 @@ function syncMaskPreviewTime() {
       maskPreviewVideo.currentTime = preview.currentTime || 0;
     } catch (err) {}
   }
+}
+
+function ensureMaskPreviewSource() {
+  if (!preview.currentSrc && !preview.src) return false;
+  const source = preview.currentSrc || preview.src;
+  if (maskPreviewVideo.src !== source) {
+    maskPreviewVideo.src = source;
+    maskPreviewVideo.load();
+  }
+  return true;
+}
+
+function unloadMaskPreviewSource() {
+  if (!maskPreviewVideo.src) return;
+  maskPreviewVideo.pause();
+  maskPreviewVideo.removeAttribute('src');
+  maskPreviewVideo.load();
 }
 
 function syncMaskPreviewPlaybackRate() {
@@ -3625,37 +3997,49 @@ function assScriptScale() {
   return (videoStage.clientHeight || playResY) / playResY;
 }
 
-function syncActiveSegment() {
+function scheduleActiveSegmentSync(force = false) {
+  const time = Number(preview.currentTime || 0);
+  if (!force && lastSyncedTime >= 0 && Math.abs(time - lastSyncedTime) < 0.08) return;
+  if (syncActiveFrame) return;
+  syncActiveFrame = requestAnimationFrame(() => {
+    syncActiveFrame = 0;
+    syncActiveSegment(force);
+  });
+}
+
+function syncActiveSegment(force = false) {
   syncMaskPreviewTime();
   const time = Number(preview.currentTime || 0);
+  if (!force && lastSyncedTime >= 0 && Math.abs(time - lastSyncedTime) < 0.08) return;
+  lastSyncedTime = time;
   const segments = collectSegments();
   const previousIndex = activeSegmentIndex;
-  const index = segments.findIndex((segment, segmentIndex) => {
-    const start = Number(segment.start);
-    const end = Number(segment.end);
-    return (
-      segmentIndex === previousIndex
-      && Number.isFinite(start)
-      && Number.isFinite(end)
-      && start <= time
-      && time <= end
-    );
-  });
-  const nextIndex = index >= 0 ? index : segments.findIndex((segment) => isSegmentVisibleAtTime(segment, time));
-  setActiveSegment(nextIndex, true);
+  const previous = segments[previousIndex];
+  const candidateIndex = previous && isSegmentVisibleAtTime(previous, time) ? previousIndex : findSegmentIndexAtTime(segments, time);
+  const index = candidateIndex >= 0 ? candidateIndex : previousIndex;
+  setActiveSegment(index, true);
   updateTimelinePlayhead(segments);
   updateSubtitlePreview(segments);
 }
 
-function setActiveSegment(index, shouldScroll) {
-  if (index === activeSegmentIndex) return;
-  activeSegmentIndex = index;
-  for (const tr of tbody.querySelectorAll('tr')) {
-    const active = Number(tr.dataset.index) === index;
-    tr.classList.toggle('active', active);
-    resizeSegmentRow(tr, active);
-    if (active && shouldScroll) scrollSegmentRowIntoView(tr);
+function setActiveSegment(index, shouldScroll, scrollOptions = {}) {
+  index = Number(index);
+  const validIndex = Number.isInteger(index) && cachedSegments && index >= 0 && index < cachedSegments.length;
+  if (!validIndex) {
+    if (activeSegmentIndex === -1) return;
+    activeSegmentIndex = -1;
+    updateRenderedActiveRows();
+    for (const item of timelineLane.querySelectorAll('.timeline-segment')) {
+      item.classList.remove('active');
+    }
+    scheduleVisibleTimelineRender();
+    return;
   }
+  const sameIndex = index === activeSegmentIndex;
+  activeSegmentIndex = index;
+  if (shouldScroll) scrollSegmentIndexIntoView(index, scrollOptions);
+  if (sameIndex && !shouldScroll) return;
+  updateRenderedActiveRows();
   for (const item of timelineLane.querySelectorAll('.timeline-segment')) {
     item.classList.toggle('active', Number(item.dataset.index) === index);
   }
@@ -3677,18 +4061,27 @@ function updateTimelinePlayhead(segments) {
   }
 }
 
-function scrollSegmentRowIntoView(tr) {
-  const container = tr.closest('.table-wrap');
+function scrollSegmentIndexIntoView(index, options = {}) {
+  const container = tableWrap || tbody.closest('.table-wrap');
   if (!container) return;
+  index = Number(index);
+  if (!Number.isInteger(index) || index < 0 || !cachedSegments || index >= cachedSegments.length) return;
   const stickyHeaderHeight = 30;
-  const rowTop = tr.offsetTop;
-  const rowBottom = rowTop + tr.offsetHeight;
+  const rowTop = index * TABLE_ROW_HEIGHT;
+  const rowBottom = rowTop + TABLE_ROW_HEIGHT;
   const viewTop = container.scrollTop + stickyHeaderHeight;
   const viewBottom = container.scrollTop + container.clientHeight;
-  if (rowTop < viewTop) {
-    container.scrollTop = Math.max(0, rowTop - stickyHeaderHeight - 4);
+  let nextScrollTop = container.scrollTop;
+  if (options.align === 'center') {
+    nextScrollTop = Math.max(0, rowTop - Math.max(0, (container.clientHeight - TABLE_ROW_HEIGHT) / 2));
+  } else if (rowTop < viewTop) {
+    nextScrollTop = Math.max(0, rowTop - stickyHeaderHeight - 4);
   } else if (rowBottom > viewBottom) {
-    container.scrollTop = rowBottom - container.clientHeight + 8;
+    nextScrollTop = rowBottom - container.clientHeight + 8;
+  }
+  if (Math.abs(nextScrollTop - container.scrollTop) > 1) {
+    container.scrollTop = nextScrollTop;
+    renderVisibleSegmentRows();
   }
 }
 
@@ -3696,8 +4089,12 @@ function updateSubtitlePreview(segments) {
   segments = segments || collectSegments();
   updateSourceMaskPreview();
   const time = Number(preview.currentTime || 0);
+  const centerIndex = activeSegmentIndex >= 0 ? activeSegmentIndex : findSegmentIndexAtTime(segments, time);
+  const searchStart = Math.max(0, centerIndex - 8);
+  const searchEnd = Math.min(segments.length, Math.max(centerIndex + 9, 0));
   const visibleSegments = segments
-    .map((segment, index) => ({ segment, index }))
+    .slice(searchStart, searchEnd)
+    .map((segment, offset) => ({ segment, index: searchStart + offset }))
     .filter((item) => isSegmentVisibleAtTime(item.segment, time) && String(item.segment.text || '').trim())
     .sort((a, b) => {
       if (a.index === activeSegmentIndex) return -1;
@@ -3735,12 +4132,32 @@ function isSegmentVisibleAtTime(segment, time) {
   return Number.isFinite(start) && Number.isFinite(end) && start <= time && time < end;
 }
 
+function findSegmentIndexAtTime(segments, time) {
+  let lo = 0;
+  let hi = segments.length - 1;
+  let candidate = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const start = Number(segments[mid].start);
+    if (Number.isFinite(start) && start <= time) {
+      candidate = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  for (let index = Math.max(0, candidate - 2); index < Math.min(segments.length, candidate + 3); index++) {
+    if (isSegmentVisibleAtTime(segments[index], time)) return index;
+  }
+  return segments.findIndex((segment) => isSegmentVisibleAtTime(segment, time));
+}
+
 function updateSourceMaskPreview() {
   const enabled = document.querySelector('#maskEnabled').value === 'true';
   sourceMaskOverlay.classList.toggle('visible', enabled);
   maskPreviewVideo.classList.toggle('visible', false);
   if (!enabled) {
-    maskPreviewVideo.pause();
+    unloadMaskPreviewSource();
     return;
   }
   const scale = assScriptScale();
@@ -3758,8 +4175,9 @@ function updateSourceMaskPreview() {
   sourceMaskOverlay.style.bottom = scaledBottom + 'px';
   if (mode === 'bar') {
     sourceMaskOverlay.style.background = `rgba(0, 0, 0, ${opacity})`;
-    maskPreviewVideo.pause();
+    unloadMaskPreviewSource();
   } else {
+    if (!ensureMaskPreviewSource()) return;
     maskPreviewVideo.classList.add('visible');
     maskPreviewVideo.style.clipPath = `inset(${clipTop}px 0 ${clipBottom}px 0)`;
     maskPreviewVideo.style.filter = `blur(${Math.max(1, blur * scale)}px)`;
@@ -3878,9 +4296,20 @@ async function translateCurrentSubtitles() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '翻译失败');
+    currentJob = {
+      ...currentJob,
+      translation: {
+        ...(currentJob.translation || {}),
+        validation_issue_count: data.validation_issue_count || 0,
+        validation_issues: data.validation_issues || [],
+        pretranslation_skip_count: data.pretranslation_skip_count || 0,
+        pretranslation_skips: data.pretranslation_skips || [],
+      }
+    };
     renderSegments(data.segments || [], activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
     setEditorDirty(false);
-    translateStatusEl.textContent = '已翻译 ' + (data.count || 0) + ' 条字幕。';
+    translateStatusEl.textContent = translationDoneStatus(data);
+    renderTranslationReview(data);
     await refreshJobs({ keepSelection: true, skipSegments: true });
   } catch (err) {
     translateStatusEl.textContent = '翻译失败：' + (err.message || err);
@@ -3901,6 +4330,17 @@ function updateTranslateAction() {
   const translation = (currentJob && currentJob.translation) || {};
   restoreTranslationBtn.disabled = !currentJob || !translation.source_available || busy;
   updateTranslateProgress(currentJob);
+  renderTranslationReview(currentJob);
+}
+
+function translationDoneStatus(data) {
+  const count = Number(data.count || 0);
+  const issueCount = Number(data.validation_issue_count || 0);
+  const skipCount = Number(data.pretranslation_skip_count || 0);
+  const extras = [];
+  if (skipCount) extras.push(`自动跳过 ${skipCount} 条`);
+  if (issueCount) extras.push(`可疑 ${issueCount} 条`);
+  return '已翻译 ' + count + ' 条字幕' + (extras.length ? '，' + extras.join('，') : '') + '。';
 }
 
 async function restoreSourceSubtitles() {
@@ -3913,6 +4353,18 @@ async function restoreSourceSubtitles() {
     if (!res.ok) throw new Error(data.detail || '恢复失败');
     renderSegments(data.segments || [], 0);
     setEditorDirty(false);
+    currentJob = {
+      ...currentJob,
+      translation: {
+        ...(currentJob.translation || {}),
+        validation_issue_count: 0,
+        validation_issues: [],
+        pretranslation_skip_count: 0,
+        pretranslation_skips: [],
+      }
+    };
+    dismissedTranslationReviewItems = new Set();
+    renderTranslationReview(currentJob);
     translateStatusEl.textContent = `已恢复 ${data.count || 0} 条翻译前字幕。`;
     await refreshJobs({ keepSelection: true, skipSegments: true });
   } catch (err) {

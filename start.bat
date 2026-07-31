@@ -17,16 +17,34 @@ echo The browser will open after the service is ready.
 echo Press Ctrl+C here to stop the server.
 echo.
 
+set WHISPER_DEVICE=cuda
+set WHISPER_DTYPE=float16
+set WHISPER_LANGUAGE=en
+set WHISPER_MODEL=medium
+if exist "models\faster-whisper-medium\config.json" set WHISPER_MODEL=models\faster-whisper-medium
+set WHISPER_BEAM_SIZE=3
+set HF_HUB_ETAG_TIMEOUT=300
+set HF_HUB_DOWNLOAD_TIMEOUT=1800
+set TRANSLATOR_ARGS=--translator-provider openai
+if exist "models\opus-mt-en-zh-ct2-int8\model.bin" if exist "models\opus-mt-en-zh\source.spm" (
+  echo Local OPUS-MT translator enabled.
+  set TRANSLATOR_ARGS=--translator-provider opus-mt --translator-model models\opus-mt-en-zh-ct2-int8 --translator-tokenizer-dir models\opus-mt-en-zh --translator-device auto --translator-compute-type auto
+)
+
 start "" /min powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$url='http://127.0.0.1:7860'; $ready=$url + '/api/runtime'; for ($i=0; $i -lt 90; $i++) { try { $r=Invoke-WebRequest -UseBasicParsing -Uri $ready -TimeoutSec 1; if ($r.StatusCode -eq 200) { Start-Process $url; exit 0 } } catch { Start-Sleep -Milliseconds 700 } }; Start-Process $url"
 
 ".venv\Scripts\mtd-subtitle-web.exe" ^
   --backend whisper ^
-  --model small ^
+  --model %WHISPER_MODEL% ^
   --host 127.0.0.1 ^
   --port 7860 ^
-  --dtype auto ^
-  --max-new-tokens 8192
+  --device %WHISPER_DEVICE% ^
+  --dtype %WHISPER_DTYPE% ^
+  --language %WHISPER_LANGUAGE% ^
+  --beam-size %WHISPER_BEAM_SIZE% ^
+  --max-new-tokens 8192 ^
+  %TRANSLATOR_ARGS%
 
 echo.
 echo Server stopped.

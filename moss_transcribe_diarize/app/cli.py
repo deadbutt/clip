@@ -20,7 +20,14 @@ from moss_transcribe_diarize.subtitle import (
 from .clips import generate_clip_candidates, rebase_segments_for_clip
 from .ffmpeg import burn_ass_subtitles, burn_ass_subtitles_clip, detect_ffmpeg, probe_video_size
 from .speaker_labeler import SpeakerLabelingInfo, label_speakers
-from .text_translator import PROTECTED_TERMS, TextTranslator, apply_translations
+from .local_mt_translator import LocalMtTranslator
+from .text_translator import (
+    PROTECTED_TERMS,
+    TextTranslator,
+    apply_translations,
+    collect_pretranslation_skips,
+    validate_translation_outputs,
+)
 from .whisper_runner import WhisperRunner
 
 
@@ -53,10 +60,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pyannote-model", default="pyannote/speaker-diarization-3.1")
     parser.add_argument("--diarization-device", default="auto")
     parser.add_argument("--translate-base-url", default=None, help="OpenAI-compatible chat base URL for subtitle translation.")
-    parser.add_argument("--translate-model", default="local", help="Translator model name served by the OpenAI-compatible API.")
+    parser.add_argument("--translate-model", default="local", help="Translator model name or local OPUS-MT CTranslate2 directory.")
     parser.add_argument("--translate-api-key", default="EMPTY")
     parser.add_argument("--translate-timeout", type=float, default=600.0)
-    parser.add_argument("--translate-provider", choices=["openai", "ollama"], default="openai")
+    parser.add_argument("--translate-provider", choices=["openai", "ollama", "opus-mt"], default="openai")
+    parser.add_argument("--translate-tokenizer-dir", default="models/opus-mt-en-zh", help="Tokenizer directory for --translate-provider opus-mt.")
+    parser.add_argument("--translate-device", default="auto", help="CTranslate2 device for --translate-provider opus-mt.")
+    parser.add_argument("--translate-compute-type", default="auto", help="CTranslate2 compute type for --translate-provider opus-mt.")
     parser.add_argument("--translate-batch-size", type=int, default=18)
     parser.add_argument("--translate-protected-terms", default="", help="Comma-separated terms that should stay untranslated.")
     parser.add_argument("--target-language", default="简体中文")
@@ -129,17 +139,26 @@ def main() -> None:
 
     translated = False
     translation_elapsed_sec = None
-    if args.translate_base_url:
+    if args.translate_base_url or args.translate_provider == "opus-mt":
         write_text(out_dir / "segments_original.json", export_json(segments))
         protected_terms = tuple(term.strip() for term in args.translate_protected_terms.split(",") if term.strip())
-        translator = TextTranslator(
-            base_url=args.translate_base_url,
-            model=args.translate_model,
-            api_key=args.translate_api_key,
-            timeout=args.translate_timeout,
-            provider=args.translate_provider,
-            protected_terms=protected_terms or tuple(PROTECTED_TERMS),
-        )
+        if args.translate_provider == "opus-mt":
+            model_dir = args.translate_model if args.translate_model != "local" else "models/opus-mt-en-zh-ct2-int8"
+            translator = LocalMtTranslator(
+                model_dir=model_dir,
+                tokenizer_dir=args.translate_tokenizer_dir,
+                device=args.translate_device,
+                compute_type=args.translate_compute_type,
+            )
+        else:
+            translator = TextTranslator(
+                base_url=args.translate_base_url,
+                model=args.translate_model,
+                api_key=args.translate_api_key,
+                timeout=args.translate_timeout,
+                provider=args.translate_provider,
+                protected_terms=protected_terms or tuple(PROTECTED_TERMS),
+            )
         translation_started = time.time()
 
         def print_translation_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
@@ -156,6 +175,8 @@ def main() -> None:
         translation_elapsed_sec = time.time() - translation_started
         if segments:
             sys.stdout.write("\n")
+        pretranslation_skips = collect_pretranslation_skips(segments)
+        validation_issues = validate_translation_outputs(segments, translations)
         segments = apply_translations(segments, translations, mode=args.translate_mode)
         translated = True
 
@@ -211,6 +232,10 @@ def main() -> None:
         "segments": len(segments),
         "translated": translated,
         "translation_elapsed_sec": translation_elapsed_sec,
+        "translation_pretranslation_skip_count": len(pretranslation_skips) if translated else 0,
+        "translation_pretranslation_skips": pretranslation_skips[:20] if translated else [],
+        "translation_validation_issue_count": len(validation_issues) if translated else 0,
+        "translation_validation_issues": validation_issues[:20] if translated else [],
         "files": {
             "raw_transcript": str(raw_transcript),
             "segments": str(segments_path),

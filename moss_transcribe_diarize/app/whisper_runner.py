@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -54,6 +55,9 @@ class WhisperRunner:
         language: str | None = None,
         beam_size: int = 5,
         vad_filter: bool = True,
+        condition_on_previous_text: bool = False,
+        repetition_penalty: float = 1.05,
+        no_repeat_ngram_size: int = 3,
     ):
         self.model_path = str(model_path)
         self.device_name = device
@@ -61,9 +65,13 @@ class WhisperRunner:
         self.language = language
         self.beam_size = beam_size
         self.vad_filter = vad_filter
+        self.condition_on_previous_text = condition_on_previous_text
+        self.repetition_penalty = repetition_penalty
+        self.no_repeat_ngram_size = no_repeat_ngram_size
         self._model = None
         self._engine = None
         self._openai_fp16 = False
+        self._fallback_errors: list[str] = []
         self._lock = threading.Lock()
 
     @property
@@ -80,6 +88,10 @@ class WhisperRunner:
             "language": self.language,
             "beam_size": self.beam_size,
             "vad_filter": self.vad_filter,
+            "condition_on_previous_text": self.condition_on_previous_text,
+            "repetition_penalty": self.repetition_penalty,
+            "no_repeat_ngram_size": self.no_repeat_ngram_size,
+            "fallback_errors": list(self._fallback_errors),
         }
 
     def transcribe(
@@ -128,10 +140,12 @@ class WhisperRunner:
         os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
         errors: list[str] = []
+        self._fallback_errors = []
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
             errors.append(f"faster-whisper unavailable: {exc}")
+            self._fallback_errors = list(errors)
         else:
             try:
                 device, compute_type = _resolve_runtime(self.device_name, self.dtype_name)
@@ -140,6 +154,7 @@ class WhisperRunner:
                 return
             except Exception as exc:
                 errors.append(f"faster-whisper load failed: {exc}")
+                self._fallback_errors = list(errors)
 
         try:
             import whisper as openai_whisper
@@ -151,6 +166,12 @@ class WhisperRunner:
                 self._model = openai_whisper.load_model(self.model_path, device=device)
                 self._engine = "openai-whisper"
                 self._openai_fp16 = fp16
+                if self._fallback_errors:
+                    print(
+                        "[WARN] faster-whisper was not used; falling back to openai-whisper: "
+                        + " | ".join(self._fallback_errors),
+                        flush=True,
+                    )
                 return
             except Exception as exc:
                 errors.append(f"openai-whisper load failed: {exc}")
@@ -163,14 +184,36 @@ class WhisperRunner:
         prompt: str,
         status_callback: StatusCallback | None,
     ) -> tuple[list[str], int]:
-        segments_iter, info = self._model.transcribe(
-            str(Path(audio_path).expanduser()),
-            language=self.language,
-            beam_size=int(self.beam_size),
-            vad_filter=bool(self.vad_filter),
-            initial_prompt=_whisper_initial_prompt(prompt),
-        )
+        path = str(Path(audio_path).expanduser())
+        kwargs = {
+            "language": self.language,
+            "beam_size": int(self.beam_size),
+            "vad_filter": bool(self.vad_filter),
+            "initial_prompt": _whisper_initial_prompt(prompt),
+            "condition_on_previous_text": bool(self.condition_on_previous_text),
+            "repetition_penalty": float(self.repetition_penalty),
+            "no_repeat_ngram_size": int(self.no_repeat_ngram_size),
+            "compression_ratio_threshold": 2.4,
+            "log_prob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
+        }
+        try:
+            segments_iter, info = self._model.transcribe(path, **kwargs)
+        except TypeError as exc:
+            if not _looks_like_unsupported_transcribe_option(exc):
+                raise
+            for key in (
+                "condition_on_previous_text",
+                "repetition_penalty",
+                "no_repeat_ngram_size",
+                "compression_ratio_threshold",
+                "log_prob_threshold",
+                "no_speech_threshold",
+            ):
+                kwargs.pop(key, None)
+            segments_iter, info = self._model.transcribe(path, **kwargs)
         duration = float(getattr(info, "duration", 0.0) or 0.0)
+        repeat_guard = _RepeatedPhraseGuard()
         parts: list[str] = []
         segment_count = 0
         for segment in segments_iter:
@@ -179,6 +222,11 @@ class WhisperRunner:
             end = max(start, float(segment.end))
             text = str(segment.text or "").strip()
             if not text:
+                continue
+            if repeat_guard.should_skip(text):
+                if status_callback is not None:
+                    progress = _duration_progress(end, duration)
+                    status_callback("transcribing", progress, segment_count)
                 continue
             parts.append(f"[{start:.2f}][S00]{text}[{end:.2f}]")
             if status_callback is not None:
@@ -198,11 +246,15 @@ class WhisperRunner:
             fp16=bool(self._openai_fp16),
             initial_prompt=_whisper_initial_prompt(prompt),
             verbose=False,
-            condition_on_previous_text=True,
+            condition_on_previous_text=bool(self.condition_on_previous_text),
             beam_size=int(self.beam_size),
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            no_speech_threshold=0.6,
         )
         duration = float(result.get("duration") or 0.0)
         segments = result.get("segments") or []
+        repeat_guard = _RepeatedPhraseGuard()
         parts: list[str] = []
         segment_count = 0
         for segment in segments:
@@ -213,6 +265,11 @@ class WhisperRunner:
             end = max(start, float(segment.get("end") or start))
             text = str(segment.get("text") or "").strip()
             if not text:
+                continue
+            if repeat_guard.should_skip(text):
+                if status_callback is not None:
+                    progress = _duration_progress(end, duration)
+                    status_callback("transcribing", progress, segment_count)
                 continue
             parts.append(f"[{start:.2f}][S00]{text}[{end:.2f}]")
             if status_callback is not None:
@@ -260,6 +317,51 @@ def _whisper_initial_prompt(prompt: str) -> str | None:
     if not prompt or prompt == DEFAULT_PROMPT:
         return None
     return prompt
+
+
+class _RepeatedPhraseGuard:
+    def __init__(self, *, max_consecutive: int = 3, max_total: int = 24):
+        self.max_consecutive = max_consecutive
+        self.max_total = max_total
+        self._last = ""
+        self._consecutive = 0
+        self._totals: dict[str, int] = {}
+
+    def should_skip(self, text: str) -> bool:
+        normalized = _normalize_repeated_phrase(text)
+        if not _is_repeated_phrase_candidate(normalized):
+            self._last = ""
+            self._consecutive = 0
+            return False
+
+        if normalized == self._last:
+            self._consecutive += 1
+        else:
+            self._last = normalized
+            self._consecutive = 1
+
+        total = self._totals.get(normalized, 0) + 1
+        self._totals[normalized] = total
+        return self._consecutive > self.max_consecutive or total > self.max_total
+
+
+def _normalize_repeated_phrase(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"['`]", "", text)
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _is_repeated_phrase_candidate(normalized: str) -> bool:
+    if not normalized or len(normalized) > 64:
+        return False
+    words = normalized.split()
+    return 1 <= len(words) <= 6
+
+
+def _looks_like_unsupported_transcribe_option(exc: TypeError) -> bool:
+    message = str(exc).lower()
+    return "unexpected keyword" in message or "got an unexpected" in message
 
 
 def _ensure_ffmpeg_on_path() -> None:

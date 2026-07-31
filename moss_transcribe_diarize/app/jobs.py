@@ -24,7 +24,7 @@ from moss_transcribe_diarize.subtitle import (
 from .clips import generate_clip_candidates, rebase_segments_for_clip
 from .ffmpeg import burn_ass_subtitles, burn_ass_subtitles_clip, detect_ffmpeg, probe_media_duration, probe_video_size
 from .speaker_labeler import label_speakers
-from .text_translator import apply_translations
+from .text_translator import apply_translations, collect_pretranslation_skips, validate_translation_outputs
 
 
 RUNNING_STATES = {"queued", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "rendering"}
@@ -536,6 +536,7 @@ class JobManager:
                     shutil.copyfile(job.segments_path, job.source_segments_path)
                 source_payload = json.loads(job.source_segments_path.read_text(encoding="utf-8"))
                 segments = [SubtitleSegment.from_dict(item) for item in source_payload]
+                pretranslation_skips = collect_pretranslation_skips(segments)
                 started = time.time()
 
                 def update_translation_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
@@ -548,6 +549,7 @@ class JobManager:
                         "mode": mode,
                         "done": done,
                         "total": total,
+                        "pretranslation_skip_count": len(pretranslation_skips),
                         "batch_start": batch_start,
                         "batch_count": batch_count,
                         "percent": round(ratio * 100, 1),
@@ -563,6 +565,7 @@ class JobManager:
                     "mode": mode,
                     "done": 0,
                     "total": len(segments),
+                    "pretranslation_skip_count": len(pretranslation_skips),
                     "percent": 0.0,
                     "elapsed_sec": 0.0,
                 }
@@ -575,6 +578,7 @@ class JobManager:
                     translate_kwargs["batch_size"] = batch_size
                 translations = translator.translate_segments(segments, **translate_kwargs)
                 elapsed = time.time() - started
+                validation_issues = validate_translation_outputs(segments, translations)
                 translated = apply_translations(segments, translations, mode=mode)
                 self._write_subtitle_files(job, translated)
                 job.translation_info = {
@@ -587,6 +591,10 @@ class JobManager:
                     "total": len(segments),
                     "percent": 100.0,
                     "elapsed_sec": round(elapsed, 3),
+                    "pretranslation_skip_count": len(pretranslation_skips),
+                    "pretranslation_skips": pretranslation_skips[:50],
+                    "validation_issue_count": len(validation_issues),
+                    "validation_issues": validation_issues[:20],
                 }
                 job.status = "waiting_review"
                 job.progress = 0.95
@@ -597,6 +605,10 @@ class JobManager:
                     "target_language": target_language,
                     "mode": mode,
                     "elapsed_sec": round(elapsed, 3),
+                    "pretranslation_skip_count": len(pretranslation_skips),
+                    "pretranslation_skips": pretranslation_skips[:50],
+                    "validation_issue_count": len(validation_issues),
+                    "validation_issues": validation_issues[:20],
                 }
             except Exception as exc:
                 job.translation_info = {

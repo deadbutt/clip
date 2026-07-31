@@ -18,16 +18,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-api-key", default="EMPTY")
     parser.add_argument("--vllm-timeout", type=float, default=600.0)
     parser.add_argument("--translator-base-url", default=None, help="OpenAI-compatible chat API for subtitle translation.")
-    parser.add_argument("--translator-model", default=None, help="Translation model name. Defaults to --vllm-model or local.")
+    parser.add_argument("--translator-model", default=None, help="Translation model name or local OPUS-MT CTranslate2 directory.")
     parser.add_argument("--translator-api-key", default=None)
     parser.add_argument("--translator-timeout", type=float, default=None)
-    parser.add_argument("--translator-provider", choices=["openai", "ollama"], default="openai")
+    parser.add_argument("--translator-provider", choices=["openai", "ollama", "opus-mt"], default="openai")
+    parser.add_argument("--translator-tokenizer-dir", default="models/opus-mt-en-zh")
+    parser.add_argument("--translator-device", default="auto")
+    parser.add_argument("--translator-compute-type", default="auto")
     parser.add_argument("--translator-protected-terms", default="")
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--language", default=None, help="Optional Whisper language code, e.g. en, zh, ja. Skips auto-detection when set.")
+    parser.add_argument("--beam-size", type=int, default=5, help="Whisper beam size. 3 is a good long-video balance; 1 is only for rough drafts.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--max-new-tokens", type=int, default=8192)
     parser.add_argument("--max-len", type=int, default=131072)
@@ -53,6 +58,8 @@ def main() -> None:
         runs_dir=Path(args.runs_dir).expanduser(),
         device=args.device,
         dtype=args.dtype,
+        language=args.language,
+        whisper_beam_size=args.beam_size,
         prompt=args.prompt,
         max_length=args.max_len,
         max_new_tokens=args.max_new_tokens,
@@ -68,6 +75,9 @@ def main() -> None:
         translator_api_key=args.translator_api_key,
         translator_timeout=args.translator_timeout,
         translator_provider=args.translator_provider,
+        translator_tokenizer_dir=args.translator_tokenizer_dir,
+        translator_device=args.translator_device,
+        translator_compute_type=args.translator_compute_type,
         translator_protected_terms=tuple(term.strip() for term in args.translator_protected_terms.split(",") if term.strip()),
         speaker_count=args.speaker_count,
         diarization_backend=args.diarization_backend,

@@ -12,6 +12,14 @@ REM ============================================================
 set WEB_HOST=127.0.0.1
 set WEB_PORT=7860
 set PYTHON=.venv\Scripts\python.exe
+set WHISPER_DEVICE=cuda
+set WHISPER_DTYPE=float16
+set WHISPER_LANGUAGE=en
+set WHISPER_MODEL=medium
+if exist "models\faster-whisper-medium\config.json" set WHISPER_MODEL=models\faster-whisper-medium
+set WHISPER_BEAM_SIZE=3
+set HF_HUB_ETAG_TIMEOUT=300
+set HF_HUB_DOWNLOAD_TIMEOUT=1800
 set OLLAMA_BASE_URL=http://127.0.0.1:11434
 set OLLAMA_MODEL=qwen:latest
 set PROTECTED_TERMS=Twitter,Twitch,OBS,Vidal,Nero
@@ -42,10 +50,13 @@ start "" /min powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 "%PYTHON%" -m moss_transcribe_diarize.app.web_cli ^
   --backend whisper ^
-  --model small ^
+  --model %WHISPER_MODEL% ^
   --host %WEB_HOST% ^
   --port %WEB_PORT% ^
-  --dtype auto ^
+  --device %WHISPER_DEVICE% ^
+  --dtype %WHISPER_DTYPE% ^
+  --language %WHISPER_LANGUAGE% ^
+  --beam-size %WHISPER_BEAM_SIZE% ^
   --max-new-tokens 8192 ^
   --translator-provider ollama ^
   --translator-base-url %OLLAMA_BASE_URL% ^
