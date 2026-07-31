@@ -1139,11 +1139,13 @@ INDEX_HTML = """<!doctype html>
     .timeline-actions {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 6px;
     }
     .timeline-tool {
       height: 24px;
-      padding: 0 9px;
+      padding: 0 7px;
       border-radius: 5px;
       border: 1px solid #3a424e;
       background: #2a3039;
@@ -1844,6 +1846,12 @@ INDEX_HTML = """<!doctype html>
                 <div class="timeline-actions">
                   <button id="addSegment" class="timeline-tool" type="button">添加字幕</button>
                   <button id="deleteSegment" class="timeline-tool" type="button">删除当前</button>
+                  <button id="shiftSegmentLeft" class="timeline-tool" type="button" title="Move selected segment left 0.1s">&lt;0.1</button>
+                  <button id="shiftSegmentRight" class="timeline-tool" type="button" title="Move selected segment right 0.1s">0.1&gt;</button>
+                  <button id="nudgeStartLeft" class="timeline-tool" type="button" title="Move selected start left 0.1s">S-</button>
+                  <button id="nudgeStartRight" class="timeline-tool" type="button" title="Move selected start right 0.1s">S+</button>
+                  <button id="nudgeEndLeft" class="timeline-tool" type="button" title="Move selected end left 0.1s">E-</button>
+                  <button id="nudgeEndRight" class="timeline-tool" type="button" title="Move selected end right 0.1s">E+</button>
                   <span id="timelineMeta">0 段</span>
                 </div>
               </div>
@@ -2071,6 +2079,12 @@ const renderBtn = document.querySelector('#render');
 const rerunBtn = document.querySelector('#rerun');
 const addSegmentBtn = document.querySelector('#addSegment');
 const deleteSegmentBtn = document.querySelector('#deleteSegment');
+const shiftSegmentLeftBtn = document.querySelector('#shiftSegmentLeft');
+const shiftSegmentRightBtn = document.querySelector('#shiftSegmentRight');
+const nudgeStartLeftBtn = document.querySelector('#nudgeStartLeft');
+const nudgeStartRightBtn = document.querySelector('#nudgeStartRight');
+const nudgeEndLeftBtn = document.querySelector('#nudgeEndLeft');
+const nudgeEndRightBtn = document.querySelector('#nudgeEndRight');
 const exportFolderBtn = document.querySelector('#exportFolder');
 const saveStatusEl = document.querySelector('#saveStatus');
 const importView = document.querySelector('#importView');
@@ -2166,6 +2180,10 @@ let syncActiveFrame = 0;
 let lastSyncedTime = -1;
 let tableRenderFrame = 0;
 let timelineRenderFrame = 0;
+let timelineAutoScrollFrame = 0;
+let timelineAutoScrollPointer = null;
+let timelineAutoScrollMode = '';
+let timelineFollowHoldUntil = 0;
 let dismissedTranslationReviewItems = new Set();
 let translationReviewJobId = '';
 const SEGMENT_EDGE_PX = 8;
@@ -2557,6 +2575,12 @@ saveBtn.addEventListener('click', async () => {
 
 addSegmentBtn.addEventListener('click', addSegmentAtPlayhead);
 deleteSegmentBtn.addEventListener('click', deleteActiveSegment);
+shiftSegmentLeftBtn.addEventListener('click', () => nudgeActiveSegment('shift', -0.1));
+shiftSegmentRightBtn.addEventListener('click', () => nudgeActiveSegment('shift', 0.1));
+nudgeStartLeftBtn.addEventListener('click', () => nudgeActiveSegment('start', -0.1));
+nudgeStartRightBtn.addEventListener('click', () => nudgeActiveSegment('start', 0.1));
+nudgeEndLeftBtn.addEventListener('click', () => nudgeActiveSegment('end', -0.1));
+nudgeEndRightBtn.addEventListener('click', () => nudgeActiveSegment('end', 0.1));
 exportFolderBtn.addEventListener('click', exportCurrentJobToFolder);
 useActiveSegmentBtn.addEventListener('click', useActiveSegmentAsClipRange);
 findClipsBtn.addEventListener('click', () => findClipCandidates('model'));
@@ -2616,8 +2640,11 @@ rerunBtn.addEventListener('click', () => {
 });
 
 preview.addEventListener('timeupdate', scheduleActiveSegmentSync);
+preview.addEventListener('play', () => {
+  timelineFollowHoldUntil = 0;
+  syncMaskPreviewPlayback();
+});
 preview.addEventListener('seeked', () => scheduleActiveSegmentSync(true));
-preview.addEventListener('play', syncMaskPreviewPlayback);
 preview.addEventListener('pause', syncMaskPreviewPlayback);
 preview.addEventListener('seeking', syncMaskPreviewTime);
 preview.addEventListener('seeked', syncMaskPreviewTime);
@@ -2638,12 +2665,16 @@ timelineScroll.addEventListener('pointerdown', (event) => {
 timelineScroll.addEventListener('pointermove', (event) => {
   if (!timelineDragging) return;
   event.preventDefault();
+  updateTimelineEdgeAutoScroll(event, 'seek');
   seekTimelineFromPointer(event);
 });
 timelineScroll.addEventListener('pointerup', (event) => {
   if (!timelineDragging) return;
   event.preventDefault();
+  seekTimelineFromPointer(event);
   timelineDragging = false;
+  timelineFollowHoldUntil = Number.POSITIVE_INFINITY;
+  stopTimelineEdgeAutoScroll();
   hideTimelineGuide();
   try {
     timelineScroll.releasePointerCapture(event.pointerId);
@@ -2651,6 +2682,8 @@ timelineScroll.addEventListener('pointerup', (event) => {
 });
 timelineScroll.addEventListener('pointercancel', () => {
   timelineDragging = false;
+  timelineFollowHoldUntil = Number.POSITIVE_INFINITY;
+  stopTimelineEdgeAutoScroll();
   hideTimelineGuide();
 });
 timelineScroll.addEventListener('dragstart', (event) => event.preventDefault());
@@ -3447,29 +3480,26 @@ function updateTimelineClipRange() {
 
 function onSegmentPointerDown(event, index, segment) {
   if (event.button !== 0) return;
-  event.preventDefault();
   const rect = segment.getBoundingClientRect();
   const offsetX = event.clientX - rect.left;
-  let mode = 'move';
-  if (rect.width > SEGMENT_EDGE_PX * 3) {
-    if (offsetX <= SEGMENT_EDGE_PX) mode = 'start';
-    else if (offsetX >= rect.width - SEGMENT_EDGE_PX) mode = 'end';
-  }
+  const edgeZone = Math.min(SEGMENT_EDGE_PX, Math.max(4, rect.width / 2));
+  let mode = null;
+  if (offsetX <= edgeZone) mode = 'start';
+  else if (offsetX >= rect.width - edgeZone) mode = 'end';
+  if (!mode) return;
+  event.preventDefault();
   const segments = collectSegments();
   const seg = segments[index];
   if (!seg) return;
   const duration = timelineDuration(segments);
   const pps = currentPixelsPerSecond || timelinePixelsPerSecond(duration, timelineScroll.clientWidth || 1);
-  const timelineRect = timelineScroll.getBoundingClientRect();
-  const startX = Math.max(timelineRect.left, Math.min(timelineRect.right, event.clientX));
+  const startX = timelineContentXFromPointer(event);
   segmentDragState = {
     index,
     mode,
     segment,
     pointerId: event.pointerId,
     startX,
-    minClientX: timelineRect.left,
-    maxClientX: timelineRect.right,
     origStart: Math.max(0, Number(seg.start) || 0),
     origEnd: Math.max(Number(seg.start) || 0, Number(seg.end) || 0),
     duration,
@@ -3489,10 +3519,10 @@ function onSegmentPointerDown(event, index, segment) {
   window.addEventListener('pointerup', upHandler);
 }
 
-function onSegmentPointerMove(event, state) {
+function onSegmentPointerMove(event, state, options = {}) {
   if (!state) return;
-  const clientX = Math.max(state.minClientX, Math.min(state.maxClientX, event.clientX));
-  const dx = clientX - state.startX;
+  if (!options.fromAutoScroll) updateTimelineEdgeAutoScroll(event, 'segment');
+  const dx = timelineContentXFromPointer(event) - state.startX;
   if (!state.moved && Math.abs(dx) < SEGMENT_DRAG_THRESHOLD) return;
   if (!state.moved) {
     state.moved = true;
@@ -3582,6 +3612,7 @@ function computeSegmentSnap(state, newStart, newEnd) {
 function onSegmentPointerUp(event, state) {
   if (!state) return;
   state.segment.classList.remove('dragging');
+  stopTimelineEdgeAutoScroll();
   hideTimelineGuide();
   try { state.segment.releasePointerCapture(event.pointerId); } catch (err) {}
   if (state.moved && state.newStart != null && state.newEnd != null) {
@@ -3739,12 +3770,62 @@ function updateCachedSegmentFromRow(tr) {
   };
 }
 
+function nudgeActiveSegment(kind, delta) {
+  if (!currentJob || !cachedSegments || activeSegmentIndex < 0) return;
+  const segment = cachedSegments[activeSegmentIndex];
+  if (!segment) return;
+  const minDuration = 0.1;
+  const mediaEnd = Number(preview.duration || 0);
+  let start = Math.max(0, Number(segment.start) || 0);
+  let end = Math.max(start + minDuration, Number(segment.end) || start + minDuration);
+  if (kind === 'shift') {
+    const duration = end - start;
+    start += delta;
+    end += delta;
+    if (start < 0) {
+      start = 0;
+      end = duration;
+    }
+    if (mediaEnd > 0 && end > mediaEnd) {
+      end = mediaEnd;
+      start = Math.max(0, end - duration);
+    }
+  } else if (kind === 'start') {
+    start = Math.max(0, Math.min(end - minDuration, start + delta));
+  } else if (kind === 'end') {
+    end = Math.max(start + minDuration, end + delta);
+    if (mediaEnd > 0) end = Math.min(mediaEnd, end);
+  }
+  applySegmentTiming(activeSegmentIndex, roundTime(start), roundTime(end), { seek: true });
+}
+
+function applySegmentTiming(index, start, end, options = {}) {
+  if (!cachedSegments || !cachedSegments[index]) return;
+  cachedSegments[index] = {
+    ...cachedSegments[index],
+    start,
+    end,
+  };
+  const tr = tbody.querySelector('tr[data-index="' + index + '"]');
+  if (tr) {
+    tr.querySelector('.start').value = start;
+    tr.querySelector('.end').value = end;
+  }
+  markEditorDirty();
+  renderTimeline(collectSegments());
+  setActiveSegment(index, true, { align: 'center' });
+  if (options.seek) seekPreviewToSegment(index);
+  updateTimelinePlayhead();
+  updateSubtitlePreview();
+}
+
 function seekPreviewToSegment(index, options = {}) {
   const segment = cachedSegments && cachedSegments[index];
   if (!segment) return false;
   const start = Number(segment.start);
   if (!Number.isFinite(start)) return false;
   if (options.pause !== false) preview.pause();
+  timelineFollowHoldUntil = Number.POSITIVE_INFINITY;
   lastSyncedTime = -1;
   preview.currentTime = Math.max(0, start);
   syncMaskPreviewTime();
@@ -3878,18 +3959,75 @@ function timelineXToTime(x, duration) {
   return Math.max(0, Math.min(duration, Number(x || 0) / pps));
 }
 
+function timelineViewportXFromPointer(event) {
+  const rect = timelineScroll.getBoundingClientRect();
+  const width = timelineScroll.clientWidth || rect.width || 1;
+  return Math.max(0, Math.min(width, event.clientX - rect.left));
+}
+
+function timelineContentXFromPointer(event) {
+  const trackWidth = timelineTrack.scrollWidth || timelineTrack.clientWidth || timelineScroll.clientWidth || 1;
+  return Math.max(0, Math.min(trackWidth, timelineScroll.scrollLeft + timelineViewportXFromPointer(event)));
+}
+
+function updateTimelineEdgeAutoScroll(event, mode) {
+  timelineAutoScrollPointer = { clientX: event.clientX, clientY: event.clientY };
+  timelineAutoScrollMode = mode;
+  if (!timelineAutoScrollFrame && timelineEdgeScrollSpeed(event) !== 0) {
+    timelineAutoScrollFrame = requestAnimationFrame(runTimelineEdgeAutoScroll);
+  }
+}
+
+function timelineEdgeScrollSpeed(event) {
+  const rect = timelineScroll.getBoundingClientRect();
+  const maxScroll = Math.max(0, (timelineTrack.scrollWidth || timelineTrack.clientWidth || 0) - timelineScroll.clientWidth);
+  if (maxScroll <= 0) return 0;
+  if (event.clientX < rect.left && timelineScroll.scrollLeft > 0) {
+    return -Math.min(14, Math.max(2, (rect.left - event.clientX) * 0.12));
+  }
+  if (event.clientX > rect.right && timelineScroll.scrollLeft < maxScroll) {
+    return Math.min(14, Math.max(2, (event.clientX - rect.right) * 0.12));
+  }
+  return 0;
+}
+
+function runTimelineEdgeAutoScroll() {
+  timelineAutoScrollFrame = 0;
+  const pointer = timelineAutoScrollPointer;
+  if (!pointer || (!timelineDragging && !(segmentDragState && segmentDragState.moved))) return;
+  const speed = timelineEdgeScrollSpeed(pointer);
+  if (speed === 0) return;
+  const maxScroll = Math.max(0, (timelineTrack.scrollWidth || timelineTrack.clientWidth || 0) - timelineScroll.clientWidth);
+  const nextScroll = Math.max(0, Math.min(maxScroll, timelineScroll.scrollLeft + speed));
+  if (Math.abs(nextScroll - timelineScroll.scrollLeft) > 0.1) {
+    timelineScroll.scrollLeft = nextScroll;
+    if (timelineAutoScrollMode === 'seek' && timelineDragging) {
+      seekTimelineFromPointer(pointer);
+    } else if (timelineAutoScrollMode === 'segment' && segmentDragState) {
+      onSegmentPointerMove(pointer, segmentDragState, { fromAutoScroll: true });
+    }
+  }
+  timelineAutoScrollFrame = requestAnimationFrame(runTimelineEdgeAutoScroll);
+}
+
+function stopTimelineEdgeAutoScroll() {
+  timelineAutoScrollPointer = null;
+  timelineAutoScrollMode = '';
+  if (timelineAutoScrollFrame) {
+    cancelAnimationFrame(timelineAutoScrollFrame);
+    timelineAutoScrollFrame = 0;
+  }
+}
+
 function seekTimelineFromPointer(event) {
   const segments = collectSegments();
   const duration = timelineDuration(segments);
   if (!duration) return;
-  const rect = timelineTrack.getBoundingClientRect();
-  const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+  const x = timelineContentXFromPointer(event);
   const rawTime = roundTime(timelineXToTime(x, duration));
-  const snap = computePlayheadSnap(rawTime, segments);
-  const time = snap ? snap.time : rawTime;
-  preview.currentTime = Math.max(0, Math.min(duration, time));
-  if (timelineDragging && snap) showTimelineGuide(time, snap.label);
-  else hideTimelineGuide();
+  const time = Math.max(0, Math.min(duration, rawTime));
+  preview.currentTime = time;
+  hideTimelineGuide();
   syncActiveSegment();
 }
 
@@ -4052,7 +4190,8 @@ function updateTimelinePlayhead(segments) {
   const time = Math.max(0, Number(preview.currentTime || 0));
   const left = duration > 0 ? Math.min(trackWidth, timelineTimeToX(time)) : 0;
   timelinePlayhead.style.left = left + 'px';
-  if (time > 0 && timelineScroll.clientWidth) {
+  const now = performance.now();
+  if (time > 0 && timelineScroll.clientWidth && now >= timelineFollowHoldUntil && !timelineDragging && !(segmentDragState && segmentDragState.moved)) {
     const visibleLeft = timelineScroll.scrollLeft;
     const visibleRight = visibleLeft + timelineScroll.clientWidth;
     if (left < visibleLeft + 24 || left > visibleRight - 24) {
