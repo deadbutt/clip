@@ -2945,7 +2945,7 @@ tbody.addEventListener('focusin', (event) => {
   if (!tr) return;
   const index = Number(tr.dataset.index);
   seekPreviewToSegment(index);
-  setActiveSegment(index, true, { align: 'center' });
+  setActiveSegment(index, false);
   updateTimelinePlayhead();
   resizeSegmentRow(tr, true);
   updateSubtitlePreview();
@@ -3538,10 +3538,10 @@ function createSegmentRow(segment, index) {
     if (event.target.closest('button')) return;
     const rowIndex = Number(tr.dataset.index);
     seekPreviewToSegment(rowIndex);
-    setActiveSegment(rowIndex, true, { align: 'center' });
+    const isFieldClick = !!event.target.closest('input, textarea');
+    setActiveSegment(rowIndex, !isFieldClick, { align: 'center' });
     updateTimelinePlayhead();
     updateSubtitlePreview();
-    if (event.target.closest('input, textarea')) return;
   });
   resizeSegmentRow(tr, false);
   return tr;
@@ -4154,11 +4154,37 @@ function seekPreviewToSegment(index, options = {}) {
   const start = Number(segment.start);
   if (!Number.isFinite(start)) return false;
   if (options.pause !== false) preview.pause();
-  timelineFollowHoldUntil = Number.POSITIVE_INFINITY;
   lastSyncedTime = -1;
   preview.currentTime = Math.max(0, start);
+  timelineFollowHoldUntil = 0;
+  scrollTimelineTimeIntoView(start, { align: options.align || 'center' });
   syncMaskPreviewTime();
   return true;
+}
+
+function scrollTimelineTimeIntoView(time, options = {}) {
+  if (!timelineScroll || !Number.isFinite(Number(time))) return;
+  const duration = timelineDuration(cachedTimelineSegments.length ? cachedTimelineSegments : collectSegments());
+  if (duration <= 0) return;
+  const containerWidth = timelineScroll.clientWidth || 0;
+  if (containerWidth <= 0) return;
+  const trackWidth = Number.parseFloat(timelineTrack.style.width) || timelineTrack.scrollWidth || containerWidth;
+  const maxScrollLeft = Math.max(0, trackWidth - containerWidth);
+  const x = timelineTimeToX(time);
+  let nextScrollLeft = timelineScroll.scrollLeft;
+  if (options.align === 'center') {
+    nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, x - containerWidth * 0.5));
+  } else if (x < timelineScroll.scrollLeft + 24) {
+    nextScrollLeft = Math.max(0, x - 24);
+  } else if (x > timelineScroll.scrollLeft + containerWidth - 24) {
+    nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, x - containerWidth + 24));
+  } else {
+    return;
+  }
+  if (Math.abs(nextScrollLeft - timelineScroll.scrollLeft) > 0.5) {
+    timelineScroll.scrollLeft = nextScrollLeft;
+    renderVisibleTimelineSegments();
+  }
 }
 
 function addSegmentAtPlayhead() {

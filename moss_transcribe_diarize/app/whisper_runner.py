@@ -117,6 +117,16 @@ class WhisperRunner:
             started = time.time()
             if self._engine == "faster-whisper":
                 parts, segment_count = self._transcribe_faster_whisper(audio_path, prompt, status_callback)
+                if self.vad_filter and self._looks_sparse(parts, segment_count, audio_path):
+                    fallback_parts, fallback_segment_count = self._transcribe_faster_whisper(
+                        audio_path,
+                        prompt,
+                        status_callback,
+                        vad_filter=False,
+                    )
+                    if len("".join(fallback_parts).strip()) > len("".join(parts).strip()):
+                        parts = fallback_parts
+                        segment_count = fallback_segment_count
             else:
                 parts, segment_count = self._transcribe_openai_whisper(audio_path, prompt, status_callback)
 
@@ -183,12 +193,14 @@ class WhisperRunner:
         audio_path: str | Path,
         prompt: str,
         status_callback: StatusCallback | None,
+        *,
+        vad_filter: bool | None = None,
     ) -> tuple[list[str], int]:
         path = str(Path(audio_path).expanduser())
         kwargs = {
             "language": self.language,
             "beam_size": int(self.beam_size),
-            "vad_filter": bool(self.vad_filter),
+            "vad_filter": bool(self.vad_filter if vad_filter is None else vad_filter),
             "initial_prompt": _whisper_initial_prompt(prompt),
             "condition_on_previous_text": bool(self.condition_on_previous_text),
             "repetition_penalty": float(self.repetition_penalty),
@@ -233,6 +245,15 @@ class WhisperRunner:
                 progress = _duration_progress(end, duration)
                 status_callback("transcribing", progress, segment_count)
         return parts, segment_count
+
+    def _looks_sparse(self, parts: list[str], segment_count: int, audio_path: str | Path) -> bool:
+        text = "".join(parts).strip()
+        if len(text) >= 40:
+            return False
+        if segment_count > 2:
+            return False
+        duration = _probe_duration(audio_path)
+        return duration >= 12.0
 
     def _transcribe_openai_whisper(
         self,
@@ -382,3 +403,14 @@ def _duration_progress(position: float, duration: float) -> float:
         return 0.25
     ratio = max(0.0, min(1.0, position / duration))
     return 0.10 + (0.85 - 0.10) * ratio
+
+
+def _probe_duration(audio_path: str | Path) -> float:
+    try:
+        from .ffmpeg import probe_media_duration
+    except Exception:
+        return 0.0
+    try:
+        return float(probe_media_duration(audio_path) or 0.0)
+    except Exception:
+        return 0.0
