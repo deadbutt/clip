@@ -17,6 +17,8 @@ from moss_transcribe_diarize.subtitle import (
     export_ass,
     export_json,
     export_srt,
+    parse_ass,
+    parse_srt,
     subtitle_segments_from_transcript,
     write_text,
 )
@@ -376,6 +378,7 @@ class JobManager:
 
     def list_segments(self, job_id: str) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
+        self._maybe_sync_segments_from_subtitle_files(job)
         if not job.segments_path.exists():
             return []
         return json.loads(job.segments_path.read_text(encoding="utf-8"))
@@ -397,6 +400,17 @@ class JobManager:
         else:
             self._touch(job, error=None)
         return [segment.to_dict() for segment in segments]
+
+    def sync_segments_from_subtitle_files(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        result = self._maybe_sync_segments_from_subtitle_files(job, force=True)
+        segments = self.list_segments(job_id)
+        return {
+            "synced": bool(result),
+            "source": result["source"] if result else None,
+            "count": len(segments),
+            "segments": segments,
+        }
 
     def render(self, job_id: str, style_payload: dict[str, Any] | None = None) -> JobRecord:
         job = self.get_job(job_id)
@@ -811,6 +825,32 @@ class JobManager:
             export_ass(segments, style=style, video_width=width, video_height=height),
             encoding="utf-8-sig",
         )
+        write_text(job.segments_path, export_json(segments))
+
+    def _maybe_sync_segments_from_subtitle_files(self, job: JobRecord, *, force: bool = False) -> dict[str, Any] | None:
+        source_path, source_kind = self._select_subtitle_source(job, force=force)
+        if source_path is None:
+            return None
+        if not force and job.segments_path.exists() and job.segments_path.stat().st_mtime >= source_path.stat().st_mtime:
+            return None
+        text = source_path.read_text(encoding="utf-8-sig" if source_kind == "srt" else "utf-8")
+        segments = parse_srt(text) if source_kind == "srt" else parse_ass(text)
+        if not segments and text.strip():
+            return None
+        style = SubtitleStyle.from_dict(job.subtitle_style) if job.subtitle_style else SubtitleStyle(font_size=48)
+        self._write_subtitle_files(job, segments, style=style)
+        write_text(job.segments_path, export_json(segments))
+        self._touch(job, error=None)
+        return {"source": source_kind, "count": len(segments)}
+
+    def _select_subtitle_source(self, job: JobRecord, *, force: bool = False) -> tuple[Path | None, str | None]:
+        if job.srt_path.exists():
+            return job.srt_path, "srt"
+        if job.ass_path.exists():
+            return job.ass_path, "ass"
+        if force and job.segments_path.exists():
+            return job.segments_path, "json"
+        return None, None
 
     def _set_status(
         self,

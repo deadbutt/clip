@@ -1,4 +1,4 @@
-from .export import export_ass, export_json, export_srt, write_text
+from .export import export_ass, export_json, export_srt, parse_ass, parse_srt, write_text
 from .models import SubtitleSegment, SubtitleStyle
 from .postprocess import (
     coerce_subtitle_segments,
@@ -13,6 +13,8 @@ __all__ = [
     "export_ass",
     "export_json",
     "export_srt",
+    "parse_ass",
+    "parse_srt",
     "coerce_subtitle_segments",
     "normalize_segments",
     "subtitle_segments_from_transcript",

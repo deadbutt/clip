@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -89,6 +90,64 @@ def export_ass(
     )
 
 
+def parse_srt(text: str) -> list[SubtitleSegment]:
+    segments: list[SubtitleSegment] = []
+    blocks = re.split(r"\r?\n\s*\r?\n", (text or "").strip())
+    for index, block in enumerate(blocks, start=1):
+        lines = [line.rstrip("\r") for line in block.splitlines() if line.strip()]
+        if len(lines) < 2:
+            continue
+        timing_line = lines[1] if "-->" in lines[1] else lines[0]
+        text_lines = lines[2:] if timing_line == lines[1] else lines[1:]
+        if "-->" not in timing_line:
+            continue
+        start_text, end_text = [part.strip() for part in timing_line.split("-->", 1)]
+        start = _parse_srt_time(start_text)
+        end = _parse_srt_time(end_text)
+        if start is None or end is None:
+            continue
+        raw_text = "\n".join(text_lines).strip()
+        speaker, body = _split_prefixed_speaker(raw_text)
+        segments.append(
+            SubtitleSegment(
+                id=f"seg_{index:04d}",
+                start=start,
+                end=max(start, end),
+                speaker=speaker,
+                text=body,
+            )
+        )
+    return segments
+
+
+def parse_ass(text: str) -> list[SubtitleSegment]:
+    segments: list[SubtitleSegment] = []
+    for index, line in enumerate((text or "").splitlines(), start=1):
+        line = line.strip()
+        if not line.startswith("Dialogue:"):
+            continue
+        parts = line.split(",", 9)
+        if len(parts) < 10:
+            continue
+        start = _parse_ass_time(parts[1].strip())
+        end = _parse_ass_time(parts[2].strip())
+        if start is None or end is None:
+            continue
+        name = parts[4].strip() or "S00"
+        body = _strip_ass_markup(parts[9]).strip().replace("\\N", "\n").replace("\\n", "\n")
+        speaker, text_body = _split_prefixed_speaker(body)
+        segments.append(
+            SubtitleSegment(
+                id=f"seg_{index:04d}",
+                start=start,
+                end=max(start, end),
+                speaker=speaker if speaker != "S00" or name == "S00" else name,
+                text=text_body,
+            )
+        )
+    return segments
+
+
 def write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +177,54 @@ def _ass_style_line(name: str, style: SubtitleStyle, font_size: int, primary_col
         f"{style.back_color},0,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},"
         f"{style.alignment},48,48,{style.margin_v},1"
     )
+
+
+def _parse_srt_time(value: str) -> float | None:
+    try:
+        hours, minutes, rest = value.split(":")
+        seconds, millis = rest.split(",")
+        return (
+            int(hours) * 3600
+            + int(minutes) * 60
+            + int(seconds)
+            + int(millis) / 1000.0
+        )
+    except Exception:
+        return None
+
+
+def _parse_ass_time(value: str) -> float | None:
+    try:
+        hours, minutes, rest = value.split(":")
+        seconds, centis = rest.split(".")
+        return (
+            int(hours) * 3600
+            + int(minutes) * 60
+            + int(seconds)
+            + int(centis) / 100.0
+        )
+    except Exception:
+        return None
+
+
+def _strip_ass_markup(text: str) -> str:
+    text = re.sub(r"\{.*?\}", "", text or "")
+    return text.replace("\\h", " ").replace("\\N", "\n").replace("\\n", "\n")
+
+
+def _split_prefixed_speaker(text: str) -> tuple[str, str]:
+    text = (text or "").strip()
+    if not text:
+        return "S00", ""
+    first_line, *rest = text.splitlines()
+    match = re.match(r"^([A-Za-z0-9_ -]{1,32}):\s+(.*)$", first_line)
+    if not match:
+        return "S00", text
+    speaker = match.group(1).strip() or "S00"
+    body = match.group(2).strip()
+    if rest:
+        body = "\n".join([body, *rest]).strip()
+    return speaker, body
 
 
 def _speaker_style_name(speaker: str) -> str:

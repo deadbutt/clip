@@ -1941,6 +1941,7 @@ INDEX_HTML = """<!doctype html>
           <span id="renderProgressMeta" class="render-progress-meta is-hidden"><span>烧录进度</span><strong id="renderProgressText">0%</strong></span>
           <div id="renderProgress" class="progress bar-progress is-hidden"><div id="renderProgressBar" class="bar"></div></div>
           <div class="bar-spacer"></div>
+          <button id="syncSubtitles" class="ghost" type="button">Sync SRT</button>
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
           <button id="openTranslate" class="ghost" type="button">英译中</button>
@@ -2227,6 +2228,7 @@ const closeClipsBtn = document.querySelector('#closeClips');
 const clipsModal = document.querySelector('#clipsModal');
 const pendingListEl = document.querySelector('#pendingList');
 const saveBtn = document.querySelector('#save');
+const syncSubtitlesBtn = document.querySelector('#syncSubtitles');
 const renderBtn = document.querySelector('#render');
 const rerunBtn = document.querySelector('#rerun');
 const addSegmentBtn = document.querySelector('#addSegment');
@@ -2336,6 +2338,8 @@ let timelineDragging = false;
 let currentPixelsPerSecond = 12;
 let segmentDragState = null;
 let clipDragState = null;
+let subtitleSyncTimer = 0;
+let subtitleSyncInFlight = false;
 let cachedSegments = null;
 let cachedTimelineSegments = [];
 let cachedTimelineLayout = { lanes: new Map(), count: 1 };
@@ -2471,6 +2475,21 @@ function closeTranslate() { translateModal.classList.add('is-hidden'); }
 function openClips() { ensureClipQueueForJob(); updateClipActions(); updateTimelineClipRange(); clipsModal.classList.remove('is-hidden'); }
 function closeClips() { clipsModal.classList.add('is-hidden'); }
 
+function startSubtitleSyncPolling() {
+  stopSubtitleSyncPolling();
+  if (!currentJob || !EDIT_STATES.has(currentJob.status)) return;
+  subtitleSyncTimer = setInterval(() => {
+    if (!currentJob || editorDirty || subtitleSyncInFlight || !EDIT_STATES.has(currentJob.status)) return;
+    loadSegments(currentJob.id, { preserveSelection: true }).catch(() => {});
+  }, 2000);
+}
+
+function stopSubtitleSyncPolling() {
+  if (!subtitleSyncTimer) return;
+  clearInterval(subtitleSyncTimer);
+  subtitleSyncTimer = 0;
+}
+
 function setSaveState(state, message) {
   if (saveStatusTimer) {
     clearTimeout(saveStatusTimer);
@@ -2491,6 +2510,8 @@ function setSaveState(state, message) {
 
 function setEditorDirty(dirty) {
   editorDirty = dirty;
+  if (syncSubtitlesBtn) syncSubtitlesBtn.disabled = dirty || !currentJob;
+  if (syncSubtitlesBtn) syncSubtitlesBtn.disabled = dirty || !currentJob;
   if (dirty) setSaveState('dirty', '有未保存修改');
   else setSaveState('saved', '已保存');
 }
@@ -2737,6 +2758,10 @@ uploadBtn.addEventListener('click', async () => {
 
 saveBtn.addEventListener('click', async () => {
   await saveSegments();
+});
+syncSubtitlesBtn.addEventListener('click', async () => {
+  if (!currentJob) return;
+  await loadSegments(currentJob.id, { preserveSelection: true, force: true });
 });
 
 addSegmentBtn.addEventListener('click', addSegmentAtPlayhead);
@@ -3042,6 +3067,7 @@ function renderCurrentJob(job, options = {}) {
 function showImportView(options = {}) {
   if (options.clearDraft !== false) resetImportMode();
   currentJob = null;
+  stopSubtitleSyncPolling();
   cachedSegments = null;
   cachedTimelineSegments = [];
   ensureClipQueueForJob();
@@ -3109,6 +3135,7 @@ async function showEditor(job, options = {}) {
   renderDownloads(job.status);
   if (!options.skipSegments) await loadSegments(job.id);
   fitVideoStageToMedia();
+  startSubtitleSyncPolling();
 }
 
 function updateEditorChrome(job) {
@@ -3126,6 +3153,7 @@ function updateEditorChrome(job) {
   updateTranslateAction();
   updateClipActions();
   updateRerunAction(job);
+  if (syncSubtitlesBtn) syncSubtitlesBtn.disabled = editorDirty || !EDIT_STATES.has(job.status);
   setSaveState(editorDirty ? 'dirty' : 'saved', editorDirty ? '有未保存修改' : '已保存');
   renderDownloads(job.status);
 }
@@ -3347,6 +3375,7 @@ async function deleteJob(jobId) {
   if (!res.ok) return;
   if (currentJob && currentJob.id === jobId) {
     currentJob = null;
+    stopSubtitleSyncPolling();
     preview.removeAttribute('src');
     maskPreviewVideo.removeAttribute('src');
     preview.removeAttribute('data-job-id');
@@ -3399,11 +3428,20 @@ async function saveSegments() {
   }
 }
 
-async function loadSegments(jobId) {
-  const res = await fetch(apiUrl(`api/jobs/${jobId}/segments`));
-  const data = await res.json();
-  renderSegments(data.segments || []);
-  setEditorDirty(false);
+async function loadSegments(jobId, options = {}) {
+  if (!jobId || subtitleSyncInFlight) return false;
+  if (editorDirty && !options.force) return false;
+  subtitleSyncInFlight = true;
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${jobId}/segments`), { cache: 'no-store' });
+    const data = await res.json();
+    const preferredIndex = options.preserveSelection && activeSegmentIndex >= 0 ? activeSegmentIndex : null;
+    renderSegments(data.segments || [], preferredIndex);
+    setEditorDirty(false);
+    return true;
+  } finally {
+    subtitleSyncInFlight = false;
+  }
 }
 
 function ensurePolling() {
