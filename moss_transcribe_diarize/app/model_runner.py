@@ -31,6 +31,9 @@ class TranscriptionResult:
     temperature: float | None
     top_p: float | None = None
     top_k: int | None = None
+    # 与 WhisperRunner.TranscriptionResult 对齐：词级时间戳，供词级断句重组。
+    # MOSS 模型不产词时间戳，恒为 None，jobs.py 会走 segment 级降级。
+    words: list[tuple[float, float, str]] | None = None
 
     def to_dict(self) -> dict:
         return {

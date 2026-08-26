@@ -19,6 +19,8 @@ from moss_transcribe_diarize.subtitle import (
     export_srt,
     parse_ass,
     parse_srt,
+    regroup_sentences,
+    regroup_sentences_from_words,
     subtitle_segments_from_transcript,
     write_text,
 )
@@ -29,7 +31,7 @@ from .speaker_labeler import label_speakers
 from .text_translator import apply_translations, collect_pretranslation_skips, validate_translation_outputs
 
 
-RUNNING_STATES = {"queued", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "rendering"}
+RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "rendering"}
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
 
 
@@ -94,6 +96,10 @@ class JobRecord:
     speaker_count: int | None = None
     diarization_backend: str = "none"
     translation_info: dict[str, Any] = field(default_factory=dict)
+    source: str = "upload"
+    source_url: str | None = None
+    cookies_config: dict[str, Any] = field(default_factory=dict)
+    download_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -161,6 +167,13 @@ class JobRecord:
             **self.translation_info,
             "source_available": self.source_segments_path.exists(),
         }
+        data["source"] = self.source
+        if self.source_url:
+            data["source_url"] = self.source_url
+        if self.cookies_config:
+            data["cookies_config"] = self.cookies_config
+        if self.download_info:
+            data["download_info"] = self.download_info
         return data
 
     @classmethod
@@ -192,6 +205,10 @@ class JobRecord:
             speaker_count=None if data.get("speaker_count") in ("", None) else int(data.get("speaker_count")),
             diarization_backend=str(data.get("diarization_backend") or "auto"),
             translation_info=dict(data.get("translation_info") or data.get("translation") or {}),
+            source=str(data.get("source") or "upload"),
+            source_url=data.get("source_url"),
+            cookies_config=dict(data.get("cookies_config") or {}),
+            download_info=dict(data.get("download_info") or {}),
         )
 
 
@@ -328,6 +345,56 @@ class JobManager:
         self._jobs[job.id] = job
         self._save_job(job)
         return job, input_path
+
+    def create_job_for_url(
+        self,
+        url: str,
+        *,
+        cookies_browser: str | None = "firefox",
+        cookies_file: str | None = None,
+        prompt: str | None = None,
+        max_length: int | None = None,
+        max_new_tokens: int | None = None,
+        decoding: str | None = None,
+        temperature: float | None = None,
+        speaker_count: int | None = None,
+        diarization_backend: str | None = None,
+    ) -> JobRecord:
+        options = self._resolve_inference_options(
+            prompt=prompt,
+            max_length=max_length,
+            max_new_tokens=max_new_tokens,
+            decoding=decoding,
+            temperature=temperature,
+        )
+        job_id = uuid.uuid4().hex[:12]
+        job_dir = self.runs_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=False)
+        cookies_config: dict[str, Any] = {"browser": cookies_browser, "file": cookies_file}
+        job = JobRecord(
+            id=job_id,
+            status="downloading",
+            progress=0.0,
+            media_name=url[:80],
+            input_path=str(job_dir / "input.media"),
+            job_dir=str(job_dir),
+            inference_prompt=options["prompt"],
+            max_length=options["max_length"],
+            max_new_tokens=options["max_new_tokens"],
+            decoding=options["decoding"],
+            temperature=options["temperature"],
+            model=self.model_runner.model_path,
+            backend=self._runner_backend(),
+            speaker_count=self._resolve_speaker_count(speaker_count),
+            diarization_backend=self._resolve_diarization_backend(diarization_backend),
+            source="url",
+            source_url=url,
+            cookies_config=cookies_config,
+        )
+        self._jobs[job.id] = job
+        self._save_job(job)
+        self._queue.put(job.id)
+        return job
 
     def enqueue(self, job_id: str) -> None:
         self._queue.put(job_id)
@@ -702,6 +769,9 @@ class JobManager:
 
     def _process_job(self, job: JobRecord) -> None:
         try:
+            if job.source == "url" and job.source_url:
+                self._download_phase(job)
+
             def update(status: str, progress: float | None, generated_tokens: int | None = None) -> None:
                 self._raise_if_cancelled(job.id)
                 if status == "transcribing" and job.generated_tokens is None:
@@ -727,7 +797,12 @@ class JobManager:
             job.generated_tokens = result.generated_tokens
             self._set_status(job, "postprocessing", 0.85, error=None)
             job.raw_transcript_path.write_text(result.text, encoding="utf-8")
-            segments = subtitle_segments_from_transcript(result.text, postprocess=False)
+            # 优先词级重组（时间戳精确、不受原始 segment 边界限制）；
+            # 引擎未提供词时间戳时降级为 segment 级重组。
+            if result.words:
+                segments = regroup_sentences_from_words(result.words)
+            else:
+                segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
             self._raise_if_cancelled(job.id)
             self._set_status(job, "labeling_speakers", 0.88, error=None)
             segments, speaker_info = label_speakers(
@@ -757,6 +832,38 @@ class JobManager:
                 return
             self._set_status(job, "failed", 1.0, error=str(exc))
             self._progress_save_times.pop(job.id, None)
+
+    def _download_phase(self, job: JobRecord) -> None:
+        from .downloader import download_with_yt_dlp
+
+        self._raise_if_cancelled(job.id)
+        self._set_status(job, "downloading", 0.0, error=None)
+        cc = job.cookies_config or {}
+        cookies_browser = cc.get("browser") or "firefox"
+        cookies_file = cc.get("file")
+
+        def on_progress(ratio: float, info: dict[str, Any]) -> None:
+            self._raise_if_cancelled(job.id)
+            job.download_info = info
+            save = self._should_save_live_progress(job.id)
+            self._set_status(job, "downloading", ratio * 0.05, error=None, save=save)
+
+        def cancel_check() -> bool:
+            return job.id in self._cancelled_jobs or job.id not in self._jobs
+
+        downloaded = download_with_yt_dlp(
+            job.source_url,
+            job.job_dir,
+            cookies_browser=cookies_browser,
+            cookies_file=cookies_file,
+            progress_callback=on_progress,
+            cancel_check=cancel_check,
+        )
+        self._raise_if_cancelled(job.id)
+        job.input_path = str(downloaded)
+        job.media_name = downloaded.name
+        job.download_info = {"completed": True, "filename": downloaded.name}
+        self._save_job(job)
 
     def _apply_auto_max_new_tokens(self, job: JobRecord) -> None:
         """Raise ``max_new_tokens`` to a non-truncating floor based on audio duration.

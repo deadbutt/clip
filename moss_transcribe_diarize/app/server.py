@@ -188,6 +188,91 @@ def create_app(
             manager._set_status(job, "failed", 1.0, error=str(exc))
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.post("/api/jobs/url")
+    async def create_job_from_url(request: Request):
+        import tempfile
+        content_type = request.headers.get("content-type", "")
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            url = str(form.get("url") or "").strip()
+            cookies_browser = form.get("cookies_browser") or "firefox"
+            cookies_file_upload = form.get("cookies_file")
+            cookies_file_path = None
+            if cookies_file_upload and hasattr(cookies_file_upload, "read"):
+                cookies_bytes = await cookies_file_upload.read()
+                if cookies_bytes:
+                    tmp = tempfile.NamedTemporaryFile(
+                        suffix=".txt", delete=False, dir=str(manager.runs_dir)
+                    )
+                    tmp.write(cookies_bytes)
+                    tmp.close()
+                    cookies_file_path = tmp.name
+        else:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            url = str(payload.get("url") or "").strip()
+            cookies_browser = payload.get("cookies_browser") or "firefox"
+            cookies_file_path = payload.get("cookies_file")
+        if not url:
+            raise HTTPException(status_code=400, detail="URL 不能为空")
+        if cookies_browser in ("", None, "none"):
+            cookies_browser = None
+        try:
+            job = manager.create_job_for_url(
+                url,
+                cookies_browser=cookies_browser,
+                cookies_file=cookies_file_path,
+                prompt=form.get("prompt") if "multipart/form-data" in content_type else payload.get("prompt"),
+                max_length=(form.get("max_len") if "multipart/form-data" in content_type else payload.get("max_len")) or (form.get("max_length") if "multipart/form-data" in content_type else payload.get("max_length")),
+                max_new_tokens=form.get("max_new_tokens") if "multipart/form-data" in content_type else payload.get("max_new_tokens"),
+                decoding=form.get("decoding") if "multipart/form-data" in content_type else payload.get("decoding"),
+                temperature=form.get("temperature") if "multipart/form-data" in content_type else payload.get("temperature"),
+                speaker_count=form.get("speaker_count") if "multipart/form-data" in content_type else payload.get("speaker_count"),
+                diarization_backend=form.get("diarization_backend") if "multipart/form-data" in content_type else payload.get("diarization_backend"),
+            )
+            return job.to_dict()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/cookies/check")
+    async def check_cookies(request: Request):
+        from .downloader import check_browser_cookies, check_cookies_file
+        import tempfile
+
+        content_type = request.headers.get("content-type", "")
+        browser = "firefox"
+        cookies_file_path = None
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            browser = str(form.get("browser") or "firefox")
+            upload = form.get("file")
+            if upload and hasattr(upload, "read"):
+                data = await upload.read()
+                if data:
+                    tmp = tempfile.NamedTemporaryFile(
+                        suffix=".txt", delete=False, dir=str(manager.runs_dir)
+                    )
+                    tmp.write(data)
+                    tmp.close()
+                    cookies_file_path = tmp.name
+        else:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            browser = str(payload.get("browser") or "firefox")
+            cookies_file_path = payload.get("file")
+
+        result = {"browser": browser}
+        if cookies_file_path:
+            result["file_check"] = check_cookies_file(cookies_file_path)
+        result["browser_check"] = check_browser_cookies(browser)
+        return result
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
         try:
@@ -878,6 +963,58 @@ INDEX_HTML = """<!doctype html>
       padding: 16px;
     }
     .upload-card { display: flex; flex-direction: column; gap: 10px; }
+    .tab-bar {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 12px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid transparent;
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      text-align: center;
+    }
+    .tab-btn.active {
+      background: var(--panel);
+      color: var(--teal);
+      border-color: var(--line);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: flex; flex-direction: column; gap: 10px; }
+    .url-input-row { display: flex; gap: 8px; align-items: flex-start; }
+    .url-input-row input { flex: 1; }
+    .url-input-row button { flex: 0 0 auto; }
+    .cookies-settings {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: #fffdfa;
+    }
+    .cookies-settings summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+    .cookies-settings .cookies-body { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .cookies-result { font-size: 12px; margin-top: 4px; }
+    .cookies-result.ok { color: var(--green); }
+    .cookies-result.bad { color: var(--coral); }
+    .source-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #e8e4dc;
+      color: var(--muted);
+      margin-right: 6px;
+    }
+    .source-badge.url { background: #d4e8e6; color: var(--teal); }
     .jobs-card { display: flex; flex-direction: column; min-height: 0; }
     .jobs-head {
       display: flex;
@@ -1851,9 +1988,43 @@ INDEX_HTML = """<!doctype html>
         <div class="task-view-inner">
           <div class="panel upload-card">
             <h2 id="importTitle" class="view-title">任务管理</h2>
-            <label for="file">选择媒体文件（可多选）</label>
-            <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
-            <div id="rerunSource" class="meta" style="margin-top:8px"></div>
+            <div class="tab-bar">
+              <button class="tab-btn active" data-tab="upload">上传文件</button>
+              <button class="tab-btn" data-tab="url">链接下载</button>
+            </div>
+            <div id="uploadTab" class="tab-panel active">
+              <label for="file">选择媒体文件（可多选）</label>
+              <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
+              <div id="rerunSource" class="meta" style="margin-top:8px"></div>
+            </div>
+            <div id="urlTab" class="tab-panel">
+              <label for="urlInput">视频链接（YouTube/Bilibili 等）</label>
+              <div class="url-input-row">
+                <input id="urlInput" type="text" placeholder="https://..." />
+                <button id="pasteUrlBtn" class="small">粘贴</button>
+              </div>
+              <details class="cookies-settings">
+                <summary>Cookies 设置（会员/受限视频需要）</summary>
+                <div class="cookies-body">
+                  <div>
+                    <label for="cookiesBrowser">浏览器（读取登录态）</label>
+                    <select id="cookiesBrowser">
+                      <option value="firefox" selected>Firefox（推荐，SQLite 无加密）</option>
+                      <option value="chrome">Chrome</option>
+                      <option value="edge">Edge</option>
+                      <option value="brave">Brave</option>
+                      <option value="none">不使用</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="cookiesFile">Cookies.txt 文件（可选 fallback）</label>
+                    <input id="cookiesFile" type="file" accept=".txt" />
+                  </div>
+                  <button id="checkCookiesBtn" class="small ghost">检查 Cookies 可用性</button>
+                  <div id="cookiesResult" class="cookies-result"></div>
+                </div>
+              </details>
+            </div>
             <details class="advanced">
               <summary>
                 <span>
@@ -2194,7 +2365,7 @@ INDEX_HTML = """<!doctype html>
     </section>
   </main>
 <script>
-const RUNNING_STATES = new Set(['queued', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'rendering']);
+const RUNNING_STATES = new Set(['queued', 'downloading', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'rendering']);
 const EDIT_STATES = new Set(['waiting_review', 'rendering', 'done']);
 const TERMINAL_STATES = new Set(['waiting_review', 'done', 'failed', 'cancelled']);
 const fileInput = document.querySelector('#file');
@@ -2211,6 +2382,12 @@ speakerCountInput.min = '1';
 speakerCountInput.max = '2';
 speakerCountInput.placeholder = 'auto; 1-2 speakers';
 const diarizationBackendSelect = document.querySelector('#diarizationBackend');
+const urlInput = document.querySelector('#urlInput');
+const pasteUrlBtn = document.querySelector('#pasteUrlBtn');
+const cookiesBrowserSelect = document.querySelector('#cookiesBrowser');
+const cookiesFileInput = document.querySelector('#cookiesFile');
+const checkCookiesBtn = document.querySelector('#checkCookiesBtn');
+const cookiesResultEl = document.querySelector('#cookiesResult');
 const uploadBtn = document.querySelector('#upload');
 const newTaskBtn = document.querySelector('#newTask');
 const refreshJobsBtn = document.querySelector('#refreshJobs');
@@ -2265,6 +2442,13 @@ const renderProgressBarEl = document.querySelector('#renderProgressBar');
 const modelInfoEl = document.querySelector('#modelinfo');
 const tbody = document.querySelector('#segments');
 const tableWrap = document.querySelector('.table-column .table-wrap');
+// 用户手动滚动字幕表格后的一段时间内，禁止视频播放进度自动跟随滚动
+let tableUserScrollUntil = 0;
+const TABLE_USER_SCROLL_HOLD_MS = 3000;
+const markTableUserScroll = () => { tableUserScrollUntil = performance.now() + TABLE_USER_SCROLL_HOLD_MS; };
+tableWrap.addEventListener('wheel', markTableUserScroll, { passive: true });
+tableWrap.addEventListener('pointerdown', markTableUserScroll);
+tableWrap.addEventListener('touchstart', markTableUserScroll, { passive: true });
 const speakerMapEl = document.querySelector('#speakerMap');
 const videoStage = document.querySelector('#videoStage');
 const videoShell = document.querySelector('.video-shell');
@@ -2523,6 +2707,160 @@ function markEditorDirty() {
 
 decodingSelect.addEventListener('change', updateDecodingControls);
 
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const target = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === target));
+    document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === target + 'Tab'));
+    if (target === 'url' && rerunDraftJob) resetImportMode();
+    updateUploadBtnLabel();
+  });
+});
+
+pasteUrlBtn.addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    urlInput.value = text.trim();
+    urlInput.focus();
+  } catch (err) {
+    urlInput.focus();
+  }
+});
+
+urlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitUrlDownload();
+  }
+});
+
+uploadBtn.addEventListener('click', async () => {
+  if (document.querySelector('#urlTab.active') && urlInput.value.trim()) {
+    await submitUrlDownload();
+    return;
+  }
+  if (rerunDraftJob) {
+    await startRerunDraft();
+    return;
+  }
+  if (!pendingUploads.length) return;
+  uploadBtn.disabled = true;
+  importErrorEl.textContent = '';
+  const total = pendingUploads.length;
+  let created = 0;
+  for (const item of pendingUploads) {
+    uploadBtn.textContent = '上传中 ' + (created + 1) + '/' + total;
+    const form = new FormData();
+    form.append('file', item.file);
+    form.append('prompt', item.prompt);
+    if (item.maxNewTokens) form.append('max_new_tokens', item.maxNewTokens);
+    if (item.maxLen) form.append('max_len', item.maxLen);
+    form.append('decoding', item.decoding);
+    if (item.temperature) form.append('temperature', item.temperature);
+    if (item.speakerCount) form.append('speaker_count', item.speakerCount);
+    form.append('diarization_backend', item.diarizationBackend || 'auto');
+    try {
+      const res = await fetch(apiUrl('api/jobs'), { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        importErrorEl.textContent = (data && data.detail) || '上传失败';
+        break;
+      }
+      created += 1;
+    } catch (err) {
+      importErrorEl.textContent = '上传失败：' + (err && err.message ? err.message : String(err));
+      break;
+    }
+  }
+  pendingUploads = [];
+  renderPendingList();
+  uploadBtn.disabled = false;
+  updateUploadBtnLabel();
+  await refreshJobs({ keepSelection: true });
+});
+
+async function submitUrlDownload() {
+  const url = urlInput.value.trim();
+  if (!url) {
+    importErrorEl.textContent = '请输入视频链接';
+    return;
+  }
+  importErrorEl.textContent = '';
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = '提交中...';
+  const form = new FormData();
+  form.append('url', url);
+  form.append('cookies_browser', cookiesBrowserSelect.value);
+  if (promptInput.value) form.append('prompt', promptInput.value);
+  if (maxNewTokensInput.value) form.append('max_new_tokens', maxNewTokensInput.value);
+  if (maxLenInput.value) form.append('max_len', maxLenInput.value);
+  form.append('decoding', decodingSelect.value);
+  if (temperatureInput.value && decodingSelect.value === 'sample') form.append('temperature', temperatureInput.value);
+  if (speakerCountInput.value) form.append('speaker_count', speakerCountInput.value);
+  form.append('diarization_backend', diarizationBackendSelect.value || 'auto');
+  if (cookiesFileInput.files && cookiesFileInput.files[0]) {
+    form.append('cookies_file', cookiesFileInput.files[0]);
+  }
+  try {
+    const res = await fetch(apiUrl('api/jobs/url'), { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      importErrorEl.textContent = (data && data.detail) || '创建下载任务失败';
+      uploadBtn.disabled = false;
+      updateUploadBtnLabel();
+      return;
+    }
+    urlInput.value = '';
+    if (cookiesFileInput) cookiesFileInput.value = '';
+    await refreshJobs({ keepSelection: true });
+  } catch (err) {
+    importErrorEl.textContent = '请求失败：' + (err && err.message ? err.message : String(err));
+  }
+  uploadBtn.disabled = false;
+  updateUploadBtnLabel();
+}
+
+checkCookiesBtn.addEventListener('click', async () => {
+  cookiesResultEl.textContent = '检查中...';
+  cookiesResultEl.className = 'cookies-result';
+  const form = new FormData();
+  form.append('browser', cookiesBrowserSelect.value);
+  if (cookiesFileInput.files && cookiesFileInput.files[0]) {
+    form.append('file', cookiesFileInput.files[0]);
+  }
+  try {
+    const res = await fetch(apiUrl('api/cookies/check'), { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      cookiesResultEl.textContent = (data && data.detail) || '检查失败';
+      cookiesResultEl.className = 'cookies-result bad';
+      return;
+    }
+    const bc = data.browser_check || {};
+    const parts = [];
+    if (bc.valid) {
+      parts.push('浏览器: 可用');
+      if (bc.profile) parts.push('配置: ' + bc.profile);
+      if (bc.warning) parts.push(bc.warning);
+    } else {
+      parts.push('浏览器: ' + (bc.error || '不可用'));
+    }
+    if (data.file_check) {
+      const fc = data.file_check;
+      if (fc.valid) {
+        parts.push('Cookies.txt: 有效 (' + (fc.domain_count || 0) + ' 个域名)');
+      } else {
+        parts.push('Cookies.txt: ' + (fc.error || '无效'));
+      }
+    }
+    cookiesResultEl.textContent = parts.join(' | ');
+    cookiesResultEl.className = 'cookies-result ' + (bc.valid ? 'ok' : 'bad');
+  } catch (err) {
+    cookiesResultEl.textContent = '请求失败：' + (err && err.message ? err.message : String(err));
+    cookiesResultEl.className = 'cookies-result bad';
+  }
+});
+
 newTaskBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 openNewBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
@@ -2650,6 +2988,8 @@ function diarizationBackendLabel(value) {
 function updateUploadBtnLabel() {
   if (rerunDraftJob) {
     uploadBtn.textContent = '开始重跑';
+  } else if (document.querySelector('#urlTab.active')) {
+    uploadBtn.textContent = '下载并转写';
   } else if (pendingUploads.length) {
     uploadBtn.textContent = '开始转写 ' + pendingUploads.length + ' 个任务';
   } else {
@@ -3023,13 +3363,20 @@ function renderJobList() {
     const canDelete = true;
     const percent = Math.round((job.progress || 0) * 100);
     const warning = truncationWarning(job);
+    const sourceBadge = job.source === 'url'
+      ? '<span class="source-badge url">链接</span>'
+      : '<span class="source-badge">上传</span>';
+    const dlInfo = (job.status === 'downloading' && job.download_info)
+      ? `<div class="meta">下载: ${job.download_info.percent || 0}%${job.download_info.speed ? ' | ' + escapeHtml(job.download_info.speed) : ''}${job.download_info.eta ? ' | ETA ' + escapeHtml(job.download_info.eta) : ''}</div>`
+      : '';
     return `
       <div class="task-item${active}" data-job-id="${escapeHtml(job.id)}">
         <div class="task-row">
-          <div class="task-name">${escapeHtml(job.media_name || 'input.media')}</div>
+          <div class="task-name">${sourceBadge}${escapeHtml(job.media_name || 'input.media')}</div>
           <span class="${statusClass(job.status)}">${statusLabel(job.status)}</span>
         </div>
         <div class="task-id meta">${escapeHtml(job.id)}</div>
+        ${dlInfo}
         <div class="meta">${escapeHtml(tokenUsageSummary(job))}</div>
         ${warning ? `<div class="warning">${escapeHtml(warning)}</div>` : ''}
         <div class="task-foot">
@@ -3076,6 +3423,8 @@ function showImportView(options = {}) {
   closeClips();
   setEditorDirty(false);
   fileInput.value = '';
+  const uploadTabBtn = document.querySelector('.tab-btn[data-tab="upload"]');
+  if (uploadTabBtn) uploadTabBtn.click();
   if (!options.preserveError) importErrorEl.textContent = '';
   setVisible(importView);
   renderJobList();
@@ -3088,6 +3437,12 @@ function resetImportMode() {
   fileInput.disabled = false;
   pendingUploads = [];
   renderPendingList();
+  if (urlInput) urlInput.value = '';
+  if (cookiesFileInput) cookiesFileInput.value = '';
+  if (cookiesResultEl) {
+    cookiesResultEl.textContent = '';
+    cookiesResultEl.className = 'cookies-result';
+  }
   updateUploadBtnLabel();
 }
 
@@ -3106,9 +3461,23 @@ function showProcessingPlaceholder(name) {
 }
 
 function showProcessing(job) {
-  processTitleEl.textContent = job.status === 'failed' ? '任务失败' : '转写中';
+  if (job.status === 'downloading') {
+    processTitleEl.textContent = '下载中';
+  } else if (job.status === 'failed') {
+    processTitleEl.textContent = '任务失败';
+  } else {
+    processTitleEl.textContent = '转写中';
+  }
   processNameEl.textContent = job.media_name || 'input.media';
-  processMetaEl.textContent = jobSummary(job);
+  let meta = jobSummary(job);
+  if (job.status === 'downloading' && job.download_info) {
+    const dl = job.download_info;
+    const parts = ['下载 ' + (dl.percent || 0) + '%'];
+    if (dl.speed) parts.push(dl.speed);
+    if (dl.eta) parts.push('ETA ' + dl.eta);
+    meta = parts.join(' | ') + (meta ? ' | ' + meta : '');
+  }
+  processMetaEl.textContent = meta;
   const rawPercent = Math.round((job.progress || 0) * 100);
   const isIndeterminate = job.status === 'transcribing' && rawPercent <= 12;
   processBarEl.classList.toggle('indeterminate', isIndeterminate);
@@ -3435,13 +3804,33 @@ async function loadSegments(jobId, options = {}) {
   try {
     const res = await fetch(apiUrl(`api/jobs/${jobId}/segments`), { cache: 'no-store' });
     const data = await res.json();
+    const segments = data.segments || [];
+    // 轮询拉到的数据如果和当前缓存一致（条目数+各条起止/文本/speaker 没变），
+    // 就跳过 renderSegments 的整体重建，避免播放/编辑期间每 2 秒整表清空重建造成卡顿
+    if (options.preserveSelection && cachedSegments && segments.length === cachedSegments.length && segmentsEveryEqual(segments, cachedSegments)) {
+      setEditorDirty(false);
+      return true;
+    }
     const preferredIndex = options.preserveSelection && activeSegmentIndex >= 0 ? activeSegmentIndex : null;
-    renderSegments(data.segments || [], preferredIndex);
+    renderSegments(segments, preferredIndex);
     setEditorDirty(false);
     return true;
   } finally {
     subtitleSyncInFlight = false;
   }
+}
+
+function segmentsEveryEqual(incoming, cached) {
+  if (!incoming || !cached || incoming.length !== cached.length) return false;
+  for (let i = 0; i < incoming.length; i++) {
+    const a = incoming[i];
+    const b = cached[i];
+    if (!a || !b) return false;
+    if (Number(a.start) !== Number(b.start) || Number(a.end) !== Number(b.end)) return false;
+    if ((a.speaker || '') !== (b.speaker || '')) return false;
+    if (String(a.text || '') !== String(b.text || '')) return false;
+  }
+  return true;
 }
 
 function ensurePolling() {
@@ -4550,7 +4939,15 @@ function syncActiveSegment(force = false) {
   const previous = segments[previousIndex];
   const candidateIndex = previous && isSegmentVisibleAtTime(previous, time) ? previousIndex : findSegmentIndexAtTime(segments, time);
   const index = candidateIndex >= 0 ? candidateIndex : previousIndex;
-  setActiveSegment(index, true);
+  // 自动跟随滚动的条件：
+  //   1. 视频正在播放（暂停时不抢滚动条，让用户自由浏览字幕表）
+  //   2. 用户没有在手动滚动字幕表（3 秒内没有 wheel/pointerdown/touchstart）
+  //   3. force=true（用户主动 seek）时，也要求"非用户手动滚动"才滚
+  // 其余情况：只更新高亮和字幕预览，不滚动表格
+  const userScrolling = performance.now() < tableUserScrollUntil;
+  const playing = preview && !preview.paused && !preview.ended;
+  const shouldScroll = !userScrolling && (force || playing);
+  setActiveSegment(index, shouldScroll);
   updateTimelinePlayhead(segments);
   updateSubtitlePreview(segments);
 }
@@ -5372,6 +5769,7 @@ function statusClass(status) {
 function statusLabel(status) {
   const labels = {
     queued: '排队中',
+    downloading: '下载中',
     loading_model: '加载模型',
     transcribing: '转写中',
     postprocessing: '处理中',

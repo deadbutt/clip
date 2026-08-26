@@ -13,6 +13,8 @@ from moss_transcribe_diarize.subtitle import (
     export_ass,
     export_json,
     export_srt,
+    regroup_sentences,
+    regroup_sentences_from_words,
     subtitle_segments_from_transcript,
     write_text,
 )
@@ -122,7 +124,10 @@ def main() -> None:
             temperature=args.temperature,
         )
         raw_transcript_text = result.text
-        segments = subtitle_segments_from_transcript(result.text, postprocess=False)
+        if result.words:
+            segments = regroup_sentences_from_words(result.words)
+        else:
+            segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
         segments, speaker_info = label_speakers(
             input_path,
             segments,

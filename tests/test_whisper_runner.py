@@ -7,11 +7,19 @@ from unittest.mock import patch
 from moss_transcribe_diarize.app.whisper_runner import WhisperRunner, _RepeatedPhraseGuard
 
 
+class FakeWord:
+    def __init__(self, start, end, word):
+        self.start = start
+        self.end = end
+        self.word = word
+
+
 class FakeSegment:
-    def __init__(self, start, end, text):
+    def __init__(self, start, end, text, words=None):
         self.start = start
         self.end = end
         self.text = text
+        self.words = words
 
 
 class FakeInfo:
@@ -28,7 +36,15 @@ class FakeWhisperModel:
 
     def transcribe(self, path, **kwargs):
         FakeWhisperModel.last_kwargs = kwargs
-        return iter([FakeSegment(0.0, 1.25, " hello "), FakeSegment(1.5, 3.0, "world")]), FakeInfo()
+        return (
+            iter(
+                [
+                    FakeSegment(0.0, 1.25, " hello ", words=[FakeWord(0.0, 0.4, " hello"), FakeWord(0.4, 1.25, " world")]),
+                    FakeSegment(1.5, 3.0, "world"),
+                ]
+            ),
+            FakeInfo(),
+        )
 
 
 class FakeLoopWhisperModel(FakeWhisperModel):
@@ -67,9 +83,12 @@ class WhisperRunnerTest(unittest.TestCase):
         self.assertEqual(result.generated_tokens, 2)
         self.assertEqual(result.model, "small")
         self.assertEqual(status[-1], ("transcribing", 0.85, 2))
-        self.assertIs(FakeWhisperModel.last_kwargs["condition_on_previous_text"], False)
+        self.assertIs(FakeWhisperModel.last_kwargs["condition_on_previous_text"], True)
         self.assertEqual(FakeWhisperModel.last_kwargs["beam_size"], 5)
         self.assertEqual(FakeWhisperModel.last_kwargs["no_repeat_ngram_size"], 3)
+        self.assertIs(FakeWhisperModel.last_kwargs["word_timestamps"], True)
+        # 带 words 的 segment 收集词时间戳，不带的（FakeLoop 等）正常跳过
+        self.assertEqual(result.words, [(0.0, 0.4, " hello"), (0.4, 1.25, " world")])
 
     def test_repeated_phrase_guard_skips_looped_short_hallucinations(self):
         guard = _RepeatedPhraseGuard(max_consecutive=3, max_total=24)

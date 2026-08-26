@@ -27,6 +27,9 @@ class TranscriptionResult:
     temperature: float | None
     top_p: float | None = None
     top_k: int | None = None
+    # 词级时间戳 [(start, end, token), ...]，仅在转录内部使用、不序列化；
+    # 供词级断句重组取精确时间。引擎不支持时为 None，走 segment 级降级。
+    words: list[tuple[float, float, str]] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -55,9 +58,17 @@ class WhisperRunner:
         language: str | None = None,
         beam_size: int = 5,
         vad_filter: bool = True,
-        condition_on_previous_text: bool = False,
+        condition_on_previous_text: bool = True,
         repetition_penalty: float = 1.05,
         no_repeat_ngram_size: int = 3,
+        # VAD 调优参数：默认 None 用 faster-whisper 原生默认（min_silence 2000/pad 400/threshold 0.5）。
+        # 实测调小会经 condition_on_previous_text 连锁引入撇号缺失/个别错字（如 don't→don d），得不偿失，
+        # 故默认不开启；需要时按视频显式传参。
+        vad_min_silence_duration_ms: int | None = None,
+        vad_speech_pad_ms: int | None = None,
+        vad_threshold: float | None = None,
+        # 静音超过该阈值时跳过幻觉输出（whisper 在长静音易生成 "Thank you./Bye."），纯增益无副作用
+        hallucination_silence_threshold: float = 2.0,
     ):
         self.model_path = str(model_path)
         self.device_name = device
@@ -68,6 +79,10 @@ class WhisperRunner:
         self.condition_on_previous_text = condition_on_previous_text
         self.repetition_penalty = repetition_penalty
         self.no_repeat_ngram_size = no_repeat_ngram_size
+        self.vad_min_silence_duration_ms = vad_min_silence_duration_ms
+        self.vad_speech_pad_ms = vad_speech_pad_ms
+        self.vad_threshold = vad_threshold
+        self.hallucination_silence_threshold = hallucination_silence_threshold
         self._model = None
         self._engine = None
         self._openai_fp16 = False
@@ -91,6 +106,10 @@ class WhisperRunner:
             "condition_on_previous_text": self.condition_on_previous_text,
             "repetition_penalty": self.repetition_penalty,
             "no_repeat_ngram_size": self.no_repeat_ngram_size,
+            "vad_min_silence_duration_ms": self.vad_min_silence_duration_ms,
+            "vad_speech_pad_ms": self.vad_speech_pad_ms,
+            "vad_threshold": self.vad_threshold,
+            "hallucination_silence_threshold": self.hallucination_silence_threshold,
             "fallback_errors": list(self._fallback_errors),
         }
 
@@ -116,9 +135,11 @@ class WhisperRunner:
 
             started = time.time()
             if self._engine == "faster-whisper":
-                parts, segment_count = self._transcribe_faster_whisper(audio_path, prompt, status_callback)
-                if self.vad_filter and self._looks_sparse(parts, segment_count, audio_path):
-                    fallback_parts, fallback_segment_count = self._transcribe_faster_whisper(
+                parts, segment_count, words = self._transcribe_faster_whisper(audio_path, prompt, status_callback)
+                # 即使 vad_filter=False，no_speech_threshold 也可能把段落判为无声而提前结束，
+                # 所以这里不再以 vad_filter 为前提，只看 _looks_sparse 的判定结果（含覆盖率检查）
+                if self._looks_sparse(parts, segment_count, audio_path):
+                    fallback_parts, fallback_segment_count, fallback_words = self._transcribe_faster_whisper(
                         audio_path,
                         prompt,
                         status_callback,
@@ -127,8 +148,9 @@ class WhisperRunner:
                     if len("".join(fallback_parts).strip()) > len("".join(parts).strip()):
                         parts = fallback_parts
                         segment_count = fallback_segment_count
+                        words = fallback_words
             else:
-                parts, segment_count = self._transcribe_openai_whisper(audio_path, prompt, status_callback)
+                parts, segment_count, words = self._transcribe_openai_whisper(audio_path, prompt, status_callback)
 
             if status_callback is not None:
                 status_callback("transcribing", 0.85, segment_count)
@@ -141,6 +163,7 @@ class WhisperRunner:
                 audio=str(Path(audio_path).expanduser()),
                 decoding="beam_search",
                 temperature=None,
+                words=words,
             )
 
     def _ensure_loaded(self) -> None:
@@ -195,20 +218,39 @@ class WhisperRunner:
         status_callback: StatusCallback | None,
         *,
         vad_filter: bool | None = None,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int, list[tuple[float, float, str]]]:
         path = str(Path(audio_path).expanduser())
         kwargs = {
             "language": self.language,
             "beam_size": int(self.beam_size),
             "vad_filter": bool(self.vad_filter if vad_filter is None else vad_filter),
-            "initial_prompt": _whisper_initial_prompt(prompt),
+            "initial_prompt": _whisper_initial_prompt(prompt, self.language),
             "condition_on_previous_text": bool(self.condition_on_previous_text),
             "repetition_penalty": float(self.repetition_penalty),
             "no_repeat_ngram_size": int(self.no_repeat_ngram_size),
             "compression_ratio_threshold": 2.4,
             "log_prob_threshold": -1.0,
             "no_speech_threshold": 0.6,
+            "word_timestamps": True,
+            # 静音超过该阈值时跳过幻觉输出（whisper 在长静音易生成 "Thank you./Bye."），纯增益无副作用
+            "hallucination_silence_threshold": self.hallucination_silence_threshold,
         }
+        # VAD 调优：仅在显式传参时覆盖 faster-whisper 默认（默认 None 保持原生行为，
+        # 实测调小会经 condition_on_previous_text 连锁引入撇号缺失/个别错字）
+        _vad_params: dict[str, object] = {}
+        if self.vad_min_silence_duration_ms is not None:
+            _vad_params["min_silence_duration_ms"] = self.vad_min_silence_duration_ms
+        if self.vad_speech_pad_ms is not None:
+            _vad_params["speech_pad_ms"] = self.vad_speech_pad_ms
+        if self.vad_threshold is not None:
+            _vad_params["threshold"] = self.vad_threshold
+        if _vad_params:
+            kwargs["vad_parameters"] = _vad_params
+        # fallback 调用（vad_filter=False 被显式传入）时，放宽 no_speech_threshold，
+        # 避免再次因为"判无声"提前结束 segment 迭代
+        if vad_filter is False:
+            kwargs["no_speech_threshold"] = 0.9
+            kwargs["log_prob_threshold"] = -1.5
         try:
             segments_iter, info = self._model.transcribe(path, **kwargs)
         except TypeError as exc:
@@ -221,12 +263,14 @@ class WhisperRunner:
                 "compression_ratio_threshold",
                 "log_prob_threshold",
                 "no_speech_threshold",
+                "word_timestamps",
             ):
                 kwargs.pop(key, None)
             segments_iter, info = self._model.transcribe(path, **kwargs)
         duration = float(getattr(info, "duration", 0.0) or 0.0)
         repeat_guard = _RepeatedPhraseGuard()
         parts: list[str] = []
+        words: list[tuple[float, float, str]] = []
         segment_count = 0
         for segment in segments_iter:
             segment_count += 1
@@ -241,18 +285,43 @@ class WhisperRunner:
                     status_callback("transcribing", progress, segment_count)
                 continue
             parts.append(f"[{start:.2f}][S00]{text}[{end:.2f}]")
+            # 复读段落的词也一并跳过，只收集保留段落的词时间戳
+            for word in getattr(segment, "words", None) or []:
+                token = str(getattr(word, "word", "") or "")
+                if not token.strip():
+                    continue
+                words.append((max(0.0, float(word.start)), max(0.0, float(word.end)), token))
             if status_callback is not None:
                 progress = _duration_progress(end, duration)
                 status_callback("transcribing", progress, segment_count)
-        return parts, segment_count
+        return parts, segment_count, words
 
     def _looks_sparse(self, parts: list[str], segment_count: int, audio_path: str | Path) -> bool:
         text = "".join(parts).strip()
+        duration = _probe_duration(audio_path)
+        # 新增：基于"转录结束时间占音频总时长"判断是否被 VAD 提前截断
+        # 长音频场景下，即使前半段转录出大量内容，VAD 仍可能把后半段判为无声而跳过，
+        # 导致整段尾部丢失。只要覆盖时间不足 80%，就认为 sparse，触发无 VAD 重试。
+        if duration >= 12.0:
+            last_end = 0.0
+            for chunk in parts:
+                # parts 形如 "[start][S00]text[end]"，找最后一个 [end]
+                idx = chunk.rfind("]")
+                if idx <= 0:
+                    continue
+                head = chunk.rfind("[", 0, idx)
+                if head <= 0:
+                    continue
+                try:
+                    last_end = max(last_end, float(chunk[head + 1:idx]))
+                except ValueError:
+                    continue
+            if last_end > 0 and duration > 0 and (last_end / duration) < 0.8:
+                return True
         if len(text) >= 40:
             return False
         if segment_count > 2:
             return False
-        duration = _probe_duration(audio_path)
         return duration >= 12.0
 
     def _transcribe_openai_whisper(
@@ -260,23 +329,25 @@ class WhisperRunner:
         audio_path: str | Path,
         prompt: str,
         status_callback: StatusCallback | None,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int, list[tuple[float, float, str]]]:
         result = self._model.transcribe(
             str(Path(audio_path).expanduser()),
             language=self.language,
             fp16=bool(self._openai_fp16),
-            initial_prompt=_whisper_initial_prompt(prompt),
+            initial_prompt=_whisper_initial_prompt(prompt, self.language),
             verbose=False,
             condition_on_previous_text=bool(self.condition_on_previous_text),
             beam_size=int(self.beam_size),
             compression_ratio_threshold=2.4,
             logprob_threshold=-1.0,
             no_speech_threshold=0.6,
+            word_timestamps=True,
         )
         duration = float(result.get("duration") or 0.0)
         segments = result.get("segments") or []
         repeat_guard = _RepeatedPhraseGuard()
         parts: list[str] = []
+        words: list[tuple[float, float, str]] = []
         segment_count = 0
         for segment in segments:
             if not isinstance(segment, dict):
@@ -293,10 +364,21 @@ class WhisperRunner:
                     status_callback("transcribing", progress, segment_count)
                 continue
             parts.append(f"[{start:.2f}][S00]{text}[{end:.2f}]")
+            for word in segment.get("words") or []:
+                token = str(word.get("word") or "")
+                if not token.strip():
+                    continue
+                words.append(
+                    (
+                        max(0.0, float(word.get("start") or 0.0)),
+                        max(0.0, float(word.get("end") or 0.0)),
+                        token,
+                    )
+                )
             if status_callback is not None:
                 progress = _duration_progress(end, duration)
                 status_callback("transcribing", progress, segment_count)
-        return parts, segment_count
+        return parts, segment_count, words
 
 
 def _resolve_runtime(device: str, dtype: str) -> tuple[str, str]:
@@ -333,11 +415,30 @@ def _resolve_openai_runtime(device: str, dtype: str) -> tuple[str, bool]:
     return device, fp16
 
 
-def _whisper_initial_prompt(prompt: str) -> str | None:
-    prompt = (prompt or "").strip()
-    if not prompt or prompt == DEFAULT_PROMPT:
-        return None
-    return prompt
+def _whisper_initial_prompt(prompt: str, language: str | None) -> str | None:
+    custom = (prompt or "").strip()
+    if custom and custom != DEFAULT_PROMPT:
+        return custom
+    # 无标点的转录输出会让断句后处理失效（检测不到句末标点就合不成完整句），
+    # 用一段带标点的示例文本引导模型稳定输出标点和大小写。
+    # 实测（runs/regroup_compare）：英文音频句末标点覆盖率 12% -> 45%。
+    lang = (language or "").lower()
+    if lang.startswith("zh"):
+        return _PUNCT_PROMPT_ZH
+    if not lang or lang.startswith("en"):
+        return _PUNCT_PROMPT_EN
+    return None
+
+
+_PUNCT_PROMPT_EN = (
+    "Here is a properly punctuated transcript. She said: \"I made this decision last year. "
+    "It was hard, but it was right.\" We talked for a while, and then she left. I agree."
+)
+
+_PUNCT_PROMPT_ZH = (
+    "以下是带标点的转录文本。她说：“这是我去年做的决定，虽然很难，但是对的。”"
+    "我们聊了一会儿，然后她离开了。我觉得很有道理。"
+)
 
 
 class _RepeatedPhraseGuard:

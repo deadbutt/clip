@@ -20,11 +20,13 @@ echo.
 set WHISPER_DEVICE=cuda
 set WHISPER_DTYPE=float16
 set WHISPER_LANGUAGE=en
-set WHISPER_MODEL=medium
-if exist "models\faster-whisper-medium\config.json" set WHISPER_MODEL=models\faster-whisper-medium
-set WHISPER_BEAM_SIZE=3
+set WHISPER_MODEL=large-v3-turbo
+if exist "models\faster-whisper-large-v3-turbo\config.json" set WHISPER_MODEL=models\faster-whisper-large-v3-turbo
+set WHISPER_BEAM_SIZE=5
 set HF_HUB_ETAG_TIMEOUT=300
 set HF_HUB_DOWNLOAD_TIMEOUT=1800
+set HF_ENDPOINT=https://hf-mirror.com
+set HF_HUB_DISABLE_XET=1
 set TRANSLATOR_ARGS=--translator-provider openai
 if exist "models\opus-mt-en-zh-ct2-int8\model.bin" if exist "models\opus-mt-en-zh\source.spm" (
   echo Local OPUS-MT translator enabled.
