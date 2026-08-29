@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from moss_transcribe_diarize.app.model_runner import TranscriptionResult
+from moss_transcribe_diarize.app.whisper_runner import TranscriptionResult
 
 
 FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
@@ -64,26 +64,6 @@ class BlockingRunner:
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
 class AppApiTest(unittest.TestCase):
-    def test_runtime_reports_vllm_backend(self):
-        from fastapi.testclient import TestClient
-        from moss_transcribe_diarize.app.server import create_app
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(
-                model_path="unused-local-model",
-                runs_dir=tmpdir,
-                backend="vllm",
-                vllm_base_url="http://vllm.test:8000/v1",
-                vllm_model="moss-served",
-            )
-            client = TestClient(app)
-            runtime = client.get("/api/runtime")
-            self.assertEqual(runtime.status_code, 200)
-            model = runtime.json()["model"]
-            self.assertEqual(model["backend"], "vllm")
-            self.assertEqual(model["path"], "moss-served")
-            self.assertEqual(model["base_url"], "http://vllm.test:8000/v1")
-
     def test_job_lifecycle_and_missing_ffmpeg_render_error(self):
         from fastapi.testclient import TestClient
         from moss_transcribe_diarize.app.server import create_app

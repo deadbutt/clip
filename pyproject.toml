@@ -25,15 +25,12 @@ dependencies = [
 [project.scripts]
 mtd-subtitle = "moss_transcribe_diarize.app.cli:main"
 mtd-subtitle-web = "moss_transcribe_diarize.app.web_cli:main"
-mtd-serve = "moss_transcribe_diarize.app.serve:main"
 mtd-translate-opus-run = "moss_transcribe_diarize.app.opus_run_translator:main"
 
 [project.optional-dependencies]
 torch-runtime = [
   "torch>=2.8",
   "torchaudio>=2.8",
-  "transformers>=5.0.0,<6.0.0",
-  "safetensors>=0.6.2",
   "librosa>=0.11.0",
   "numba>=0.61.0",
   "soxr>=0.5",

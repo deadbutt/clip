@@ -149,6 +149,16 @@ class WhisperRunner:
                         parts = fallback_parts
                         segment_count = fallback_segment_count
                         words = fallback_words
+                # 定向缺口恢复：VAD 可能局部误杀语音（如短句被判无声而跳过），
+                # 在词时间轴上找出 >3s 的无词缺口，检测该区段音频能量，
+                # 若有语音特征则单独重转录（vad_filter=False）并补回词表。
+                recovered = self._recover_gaps(words, audio_path, prompt, status_callback)
+                if recovered:
+                    parts.extend(recovered[0])
+                    words.extend(recovered[1])
+                    segment_count += len(recovered[0])
+                    words.sort(key=lambda w: w[0])
+                    parts.sort(key=lambda p: float(p[1:p.find("]")]))
             else:
                 parts, segment_count, words = self._transcribe_openai_whisper(audio_path, prompt, status_callback)
 
@@ -323,6 +333,100 @@ class WhisperRunner:
         if segment_count > 2:
             return False
         return duration >= 12.0
+
+    def _recover_gaps(
+        self,
+        words: list[tuple[float, float, str]],
+        audio_path: str | Path,
+        prompt: str,
+        status_callback: StatusCallback | None,
+    ) -> tuple[list[str], list[tuple[float, float, str]]] | None:
+        """检测词时间轴上的无词缺口，对有语音能量的缺口单独重转录。
+
+        VAD 可能局部误杀短句（如 "Whoa!" 被判无声），整体覆盖率检查无法发现。
+        这里在词列表中找 >3s 的缺口，用 RMS + 自相关判断该区段是否有语音，
+        有则提取该片段用 vad_filter=False 重转录，把词和文本补回。
+        """
+        if len(words) < 2:
+            return None
+        gap_threshold = 3.0
+        gaps: list[tuple[float, float]] = []
+        for i in range(1, len(words)):
+            prev_end = words[i - 1][1]
+            cur_start = words[i][0]
+            gap = cur_start - prev_end
+            if gap >= gap_threshold:
+                gaps.append((prev_end, cur_start))
+        if not gaps:
+            return None
+        try:
+            import numpy as np
+            import soundfile as sf
+        except ImportError:
+            return None
+        try:
+            audio, sr = sf.read(str(Path(audio_path).expanduser()))
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+        except Exception:
+            # 视频容器（mp4/mkv/webm…）libsndfile 读不了，此时缺口恢复会整体静默失效；
+            # 改用 ffmpeg 解码成 16k 单声道 wav 再读。
+            decoded = _decode_audio_pcm(audio_path)
+            if decoded is None:
+                return None
+            audio, sr = decoded
+        overall_rms = float(np.sqrt(np.mean(audio ** 2)))
+        if overall_rms < 1e-6:
+            return None
+        recovered_parts: list[str] = []
+        recovered_words: list[tuple[float, float, str]] = []
+        for gap_start, gap_end in gaps:
+            s = int(gap_start * sr)
+            e = int(gap_end * sr)
+            if e - s < int(0.5 * sr):
+                continue
+            chunk = audio[s:e].astype(np.float32)
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if rms < overall_rms * 0.08:
+                continue
+            voiced = 0
+            n = 0
+            for j in range(0, len(chunk) - 640, 320):
+                fr = chunk[j:j + 640].astype(np.float64)
+                fr = fr - fr.mean()
+                if float(np.abs(fr).mean()) < 0.004:
+                    continue
+                n += 1
+                c = np.correlate(fr, fr, "full")[640:]
+                c /= (c[0] + 1e-9)
+                k = int(np.argmax(c[40:230])) + 40
+                if c[k] > 0.3:
+                    voiced += 1
+            if n == 0 or voiced / n < 0.2:
+                continue
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                sf.write(tmp_path, chunk, sr)
+                gap_parts, _, gap_words = self._transcribe_faster_whisper(
+                    tmp_path, prompt, status_callback, vad_filter=False,
+                )
+                if gap_words:
+                    offset = gap_start
+                    adjusted_words = [
+                        (w[0] + offset, w[1] + offset, w[2]) for w in gap_words
+                    ]
+                    recovered_words.extend(adjusted_words)
+                    recovered_parts.extend(gap_parts)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        if not recovered_words:
+            return None
+        return recovered_parts, recovered_words
 
     def _transcribe_openai_whisper(
         self,
@@ -504,6 +608,48 @@ def _duration_progress(position: float, duration: float) -> float:
         return 0.25
     ratio = max(0.0, min(1.0, position / duration))
     return 0.10 + (0.85 - 0.10) * ratio
+
+
+def _decode_audio_pcm(audio_path: str | Path) -> tuple["np.ndarray", int] | None:
+    """用 ffmpeg 把（视频容器的）媒体解成 16k 单声道波形，供缺口检测使用。
+
+    返回 (waveform, sample_rate)；ffmpeg 不可用或解码失败返回 None。
+    """
+    import subprocess
+    import tempfile
+
+    try:
+        import numpy as np
+        import soundfile as sf
+    except ImportError:
+        return None
+    try:
+        ffmpeg = detect_ffmpeg().ffmpeg
+    except Exception:
+        return None
+    if not ffmpeg:
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(Path(audio_path).expanduser()),
+             "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", tmp_path, "-y"],
+            capture_output=True, timeout=600,
+        )
+        if result.returncode != 0:
+            return None
+        audio, sr = sf.read(tmp_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        return np.asarray(audio), int(sr)
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _probe_duration(audio_path: str | Path) -> float:

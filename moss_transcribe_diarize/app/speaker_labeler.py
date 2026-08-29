@@ -11,6 +11,7 @@ from typing import Iterable
 import numpy as np
 
 from moss_transcribe_diarize.subtitle import SubtitleSegment
+from moss_transcribe_diarize.subtitle.postprocess import _ends_sentence
 
 from .ffmpeg import detect_ffmpeg
 
@@ -45,11 +46,17 @@ def label_speakers(
     enabled: bool = True,
     max_speakers: int = 4,
     target_speakers: int | None = None,
+    words: list[tuple[float, float, str]] | None = None,
     backend: str = "auto",
     hf_token: str | None = None,
     pyannote_model: str = "pyannote/speaker-diarization-3.1",
     device: str = "auto",
+    audio_path: str | Path | None = None,
 ) -> tuple[list[SubtitleSegment], SpeakerLabelingInfo]:
+    """audio_path: 预备好的 16k 音频（如 demucs 分离出的人声）。
+
+    提供时直接使用，跳过从媒体抽取；whisper 侧仍跑原始音频。
+    """
     prepared = [segment for segment in segments if segment.text and segment.end > segment.start]
     backend = (backend or "auto").lower()
     if backend in {"off", "none", "disabled"}:
@@ -73,6 +80,8 @@ def label_speakers(
                 hf_token=hf_token,
                 model_name=pyannote_model,
                 device=device,
+                words=words,
+                audio_path=audio_path,
             )
         except Exception as exc:
             if backend == "pyannote":
@@ -123,6 +132,33 @@ def _label_speakers_cluster(
         return prepared, SpeakerLabelingInfo(True, False, "audio_cluster", 1, len(prepared), str(exc))
 
 
+def _patch_get_plda_optional() -> None:
+    """让 pyannote 4.x 的 get_plda 容忍 None（仅本进程生效）。
+
+    4.x 的 SpeakerDiarization.__init__ 无条件调用 get_plda(plda, ...)，
+    而 get_plda 只接受 PLDA 实例/str/dict，None 直接 TypeError。但 3.1
+    管线（clustering: AgglomerativeClustering）运行时不使用 PLDA，
+    本地 vendor config 已注入 ``plda: null`` 显式跳过 community-1
+    的 PLDA 下载。此处让 None 透传返回 None。
+    注意 speaker_diarization.py 是按名字导入 get_plda 的，两处都要替换。
+    """
+    from pyannote.audio.pipelines.utils import getter
+    import pyannote.audio.pipelines.speaker_diarization as sd
+
+    if getattr(sd.get_plda, "_mtd_plda_optional", False):
+        return
+    original = getter.get_plda
+
+    def get_plda(plda, *args, **kwargs):  # noqa: ANN002, ANN003
+        if plda is None:
+            return None
+        return original(plda, *args, **kwargs)
+
+    get_plda._mtd_plda_optional = True
+    getter.get_plda = get_plda
+    sd.get_plda = get_plda
+
+
 def _label_speakers_pyannote(
     media_path: str | Path,
     prepared: list[SubtitleSegment],
@@ -133,36 +169,268 @@ def _label_speakers_pyannote(
     hf_token: str | None,
     model_name: str,
     device: str,
+    words: list[tuple[float, float, str]] | None = None,
+    audio_path: str | Path | None = None,
 ) -> tuple[list[SubtitleSegment], SpeakerLabelingInfo]:
     try:
-        from pyannote.audio import Pipeline
+        import speechbrain  # noqa: F401 先行导入以便打桩生效
+
+        _stub_speechbrain_k2()
+        _ensure_numpy_compat()
+        _patch_hub_use_auth_token()
+        _patch_torch_load_trusted()
+        from pyannote.audio import Pipeline  # noqa: F401  确认依赖可用
+
+        _patch_get_plda_optional()
     except ImportError as exc:
         raise RuntimeError("pyannote.audio is not installed. Install the diarization extra first.") from exc
 
-    audio_path = _extract_audio_file(media_path, work_dir=work_dir, stem="pyannote_16k")
+    if audio_path is not None:
+        # 调用方预备好的音频（如 demucs 人声），直接使用，不负责清理。
+        audio_file = Path(audio_path)
+        owned_audio = False
+    else:
+        audio_file = _extract_audio_file(media_path, work_dir=work_dir, stem="pyannote_16k")
+        owned_audio = True
     try:
         token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-        pipeline = Pipeline.from_pretrained(model_name, use_auth_token=token)
+        pipeline = _load_pipeline_with_offline_fallback(model_name, token)
         resolved_device = _resolve_torch_device(device)
         if resolved_device is not None:
             pipeline.to(resolved_device)
         options: dict[str, int] = {}
         if target_speakers and target_speakers > 0:
-            options["num_speakers"] = int(target_speakers)
+            # 不直接 num_speakers 强切（会把最相似的两个真人簇焊死），
+            # 先放宽上限自由聚类，跑完再按嵌入质心把多余簇合并到目标人数。
+            options["max_speakers"] = max(int(target_speakers) + 2, int(max_speakers or 0))
         elif max_speakers and max_speakers > 1:
-            options["max_speakers"] = int(max_speakers)
-        diarization = pipeline(str(audio_path), **options)
+            # 人声轨上两个真声的嵌入相似度会被拉高，天花板=2 恰好卡在聚类树
+            # 把两个真人焊成一簇的位置（实测 774s+53s vs 自由分裂 585s+189s+53s）。
+            # 放宽到 4 自由聚类，跑完把占比过小的杂簇（TTS/噪声）收编回主簇。
+            options["max_speakers"] = max(4, int(max_speakers))
+        # pyannote 4.x 直读文件依赖 torchcodec（Windows 上常缺 FFmpeg DLL 而不可用），
+        # 这里改用 torchaudio 解码后以官方支持的内存 dict 形态喂给管线。
+        import torchaudio
+
+        waveform, sample_rate = torchaudio.load(str(audio_file))
+        diarization = pipeline({"waveform": waveform, "sample_rate": int(sample_rate)}, **options)
         turns = _pyannote_turns(diarization)
+        if target_speakers and target_speakers > 0:
+            found = len({speaker for _, _, speaker in turns})
+            if found < int(target_speakers):
+                # 自由聚类分裂不足（音色太接近/素材太短）：强制按目标人数重切。
+                diarization = pipeline(
+                    {"waveform": waveform, "sample_rate": int(sample_rate)},
+                    num_speakers=int(target_speakers),
+                )
+                turns = _pyannote_turns(diarization)
+            else:
+                turns = _merge_turn_clusters(
+                    turns,
+                    getattr(diarization, "speaker_embeddings", None),
+                    int(target_speakers),
+                )
+        else:
+            # 自由聚类后的杂簇收编：时长占比过小（<10%）的簇不是真人对话方
+            # （弹幕 TTS、噪声残留），并回最相似簇，避免字幕多出"幽灵说话人"。
+            total = sum(t_end - t_start for t_start, t_end, _ in turns)
+            durations: dict[str, float] = {}
+            for t_start, t_end, speaker in turns:
+                durations[speaker] = durations.get(speaker, 0.0) + (t_end - t_start)
+            major = [spk for spk, d in durations.items() if d >= 0.10 * total]
+            if 1 <= len(major) < len(durations):
+                turns = _merge_turn_clusters(
+                    turns,
+                    getattr(diarization, "speaker_embeddings", None),
+                    len(major),
+                )
         if not turns:
             return prepared, SpeakerLabelingInfo(True, False, "pyannote", 1, len(prepared), "no speaker turns returned")
-        output = _assign_turns_to_segments(prepared, turns)
+        output = _assign_turns_to_segments(prepared, turns, words)
         speaker_count = len({segment.speaker for segment in output})
         return output, SpeakerLabelingInfo(True, True, "pyannote", speaker_count, len(output))
     finally:
+        if owned_audio:
+            try:
+                audio_file.unlink()
+            except OSError:
+                pass
+
+
+def _ensure_numpy_compat() -> None:
+    """pyannote.audio 3.1.x 在 numpy>=2 下引用已移除的 np.NaN，导入前补齐。"""
+    import numpy as np
+
+    if not hasattr(np, "NaN"):
+        np.NaN = np.nan
+
+
+def _stub_speechbrain_k2() -> None:
+    """中和 speechbrain 的懒加载代理（仅本进程生效）。
+
+    ``import speechbrain`` 会在 sys.modules 里留下多个 LazyModule 别名
+    （如 speechbrain.k2_integration -> speechbrain.integrations.k2_fsa）。
+    这些代理的目标模块（k2、spacy、flair 等）是未安装的可选依赖，
+    而其 ``__getattr__`` 在懒加载失败时抛 ImportError 而非 AttributeError。
+    之后 lightning 经 torch.library 注册 fake op 时会用 inspect.getmodule
+    扫描整个 sys.modules 并对每项取 ``__file__``，一旦命中这些代理就会
+    被拖崩，进而让 pyannote.audio 导入失败。
+
+    解法分两层：
+    1. 为 k2_fsa 预注册空壳（说话人分离不使用 k2）；
+    2. 给所有 LazyModule 别名实例直接补 ``__file__`` 等属性，让普通属性
+       查找命中实例字典、不再触发懒加载（代理的显式 ``import`` 不受影响）。
+    """
+    import sys
+    import types
+
+    target = "speechbrain.integrations.k2_fsa"
+    if target not in sys.modules:
         try:
-            audio_path.unlink()
-        except OSError:
+            import speechbrain  # noqa: F401  # 触发别名注册
+
+            import speechbrain.integrations as integrations  # noqa: F401
+        except Exception:
+            return
+        stub = types.ModuleType(target)
+        stub.__path__ = []  # type: ignore[attr-defined]
+        sys.modules[target] = stub
+        parent = sys.modules.get("speechbrain.integrations")
+        if parent is not None and "k2_fsa" not in getattr(parent, "__dict__", {}):
+            setattr(parent, "k2_fsa", stub)
+
+    try:
+        from speechbrain.utils.importutils import LazyModule
+    except Exception:
+        return
+    for mod in list(sys.modules.values()):
+        if isinstance(mod, LazyModule):
+            d = mod.__dict__
+            d.setdefault("__file__", None)
+            d.setdefault("__spec__", None)
+            d.setdefault("__path__", [])
+            d.setdefault("__loader__", None)
+
+
+def _patch_torch_load_trusted() -> None:
+    """pyannote 3.1.x 的旧式 checkpoint 无法在 torch>=2.6 的
+    weights_only=True 新默认下反序列化；本地模型文件来自官方仓库的
+    鉴权下载，属可信源，此处恢复允许完整 pickle 的加载行为。"""
+    import torch
+
+    if getattr(torch.load, "_mtd_trusted_patched", False):
+        return
+    original = torch.load
+
+    def load(*args, **kwargs):
+        # 调用方（如 lightning）常显式传 weights_only=None，torch 会按新默认 True 处理，
+        # 这里对"未指定/None"统一改为 False（可信源完整加载）。
+        if kwargs.get("weights_only") is None:
+            kwargs["weights_only"] = False
+        return original(*args, **kwargs)
+
+    load._mtd_trusted_patched = True
+    torch.load = load
+
+
+def _patch_hub_use_auth_token() -> None:
+    """pyannote 3.1.x 与新版 huggingface_hub 的兼容层（仅本进程生效）：
+
+    1. use_auth_token= -> token= 透明改写；
+    2. 若存在本地映射清单（tools/prefetch_pyannote_cache.py 产物），
+       命中的 repo/filename 直接返回本地文件路径，彻底跳过网络与缓存解析。
+    必须在任何 pyannote 模块被导入之前调用。
+    """
+
+    local_manifest: dict[str, dict[str, str]] = {}
+    if HUB_LOCAL_MANIFEST.is_file():
+        import json
+
+        try:
+            local_manifest = json.loads(HUB_LOCAL_MANIFEST.read_text(encoding="utf-8"))
+        except Exception as exc:  # 清单损坏不致命，仅退化到在线/缓存路径
+            print(f"[speaker_labeler] 本地模型清单读取失败，忽略: {exc}")
+
+    def _wrap(fn):
+        if getattr(fn, "_mtd_token_patched", False):
+            return fn
+
+        def wrapper(*args, **kwargs):
+            # 参数形态兼容：位置参数 (repo_id, filename) 或纯关键字。
+            repo_id = None
+            filename = kwargs.pop("filename", None)
+            if args:
+                repo_id = args[0]
+                rest = args[1:]
+                if rest and filename is None and isinstance(rest[0], str):
+                    filename = rest[0]
+                    rest = rest[1:]
+                if rest:
+                    return fn(repo_id, filename, *rest, **kwargs)
+            else:
+                repo_id = kwargs.get("repo_id")
+            files = local_manifest.get(str(repo_id), {})
+            if filename and str(filename) in files and Path(files[str(filename)]).is_file():
+                return files[str(filename)]
+            if "use_auth_token" in kwargs:
+                kwargs["token"] = kwargs.pop("use_auth_token")
+            return fn(repo_id, filename, *args[2:], **kwargs) if args else fn(**kwargs)
+
+        wrapper._mtd_token_patched = True
+        return wrapper
+
+    try:
+        import huggingface_hub as hub
+
+        new_hf_hub_download = _wrap(hub.hf_hub_download)
+        hub.hf_hub_download = new_hf_hub_download
+        if hasattr(hub, "file_download"):
+            hub.file_download.hf_hub_download = new_hf_hub_download
+    except ImportError:
+        pass
+
+
+# 预取脚本产物：自包含模型目录 + hf_hub_download 本地映射清单。
+LOCAL_DIARIZATION_DIR = Path(__file__).resolve().parents[2] / "models" / "pyannote-speaker-diarization-local"
+HUB_LOCAL_MANIFEST = Path(__file__).resolve().parents[2] / "models" / "pyannote-hub-local.json"
+
+
+def _load_pipeline(model_name: str, token: str | None):
+    """加载顺序：hf_hub_download 本地劫持(清单存在时) > HF 仓库(token 兼容新旧参数名)。"""
+    try:
+        from pyannote.audio import Pipeline
+    except ImportError as exc:
+        raise RuntimeError("pyannote.audio is not installed. Install the diarization extra first.") from exc
+
+    try:
+        return Pipeline.from_pretrained(model_name, token=token)
+    except TypeError:
+        return Pipeline.from_pretrained(model_name, use_auth_token=token)
+
+
+def _load_pipeline_with_offline_fallback(model_name: str, token: str | None):
+    """在线加载失败（网络受限或新版 hub 与镜像不兼容）时，切离线缓存重试一次。
+
+    模型已由 tools/prefetch_pyannote_cache.py 预取到本地 HF 缓存后，
+    离线模式即可完全脱离网络运行。
+    """
+    try:
+        return _load_pipeline(model_name, token)
+    except Exception as online_error:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        try:
+            from huggingface_hub import constants as hub_constants
+
+            hub_constants.HF_HUB_OFFLINE = True
+        except ImportError:
             pass
+        try:
+            return _load_pipeline(model_name, token)
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法加载说话人分离模型 {model_name}（已尝试离线缓存）。"
+                f"请先运行 tools/prefetch_pyannote_cache.py 预取模型。原始错误: {exc}"
+            ) from online_error
 
 
 def _extract_audio(media_path: str | Path, *, work_dir: str | Path) -> tuple[int, np.ndarray]:
@@ -371,8 +639,14 @@ def _resolve_torch_device(device: str):
 
 
 def _pyannote_turns(diarization) -> list[tuple[float, float, str]]:
+    # pyannote 4.x 返回 DiarizeOutput（含 speaker_diarization 等字段），
+    # 3.x 直接返回 Annotation。优先取 exclusive_speaker_diarization：
+    # 官方为转写下游设计的无重叠版本，正好匹配字幕逐行归属单说话人的用法。
+    annotation = getattr(diarization, "exclusive_speaker_diarization", None)
+    if annotation is None:
+        annotation = getattr(diarization, "speaker_diarization", diarization)
     turns: list[tuple[float, float, str]] = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
         start = float(getattr(turn, "start", 0.0))
         end = float(getattr(turn, "end", start))
         if end > start:
@@ -381,27 +655,193 @@ def _pyannote_turns(diarization) -> list[tuple[float, float, str]]:
     return turns
 
 
+def _merge_turn_clusters(
+    turns: list[tuple[float, float, str]],
+    embeddings,
+    target: int,
+) -> list[tuple[float, float, str]]:
+    """把自由聚类多出来的说话人簇合并到目标人数。
+
+    直接 ``num_speakers=N`` 强切会沿聚类树硬砍一刀：当两个真人簇最相似时
+    会被焊死成一簇，反而把孤立的第三声源（弹幕 TTS、片段混入的人声等）
+    留作"第二说话人"。实测同一素材强切 790s/40s，自由分裂+合并 652s/193s。
+
+    合并规则：反复取当前时长最小的簇——
+    - 若它与某簇质心余弦相似度 > 0.3（同一人被阈值分裂的情形），并入最相似簇；
+    - 否则视为孤立声源，并入最大簇，不污染次要说话人的簇。
+    """
+    labels = sorted({speaker for _, _, speaker in turns})
+    if target <= 0 or len(labels) <= target:
+        return turns
+    durations = {label: 0.0 for label in labels}
+    for _, end, speaker in turns:
+        durations[speaker] += end
+
+    def _row(label: str) -> int:
+        tail = label.rsplit("_", 1)[-1]
+        return int(tail) if tail.isdigit() else labels.index(label)
+
+    matrix = None
+    if embeddings is not None:
+        try:
+            import numpy as np
+
+            arr = np.asarray(embeddings, dtype=float)
+            if arr.ndim == 2 and len(arr) == len(labels):
+                norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                matrix = arr / np.maximum(norms, 1e-9)
+        except Exception:
+            matrix = None
+
+    mapping = {label: label for label in labels}
+    while True:
+        # 组时长 = 组内原始簇时长之和
+        group_dur = {g: sum(d for l, d in durations.items() if mapping[l] == g) for g in set(mapping.values())}
+        groups = sorted(set(mapping.values()), key=lambda g: -group_dur[g])
+        if len(groups) <= target:
+            break
+        smallest = groups[-1]
+        largest = groups[0]
+        dest = largest
+        if matrix is not None:
+            members = {g: [l for l in labels if mapping[l] == g] for g in groups}
+            best_sim = 0.3
+            for g in groups:
+                if g == smallest:
+                    continue
+                sims = [float(matrix[_row(m)] @ matrix[_row(s)]) for m in members[g] for s in members[smallest]]
+                if not sims:
+                    continue
+                sim = sum(sims) / len(sims)
+                if sim > best_sim:
+                    best_sim, dest = sim, g
+        for label in labels:
+            if mapping[label] == smallest:
+                mapping[label] = dest
+    return [(start, end, mapping[speaker]) for start, end, speaker in turns]
+
+
 def _assign_turns_to_segments(
     segments: list[SubtitleSegment],
     turns: list[tuple[float, float, str]],
+    words: list[tuple[float, float, str]] | None = None,
 ) -> list[SubtitleSegment]:
     speaker_names: dict[str, str] = {}
     output: list[SubtitleSegment] = []
     previous_source = ""
+    seg_counter = 0
+
+    def _map(speaker: str) -> str:
+        if speaker not in speaker_names:
+            speaker_names[speaker] = f"S{len(speaker_names) + 1:02d}"
+        return speaker_names[speaker]
+
+    def _emit(start: float, end: float, text: str, speaker_raw: str) -> None:
+        nonlocal seg_counter, previous_source
+        if not text.strip() or end - start < 0.15:
+            return
+        previous_source = speaker_raw
+        seg_counter += 1
+        output.append(SubtitleSegment(
+            id=f"seg_{seg_counter:04d}",
+            start=start,
+            end=end,
+            speaker=_map(speaker_raw),
+            text=text.strip(),
+        ))
+
     for segment in segments:
-        source_speaker = _best_turn_speaker(segment, turns) or previous_source or (turns[0][2] if turns else "SPEAKER_00")
-        previous_source = source_speaker
-        if source_speaker not in speaker_names:
-            speaker_names[source_speaker] = f"S{len(speaker_names) + 1:02d}"
-        output.append(
-            SubtitleSegment(
-                id=segment.id,
-                start=segment.start,
-                end=segment.end,
-                speaker=speaker_names[source_speaker],
-                text=segment.text,
-            )
-        )
+        overlaps: dict[str, float] = {}
+        for t_start, t_end, t_speaker in turns:
+            ov = max(0.0, min(segment.end, t_end) - max(segment.start, t_start))
+            if ov > 0:
+                overlaps[t_speaker] = overlaps.get(t_speaker, 0.0) + ov
+        if len(overlaps) <= 1 or words is None:
+            source = max(overlaps.items(), key=lambda x: x[1])[0] if overlaps else (previous_source or (turns[0][2] if turns else "SPEAKER_00"))
+            _emit(segment.start, segment.end, segment.text, source)
+            continue
+        # 段跨多个说话人：按词级时间戳归属说话人。
+        # 每个词归给“覆盖该词时间跨度最长”的 turn，相邻同说话人的词
+        # 合并成子段。比按 turn 边界硬切更稳：边界骑跨的词按真实重叠归属，
+        # 且 "No! Child!" 这类紧接换人的短插话能按词切开、不再整段归错人。
+        seg_words = [
+            w for w in words
+            if w[1] > segment.start and w[0] < segment.end and str(w[2]).strip()
+        ]
+        if not seg_words:
+            source = max(overlaps.items(), key=lambda x: x[1])[0]
+            _emit(segment.start, segment.end, segment.text, source)
+            continue
+        raw_parts: list[list] = []
+        for ws, we, wtext in seg_words:
+            best_speaker = ""
+            best_overlap = 0.0
+            for t_start, t_end, t_speaker in turns:
+                ov = max(0.0, min(we, t_end) - max(ws, t_start))
+                if ov > best_overlap:
+                    best_overlap = ov
+                    best_speaker = t_speaker
+            if not best_speaker:
+                # 词落在所有 turn 之外的缝隙：就近归属最近的 turn。
+                center = (ws + we) / 2.0
+                best_speaker = min(
+                    turns,
+                    key=lambda t: min(abs(center - t[0]), abs(center - t[1])),
+                )[2]
+            if raw_parts and raw_parts[-1][3] == best_speaker:
+                raw_parts[-1][1] = max(raw_parts[-1][1], we)
+                raw_parts[-1][2].append(wtext)
+            else:
+                raw_parts.append([ws, we, [wtext], best_speaker])
+        # 下刀闸门：换说话人的词序列只在语言学边界处切开——左侧句末标点、
+        # 打断破折号（"There was a-"）或真实停顿（≥0.3s）。否则并回前行
+        # （标签取时长占比大者），避免 pyannote 簇碎片化把 "Then act |
+        # more like a mother." 这类同一句话从词中间剁开。
+        gated: list[list] = []
+        for part in raw_parts:
+            if gated and gated[-1][3] != part[3]:
+                left_text = "".join(gated[-1][2]).strip()
+                real_pause = part[0] - gated[-1][1] >= 0.3
+                boundary = left_text.endswith("-") or _ends_sentence(left_text)
+                if not (boundary or real_pause):
+                    prev = gated[-1]
+                    speaker = prev[3] if (prev[1] - prev[0]) >= (part[1] - part[0]) else part[3]
+                    gated[-1] = [prev[0], part[1], prev[2] + part[2], speaker]
+                    continue
+            gated.append(part)
+        raw_parts = gated
+
+        sub_parts: list[list] = [
+            [s, e, "".join(toks).strip(), spk]
+            for s, e, toks, spk in raw_parts
+        ]
+        sub_parts = [part for part in sub_parts if part[2]]
+
+        # Merge sub-segments shorter than 1.0s into adjacent segments
+        MIN_DUR = 1.0
+        i = 0
+        while i < len(sub_parts):
+            s, e, text, source = sub_parts[i]
+            if (e - s) < MIN_DUR and len(sub_parts) > 1:
+                # 只与同说话人邻居合并；跨说话人吞并把短插话（"No! Child!"类）
+                # 计入对方名下，是快速对话区人物融合的主要来源，宁可保留短行。
+                if i < len(sub_parts) - 1:
+                    ns, ne, ntext, nsource = sub_parts[i + 1]
+                    if nsource == source:
+                        sub_parts[i + 1] = [s, ne, text + " " + ntext, source]
+                        sub_parts.pop(i)
+                        continue
+                elif i > 0:
+                    ps, pe, ptext, psource = sub_parts[i - 1]
+                    if psource == source:
+                        sub_parts[i - 1] = [ps, e, ptext + " " + text, source]
+                        sub_parts.pop(i)
+                        i -= 1
+                        continue
+            i += 1
+
+        for s, e, text, source in sub_parts:
+            _emit(s, e, text, source)
     return output
 
 

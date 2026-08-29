@@ -11,12 +11,8 @@ from .server import create_app
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local DieShang Workbench web app.")
-    parser.add_argument("--backend", choices=["whisper", "hf", "vllm"], default="whisper")
+    parser.add_argument("--backend", choices=["whisper"], default="whisper")
     parser.add_argument("--model", default=str(DEFAULT_MODEL))
-    parser.add_argument("--vllm-base-url", default=None, help="OpenAI-compatible vLLM base URL, e.g. http://127.0.0.1:8000/v1.")
-    parser.add_argument("--vllm-model", default=None, help="vLLM served model name. Defaults to --model.")
-    parser.add_argument("--vllm-api-key", default="EMPTY")
-    parser.add_argument("--vllm-timeout", type=float, default=600.0)
     parser.add_argument("--translator-base-url", default=None, help="OpenAI-compatible chat API for subtitle translation.")
     parser.add_argument("--translator-model", default=None, help="Translation model name or local OPUS-MT CTranslate2 directory.")
     parser.add_argument("--translator-api-key", default=None)
@@ -65,11 +61,6 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
         decoding=args.decoding,
         temperature=args.temperature,
-        backend=args.backend,
-        vllm_base_url=args.vllm_base_url,
-        vllm_model=args.vllm_model,
-        vllm_api_key=args.vllm_api_key,
-        vllm_timeout=args.vllm_timeout,
         translator_base_url=args.translator_base_url,
         translator_model=args.translator_model,
         translator_api_key=args.translator_api_key,

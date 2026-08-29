@@ -25,12 +25,16 @@ class FFmpegAvailability:
 
 
 def detect_ffmpeg() -> FFmpegAvailability:
+    portable = _detect_portable_ffmpeg()
+    if portable.available:
+        return portable
+
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
     if ffmpeg and ffprobe:
         return FFmpegAvailability(ffmpeg=ffmpeg, ffprobe=ffprobe)
 
-    return _detect_portable_ffmpeg()
+    return FFmpegAvailability(ffmpeg=None, ffprobe=None)
 
 
 def _detect_portable_ffmpeg() -> FFmpegAvailability:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import shutil
 import threading
 import time
@@ -14,6 +15,7 @@ from moss_transcribe_diarize.subtitle import (
     SubtitleSegment,
     SubtitleStyle,
     coerce_subtitle_segments,
+    drop_repeated_hallucinations,
     export_ass,
     export_json,
     export_srt,
@@ -28,6 +30,7 @@ from moss_transcribe_diarize.subtitle import (
 from .clips import generate_clip_candidates, rebase_segments_for_clip
 from .ffmpeg import burn_ass_subtitles, burn_ass_subtitles_clip, detect_ffmpeg, probe_media_duration, probe_video_size
 from .speaker_labeler import label_speakers
+from . import vocal_separator
 from .text_translator import apply_translations, collect_pretranslation_skips, validate_translation_outputs
 
 
@@ -373,7 +376,7 @@ class JobManager:
         cookies_config: dict[str, Any] = {"browser": cookies_browser, "file": cookies_file}
         job = JobRecord(
             id=job_id,
-            status="downloading",
+            status="queued",
             progress=0.0,
             media_name=url[:80],
             input_path=str(job_dir / "input.media"),
@@ -784,6 +787,21 @@ class JobManager:
             self._apply_auto_max_new_tokens(job)
             self._raise_if_cancelled(job.id)
 
+            # 人声分离与 whisper 并行：demucs(~2GB) + whisper(~3GB) 显存
+            # 可同卡共存，转录期间顺手把 BGM 剥掉，总耗时几乎不变。
+            # pyannote 改吃人声轨（BGM 会把说话人嵌入拉偏导致人物融合），
+            # whisper 仍跑原始音频（分离伪影会重伤 ASR 召回率）。
+            vocals_path = None
+            vocals_future = None
+            diarization_enabled = self._resolve_diarization_backend(job.diarization_backend) not in {"none", "off", "disabled"}
+            if diarization_enabled and job.speaker_count != 0 and vocal_separator.vocal_separation_available():
+                from concurrent.futures import ThreadPoolExecutor
+
+                vocals_executor = ThreadPoolExecutor(max_workers=1)
+                vocals_future = vocals_executor.submit(
+                    vocal_separator.separate_vocals, job.input_path, job.job_dir
+                )
+
             result = self.model_runner.transcribe(
                 job.input_path,
                 prompt=job.inference_prompt,
@@ -803,7 +821,28 @@ class JobManager:
                 segments = regroup_sentences_from_words(result.words)
             else:
                 segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
+            # 重复幻觉过滤：音乐段里同一句"不存在的话"反复出现的模式。
+            segments = drop_repeated_hallucinations(segments)
             self._raise_if_cancelled(job.id)
+
+            if vocals_future is not None:
+                try:
+                    vocals_path = vocals_future.result()
+                except Exception:
+                    vocals_path = None
+                finally:
+                    vocals_executor.shutdown(wait=False)
+                # 背景音门控：纯对白音轨（无 BGM）不值得喂分离人声，
+                # 丢弃结果直接用原始音频。
+                if vocals_path is not None and not vocal_separator.has_background_audio(
+                    result.words, job.input_path, job.job_dir
+                ):
+                    try:
+                        Path(vocals_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    vocals_path = None
+
             self._set_status(job, "labeling_speakers", 0.88, error=None)
             segments, speaker_info = label_speakers(
                 job.input_path,
@@ -815,7 +854,14 @@ class JobManager:
                 hf_token=self.hf_token,
                 pyannote_model=self.pyannote_model,
                 device=self.diarization_device,
+                words=result.words,
+                audio_path=vocals_path,
             )
+            if vocals_path is not None:
+                try:
+                    Path(vocals_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
             job.speaker_labeling = speaker_info.to_dict()
             self._write_subtitle_files(job, segments)
             job.prompt_len = result.prompt_len
@@ -851,17 +897,27 @@ class JobManager:
         def cancel_check() -> bool:
             return job.id in self._cancelled_jobs or job.id not in self._jobs
 
-        downloaded = download_with_yt_dlp(
+        def on_title(raw_title: str) -> None:
+            job.media_name = _sanitize_display_name(raw_title)
+            self._save_job(job)
+
+        result = download_with_yt_dlp(
             job.source_url,
             job.job_dir,
             cookies_browser=cookies_browser,
             cookies_file=cookies_file,
             progress_callback=on_progress,
             cancel_check=cancel_check,
+            title_callback=on_title,
         )
         self._raise_if_cancelled(job.id)
+        downloaded = result.path
+        if result.title:
+            job.media_name = _sanitize_display_name(result.title)
+        else:
+            # 标题比下载先到时 on_title 已写入，这里只在没拿到标题时回退文件名。
+            job.media_name = downloaded.name
         job.input_path = str(downloaded)
-        job.media_name = downloaded.name
         job.download_info = {"completed": True, "filename": downloaded.name}
         self._save_job(job)
 
@@ -1017,7 +1073,7 @@ class JobManager:
         value = int(value)
         if value <= 0:
             return None
-        return max(1, min(value, 2))
+        return max(1, min(value, 10))
 
     def _resolve_diarization_backend(self, diarization_backend: str | None) -> str:
         value = (diarization_backend or self.diarization_backend or "auto").lower()
@@ -1053,6 +1109,16 @@ class JobManager:
     def _raise_if_cancelled(self, job_id: str) -> None:
         if job_id in self._cancelled_jobs or job_id not in self._jobs:
             raise JobCancelled(job_id)
+
+
+_DISPLAY_NAME_ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_display_name(name: str) -> str:
+    """URL 任务的展示名：剔除文件系统非法字符并截断，仅用于界面显示，不影响磁盘文件名。"""
+    cleaned = _DISPLAY_NAME_ILLEGAL_RE.sub(" ", str(name))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().strip(".")
+    return cleaned[:80]
 
 
 def _safe_clip_name(name: str) -> str:

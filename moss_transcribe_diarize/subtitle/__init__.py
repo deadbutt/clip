@@ -2,6 +2,7 @@ from .export import export_ass, export_json, export_srt, parse_ass, parse_srt, w
 from .models import SubtitleSegment, SubtitleStyle
 from .postprocess import (
     coerce_subtitle_segments,
+    drop_repeated_hallucinations,
     normalize_segments,
     regroup_sentences,
     regroup_sentences_from_words,
@@ -18,6 +19,7 @@ __all__ = [
     "parse_ass",
     "parse_srt",
     "coerce_subtitle_segments",
+    "drop_repeated_hallucinations",
     "normalize_segments",
     "regroup_sentences",
     "regroup_sentences_from_words",

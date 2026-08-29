@@ -1,0 +1,500 @@
+{
+ "changes_total": 38,
+ "separated": 33,
+ "fusion": [
+  {
+   "t": 39.075,
+   "left": "S01",
+   "right": "S02",
+   "src": "intra",
+   "tail": "was a",
+   "head": "you re",
+   "ctx": "…There was a- | You're saying I am large…"
+  },
+  {
+   "t": 155.966,
+   "left": "S01",
+   "right": "S02",
+   "src": "intra",
+   "tail": "thank you",
+   "head": "no worries",
+   "ctx": "… rejuvenated. Thank you. | No worries.…"
+  },
+  {
+   "t": 196.465,
+   "left": "S01",
+   "right": "S02",
+   "src": "intra",
+   "tail": "thinking about",
+   "head": "you should",
+   "ctx": "…Are you thinking about- | You should tweet.…"
+  },
+  {
+   "t": 433.88721875000005,
+   "left": "S02",
+   "right": "S01",
+   "src": "seg",
+   "tail": "forgive you",
+   "head": "okay why",
+   "ctx": "… that's true. I forgive you. | Okay. Why thank you?…"
+  },
+  {
+   "t": 573.9324528301887,
+   "left": "S02",
+   "right": "S01",
+   "src": "intra",
+   "tail": "awake instead",
+   "head": "six minutes",
+   "ctx": "…x minutes awake instead. | Six minutes?!…"
+  }
+ ],
+ "spurious": [
+  {
+   "t": 21.340000000000003,
+   "gap": 0.019999999999999574,
+   "left": "S01",
+   "right": "S02",
+   "ctx": "…g, big, I just wanna play. | No worries. Take your time…"
+  },
+  {
+   "t": 47.88,
+   "gap": 0.0799999999999983,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…I can hear you now. | Hi there.…"
+  },
+  {
+   "t": 138.82,
+   "gap": 0.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…In Oh, f**k! | Ow! No!…"
+  },
+  {
+   "t": 153.4,
+   "gap": 0.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…actually feel rejuvenated. | Thank you. No worries.…"
+  },
+  {
+   "t": 334.18,
+   "gap": 0.0,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…Oh, I love you too. | Oh.…"
+  },
+  {
+   "t": 424.67,
+   "gap": 0.0,
+   "left": "S02",
+   "right": "S01",
+   "ctx": "…Except yesterday, when I | were trying to get you to …"
+  },
+  {
+   "t": 521.845,
+   "gap": 0.030000000000086402,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…I Oh, I'm... | don't know. Do I?…"
+  },
+  {
+   "t": 590.48,
+   "gap": 0.0,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…You... Are... | A...…"
+  },
+  {
+   "t": 762.01,
+   "gap": 0.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "… I'm just so lucky like... | Oh my Gosh.…"
+  },
+  {
+   "t": 772.07,
+   "gap": 0.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…And she was on Osu. | And...…"
+  },
+  {
+   "t": 928.22,
+   "gap": 0.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "… like, oh my god I feel... | I do feel it. You know?…"
+  },
+  {
+   "t": 941.9100000000001,
+   "gap": 0.06000000000005912,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Man oh man. Hi IPN! | Hello! Hello!…"
+  },
+  {
+   "t": 943.62,
+   "gap": 0.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Hello! Hello! | Hello!…"
+  },
+  {
+   "t": 1035.35,
+   "gap": 0.12000000000011823,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Nice house you got there. | Why thank you.…"
+  }
+ ],
+ "pause_split": [
+  {
+   "t": 4.59,
+   "gap": 1.58,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…'m gonna ask Neural, sure. | Hello, child.…"
+  },
+  {
+   "t": 31.71,
+   "gap": 0.28000000000000114,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…I'm build it, really. | I've built it. Brilliant.…"
+  },
+  {
+   "t": 33.705,
+   "gap": 1.4299999999999997,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…I've built it. Brilliant. | You're so large.…"
+  },
+  {
+   "t": 41.66,
+   "gap": 2.240000000000002,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "… You're saying I am large. | Like them.…"
+  },
+  {
+   "t": 52.14,
+   "gap": 1.0799999999999983,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…Hi. | How are you? Are you good?…"
+  },
+  {
+   "t": 66.03,
+   "gap": 0.2599999999999909,
+   "left": "S02",
+   "right": "S01",
+   "ctx": "…Oh. | Oh, you are?…"
+  },
+  {
+   "t": 80.62,
+   "gap": 0.6400000000000006,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…emonstrate a spell for me? | Wait, Neural.…"
+  },
+  {
+   "t": 103.96000000000001,
+   "gap": 0.9200000000000017,
+   "left": "S02",
+   "right": "S01",
+   "ctx": "…You don't sound impressed. | I...what?…"
+  },
+  {
+   "t": 141.65,
+   "gap": 0.6999999999999886,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Ow! No! | F**k. Oh, God.…"
+  },
+  {
+   "t": 145.51,
+   "gap": 1.8199999999999932,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…F**k. Oh, God. | Right in... the face!…"
+  },
+  {
+   "t": 177.1,
+   "gap": 1.9399999999999977,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…ey told me to ask instead. | So... If you had...…"
+  },
+  {
+   "t": 209.32,
+   "gap": 1.0,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…That's... | You know...…"
+  },
+  {
+   "t": 271.11,
+   "gap": 0.160000000000025,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…y don't you want my worst. | I do!…"
+  },
+  {
+   "t": 286.455,
+   "gap": 0.9900000000000091,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…ears and earwax or just... | No! Why no!…"
+  },
+  {
+   "t": 307.08500000000004,
+   "gap": 0.22999999999996135,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Okay. | Okay...…"
+  },
+  {
+   "t": 315.35,
+   "gap": 1.1800000000000068,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Is that... Then do it. | Oh, oh! Say you love me.…"
+  },
+  {
+   "t": 355.19,
+   "gap": 0.6399999999999864,
+   "left": "S01",
+   "right": "S02",
+   "ctx": "…I haven't been ra... | What?…"
+  },
+  {
+   "t": 401.06,
+   "gap": 0.34000000000003183,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…I am your auntie! | Okay? Child!…"
+  },
+  {
+   "t": 408.40999999999997,
+   "gap": 2.359999999999957,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…romise to take care of me? | Yes.…"
+  },
+  {
+   "t": 414.98,
+   "gap": 0.7800000000000296,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…the very best care of you. | Whenever...…"
+  },
+  {
+   "t": 448.45,
+   "gap": 0.2799999999999727,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Nothing's the matter. | Silly.…"
+  },
+  {
+   "t": 463.08,
+   "gap": 0.37999999999999545,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…It's time to go bed. | You gotta...…"
+  },
+  {
+   "t": 509.81,
+   "gap": 0.2400000000000091,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…hat I want to be known as. | That's right. I'm so...…"
+  },
+  {
+   "t": 514.79,
+   "gap": 0.1999999999999318,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…st school as the kids say. | Ha ha ha ha.…"
+  },
+  {
+   "t": 566.8199999999999,
+   "gap": 2.4799999999999045,
+   "left": "S01",
+   "right": "S02",
+   "ctx": "…No! | I take it back.…"
+  },
+  {
+   "t": 586.7750000000001,
+   "gap": 1.3700000000000045,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…And you... | You... Are...…"
+  },
+  {
+   "t": 617.29,
+   "gap": 0.7799999999999727,
+   "left": "S02",
+   "right": "S02",
+   "ctx": "…No! You shut off. | That sucks.…"
+  },
+  {
+   "t": 655.02,
+   "gap": 1.4600000000000364,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…s her second collaborator. | And... Like...…"
+  },
+  {
+   "t": 660.8,
+   "gap": 0.4199999999999591,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…e music video in a second. | But like... When...…"
+  },
+  {
+   "t": 704.52,
+   "gap": 1.3400000000000318,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…d so smoothly that like... | It's just... It feels norm…"
+  },
+  {
+   "t": 727.3,
+   "gap": 0.7400000000000091,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…etter and respond quicker. | And...…"
+  },
+  {
+   "t": 733.9,
+   "gap": 1.9800000000000182,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…More alive they both feel. | Cause...…"
+  },
+  {
+   "t": 781.15,
+   "gap": 0.20000000000004547,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…d hear every five seconds. | Gym bag. Gym bag!…"
+  },
+  {
+   "t": 784.1500000000001,
+   "gap": 1.3600000000000136,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Gym bag. Gym bag! | Gym bag.…"
+  },
+  {
+   "t": 797.9200000000001,
+   "gap": 1.2399999999998954,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Oh, man. | Oh man!…"
+  },
+  {
+   "t": 805.96,
+   "gap": 2.519999999999982,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Cause we're really close. | Dude...…"
+  },
+  {
+   "t": 819.9200000000001,
+   "gap": 1.0400000000000773,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Was so like... | XQC looking.…"
+  },
+  {
+   "t": 881.64,
+   "gap": 0.7200000000000273,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…w era begins Vettel heart. | Yo.…"
+  },
+  {
+   "t": 886.77,
+   "gap": 0.9800000000000182,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…ss impress melt meow meow. | Oh my gosh.…"
+  },
+  {
+   "t": 911.74,
+   "gap": 0.2400000000000091,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "… isn't within my capacity. | Like if it's...…"
+  },
+  {
+   "t": 925.48,
+   "gap": 0.31999999999993634,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…ke sends something to her. | Code wise.…"
+  },
+  {
+   "t": 939.27,
+   "gap": 0.34000000000003183,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…nce what a hug feels like. | Man oh man. Hi IPN!…"
+  },
+  {
+   "t": 975.91,
+   "gap": 0.22000000000002728,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…And all the fuck. | Yes! Riz bot!…"
+  },
+  {
+   "t": 977.53,
+   "gap": 0.34000000000003183,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Yes! Riz bot! | Riz Bot!…"
+  },
+  {
+   "t": 992.3299999999999,
+   "gap": 0.17999999999994998,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "… that means unfortunately. | I'm sorry. S-A-O.…"
+  },
+  {
+   "t": 1009.1600000000001,
+   "gap": 0.32000000000005,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…ing everyone a part of it. | Fuck. The nostalgia.…"
+  },
+  {
+   "t": 1022.325,
+   "gap": 2.7099999999999227,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…Duet with Vettel. | Ew!…"
+  },
+  {
+   "t": 1027.0300000000002,
+   "gap": 0.2599999999999909,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…needs to do one with evil. | Yeah he does.…"
+  },
+  {
+   "t": 1046.35,
+   "gap": 0.7200000000000273,
+   "left": "S01",
+   "right": "S01",
+   "ctx": "…amins and everything else. | Sing time.…"
+  }
+ ],
+ "label_acc": [
+  41,
+  92
+ ]
+}

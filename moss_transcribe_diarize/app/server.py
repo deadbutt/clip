@@ -36,11 +36,6 @@ def create_app(
     max_new_tokens: int = 8192,
     decoding: str = "greedy",
     temperature: float | None = None,
-    backend: str = "whisper",
-    vllm_base_url: str | None = None,
-    vllm_model: str | None = None,
-    vllm_api_key: str | None = None,
-    vllm_timeout: float = 600.0,
     translator_base_url: str | None = None,
     translator_model: str | None = None,
     translator_api_key: str | None = None,
@@ -63,23 +58,7 @@ def create_app(
         raise RuntimeError("Install fastapi, uvicorn, and python-multipart to run the local web app.") from exc
 
     app = FastAPI(title="蝶殇工作台")
-    if backend == "vllm":
-        if not vllm_base_url:
-            raise ValueError("--vllm-base-url is required when backend='vllm'.")
-        from .vllm_runner import VllmRunner
-
-        runner = VllmRunner(
-            base_url=vllm_base_url,
-            model=vllm_model or str(model_path),
-            api_key=vllm_api_key,
-            timeout=vllm_timeout,
-        )
-    elif backend == "hf":
-        from .model_runner import ModelRunner
-
-        runner = ModelRunner(model_path, device=device, dtype=dtype)
-    else:
-        runner = WhisperRunner(model_path, device=device, dtype=dtype, language=language, beam_size=whisper_beam_size)
+    runner = WhisperRunner(model_path, device=device, dtype=dtype, language=language, beam_size=whisper_beam_size)
     manager = JobManager(
         runs_dir,
         runner,
@@ -96,7 +75,7 @@ def create_app(
     )
     app.state.manager = manager
     translator = None
-    translator_url = translator_base_url or (vllm_base_url if backend != "vllm" else None)
+    translator_url = translator_base_url
     if translator_provider == "opus-mt":
         from .local_mt_translator import LocalMtTranslator
 
@@ -490,37 +469,9 @@ def create_app(
     return app
 
 
-def _read_processor_config(model_path: str | Path) -> dict[str, Any]:
-    path = Path(model_path).expanduser() / "processor_config.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    keys = [
-        "audio_tokens_per_second",
-        "audio_merge_size",
-        "time_marker_every_seconds",
-        "enable_time_marker",
-    ]
-    return {key: data[key] for key in keys if key in data}
-
-
 def _runner_runtime_info(runner) -> dict[str, Any]:
-    if hasattr(runner, "runtime_info"):
-        info = dict(runner.runtime_info())
-    else:
-        info = {
-            "backend": "hf",
-            "path": runner.model_path,
-            "device": runner.device_name,
-            "dtype": runner.dtype_name,
-        }
-    if info.get("backend") == "hf":
-        info["processor"] = _read_processor_config(info.get("path") or "")
-    else:
-        info.setdefault("processor", {})
+    info = dict(runner.runtime_info())
+    info.setdefault("processor", {})
     return info
 
 
@@ -543,12 +494,12 @@ INDEX_HTML = """<!doctype html>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <style>
     :root {
-      --bg: #f7f5f0;
+      --bg: #f2f1ed;
       --panel: #ffffff;
-      --line: #d8d3c7;
+      --line: #d9d8d2;
       --text: #1d1f22;
       --muted: #6d6a63;
-      --teal: #007d77;
+      --teal: #008f83;
       --coral: #c94b35;
       --green: #2f7d4f;
       --sidebar-width: 300px;
@@ -564,15 +515,15 @@ INDEX_HTML = """<!doctype html>
       letter-spacing: 0;
     }
     header {
-      height: 56px;
+      height: 62px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 20px;
-      border-bottom: 1px solid var(--line);
-      background: #fffdfa;
+      padding: 0 28px;
+      border-bottom: 1px solid #d8d8d2;
+      background: #f8f8f5;
     }
-    h1 { font-size: 18px; margin: 0; font-weight: 720; }
+    h1 { font-size: 17px; margin: 0; font-weight: 760; letter-spacing: .02em; }
     main {
       height: calc(100vh - 56px);
       display: grid;
@@ -587,6 +538,7 @@ INDEX_HTML = """<!doctype html>
       border: 1px solid var(--line);
       background: white;
       color: var(--text);
+      box-sizing: border-box;
     }
     input[type="file"], input[type="number"], input[type="text"], select {
       width: 100%;
@@ -824,16 +776,17 @@ INDEX_HTML = """<!doctype html>
     }
     .task-item {
       width: 100%;
-      border: 1px solid transparent;
+      border: 1px solid #e2e0d8;
       border-radius: 6px;
-      padding: 9px;
-      background: transparent;
+      padding: 13px 12px 12px;
+      background: rgba(255,255,255,.72);
       cursor: pointer;
       text-align: left;
-      margin-bottom: 6px;
+      margin-bottom: 8px;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
     }
-    .task-item:hover { background: #fffdfa; border-color: var(--line); }
-    .task-item.active { background: white; border-color: #9cc5aa; }
+    .task-item:hover { background: #fff; border-color: #a9cfc8; transform: translateY(-1px); box-shadow: 0 8px 18px rgba(36, 61, 58, .08); }
+    .task-item.active { background: #f8fffd; border-color: #7dbdb3; box-shadow: inset 3px 0 0 var(--teal), 0 8px 18px rgba(36, 61, 58, .08); }
     .task-row {
       display: flex;
       align-items: center;
@@ -855,6 +808,10 @@ INDEX_HTML = """<!doctype html>
       gap: 8px;
       margin-top: 8px;
     }
+    .task-output-row { display: flex; align-items: center; gap: 7px; margin-top: 10px; padding-top: 9px; border-top: 1px solid #eceae3; }
+    .task-output-label { color: #8a8a82; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .task-output-row a { color: var(--teal); font-size: 11px; font-weight: 700; text-decoration: none; }
+    .task-output-row a:hover { text-decoration: underline; }
     .task-progress {
       flex: 1 1 auto;
       min-width: 54px;
@@ -887,12 +844,27 @@ INDEX_HTML = """<!doctype html>
       font-size: 22px;
       font-weight: 760;
     }
-    textarea.prompt-input {
+    textarea.prompt-input, input.prompt-input {
       width: 100%;
-      min-height: 112px;
-      resize: vertical;
-      padding: 8px;
+      padding: 6px 8px;
+      font-size: 13px;
+      box-sizing: border-box;
     }
+    input.prompt-input { min-height: 34px; }
+    textarea.prompt-input {
+      min-height: 40px;
+      resize: none !important;
+      line-height: 1.4;
+      overflow-y: hidden;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+    input[type="number"] { -moz-appearance: textfield; }
     details.advanced {
       width: 100%;
       margin: 10px 0;
@@ -941,18 +913,31 @@ INDEX_HTML = """<!doctype html>
       padding: 0 10px 10px;
       border-top: 1px solid var(--line);
     }
+    .task-params {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .params-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .process-panel .progress { margin: 16px 0 8px; }
+    .process-bar-top { display: flex; align-items: center; margin-bottom: 10px; }
     .task-view {
       height: 100%;
       overflow: auto;
-      padding: 20px 28px 28px;
+      padding: 28px 34px 34px;
+      background: radial-gradient(circle at 12% 8%, rgba(0, 143, 131, .06), transparent 28%), var(--bg);
     }
     .task-view-inner {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 16px;
-      max-width: 1280px;
+      grid-template-columns: minmax(440px, 1.08fr) minmax(400px, .92fr);
+      gap: 20px;
+      max-width: 1380px;
       margin: 0 auto;
       align-items: start;
     }
@@ -962,7 +947,80 @@ INDEX_HTML = """<!doctype html>
       background: var(--panel);
       padding: 16px;
     }
-    .upload-card { display: flex; flex-direction: column; gap: 10px; }
+    .upload-card {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid #273239;
+      background: #12191d;
+      color: #eef5f2;
+      box-shadow: 0 18px 42px rgba(24, 33, 36, .14);
+    }
+    .signal-hero {
+      position: relative;
+      min-height: 284px;
+      padding: 26px 28px 22px;
+      overflow: hidden;
+      background: linear-gradient(135deg, rgba(18, 25, 29, .98), rgba(12, 22, 24, .96));
+    }
+    .signal-hero::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: .46;
+      background: repeating-linear-gradient(0deg, transparent 0 35px, rgba(141, 232, 213, .08) 36px, transparent 37px 72px);
+      mask-image: linear-gradient(90deg, transparent, #000 34%, #000 100%);
+    }
+    .signal-hero-top,
+    .signal-hero-footer { position: relative; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .signal-eyebrow { color: #78d7c9; font-size: 10px; letter-spacing: .12em; font-weight: 800; }
+    .signal-engine { color: #93a49f; font-size: 10px; letter-spacing: .08em; }
+    .signal-hero h2 { position: relative; z-index: 2; max-width: 440px; margin: 28px 0 8px; color: #f5faf8; font-size: clamp(27px, 3vw, 40px); line-height: 1.1; letter-spacing: -.03em; }
+    .signal-copy { position: relative; z-index: 2; max-width: 400px; margin: 0; color: #aabbb6; font-size: 13px; line-height: 1.6; }
+    .signal-visual { position: absolute; z-index: 1; right: -8%; bottom: 32px; width: 64%; height: 126px; opacity: .9; transform: skewX(-8deg); }
+    .signal-wave { position: absolute; left: 0; right: 0; top: 18px; height: 48px; background: repeating-linear-gradient(90deg, transparent 0 6px, rgba(141, 232, 213, .82) 6px 8px, transparent 8px 12px, rgba(25, 182, 165, .4) 12px 13px, transparent 13px 18px); clip-path: polygon(0 48%, 4% 35%, 7% 56%, 10% 18%, 13% 65%, 17% 42%, 20% 74%, 24% 28%, 27% 53%, 30% 14%, 33% 74%, 36% 40%, 40% 62%, 44% 20%, 48% 75%, 52% 36%, 55% 58%, 59% 16%, 63% 68%, 67% 45%, 70% 78%, 74% 24%, 78% 61%, 82% 34%, 86% 68%, 90% 18%, 94% 55%, 100% 40%, 100% 60%, 94% 70%, 90% 44%, 86% 82%, 82% 52%, 78% 74%, 74% 35%, 70% 92%, 67% 60%, 63% 82%, 59% 34%, 55% 70%, 52% 50%, 48% 91%, 44% 35%, 40% 74%, 36% 58%, 33% 92%, 30% 38%, 27% 70%, 24% 44%, 20% 86%, 17% 58%, 13% 84%, 10% 38%, 7% 72%, 4% 47%, 0 62%); filter: drop-shadow(0 0 10px rgba(25, 182, 165, .35)); }
+    .signal-tracks { position: absolute; left: 0; right: 0; bottom: 0; display: grid; gap: 12px; }
+    .signal-track { position: relative; height: 15px; border-top: 1px solid rgba(141, 232, 213, .2); }
+    .signal-track::before { content: ""; position: absolute; left: 5%; top: 5px; width: 11px; height: 11px; border: 2px solid #77d9ca; border-radius: 50%; background: #172a2d; box-shadow: 0 0 0 4px rgba(25, 182, 165, .12); }
+    .signal-track::after { content: ""; position: absolute; left: 14%; right: 3%; top: 3px; height: 8px; border-radius: 2px; background: linear-gradient(90deg, rgba(25, 182, 165, .52), rgba(141, 232, 213, .18)); }
+    .signal-track:nth-child(2)::after { left: 31%; right: 17%; background: linear-gradient(90deg, rgba(255, 106, 87, .74), rgba(141, 232, 213, .16)); }
+    .signal-track:nth-child(3)::after { left: 52%; right: 7%; }
+    .signal-playhead { position: absolute; z-index: 2; top: -12px; bottom: -4px; left: 58%; width: 1px; background: #ff6a57; box-shadow: 0 0 12px rgba(255, 106, 87, .65); }
+    .signal-playhead::before { content: ""; position: absolute; top: 0; left: -4px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid #ff6a57; }
+    .signal-hero-footer { position: absolute; left: 28px; right: 28px; bottom: 18px; color: #879a94; font-size: 11px; }
+    .signal-status { display: inline-flex; align-items: center; gap: 7px; }
+    .signal-status i { width: 7px; height: 7px; border-radius: 50%; background: #27c4ae; box-shadow: 0 0 0 4px rgba(39, 196, 174, .12); }
+    .upload-card > :not(.signal-hero) { margin-left: 28px; margin-right: 28px; }
+    .upload-card > .tab-bar { margin-top: 12px; }
+    .upload-card > .advanced { margin-top: 2px; }
+    .upload-card > #upload { margin-bottom: 26px; }
+    .upload-card label { color: #aebdb8; }
+    .upload-card .muted, .upload-card .meta { color: #8fa19b; }
+    .upload-card .tab-bar { border-bottom-color: #334148; }
+    .upload-card .tab-btn { color: #8fa19b; }
+    .upload-card .tab-btn.active { color: #8de8d5; background: #1b282d; border-color: #334148; }
+    .upload-card input,
+    .upload-card select,
+    .upload-card textarea { border-color: #334148; background: #19252a; color: #eef5f2; }
+    .upload-card details.advanced { border-color: #334148; background: #182126; }
+    .upload-card details.advanced summary { color: #e8f3ef; }
+    .upload-card details.advanced summary::after { border-color: #49615e; background: #1b282d; color: #8de8d5; }
+    .upload-card .advanced-body { border-top-color: #334148; }
+    .upload-card .task-params { border-color: #334148; background: #182126; }
+    .upload-card .pending-item { border-color: #334148; background: #182126; }
+    .upload-card .pending-item-name { color: #e8f3ef; }
+    .upload-card .pending-item-summary { color: #82958f; }
+    .upload-card .cookies-settings { border-color: #334148; background: #182126; }
+    .upload-card .cookies-settings summary { color: #d5e5e0; }
+    .file-drop-zone { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 132px; padding: 20px; border: 1px dashed #4a7771; border-radius: 8px; background: rgba(25, 182, 165, .06); cursor: pointer; text-align: center; transition: border-color 140ms ease, background 140ms ease, transform 140ms ease; }
+    .file-drop-zone:hover { border-color: #8de8d5; background: rgba(25, 182, 165, .12); transform: translateY(-1px); }
+    .file-drop-zone input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+    .file-drop-icon { display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 8px; border: 1px solid #5eb9ad; border-radius: 50%; color: #8de8d5; font-size: 22px; line-height: 1; }
+    .file-drop-title { color: #f2f8f5; font-size: 14px; font-weight: 700; }
+    .file-drop-meta { margin-top: 6px; color: #82958f; font-size: 11px; letter-spacing: .04em; }
     .tab-bar {
       display: flex;
       gap: 0;
@@ -1015,15 +1073,18 @@ INDEX_HTML = """<!doctype html>
       margin-right: 6px;
     }
     .source-badge.url { background: #d4e8e6; color: var(--teal); }
-    .jobs-card { display: flex; flex-direction: column; min-height: 0; }
+    .jobs-card { display: flex; flex-direction: column; min-height: 0; background: rgba(255,255,255,.82); box-shadow: 0 14px 34px rgba(40, 43, 38, .06); }
     .jobs-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
       margin-bottom: 10px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
     }
-    .jobs-head strong { font-size: 15px; }
+    .jobs-head strong { font-size: 18px; }
+    .jobs-head strong::before { content: "QUEUE / "; color: var(--teal); font-size: 10px; letter-spacing: .12em; vertical-align: 2px; margin-right: 7px; }
     .jobs-tools { display: inline-flex; align-items: center; gap: 8px; }
     .jobs-card .task-list {
       overflow: visible;
@@ -1724,15 +1785,24 @@ INDEX_HTML = """<!doctype html>
     .downloads a {
       display: inline-flex;
       align-items: center;
-      min-height: 32px;
-      padding: 6px 10px;
-      margin: 0 6px 6px 0;
-      border-radius: 6px;
+      justify-content: space-between;
+      min-height: 42px;
+      padding: 8px 10px;
+      margin: 0;
+      border-radius: 7px;
       color: var(--teal);
-      background: white;
+      background: #f8fbfa;
       border: 1px solid var(--line);
       text-decoration: none;
+      font-weight: 700;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
     }
+    .downloads a::after { content: "↓"; color: #7aa49d; font-size: 15px; }
+    .downloads a:hover { border-color: #86bcb5; background: #eef7f5; transform: translateY(-1px); }
+    .downloads { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .output-intro { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+    .output-intro strong { font-size: 14px; }
+    .output-intro span { color: var(--muted); font-size: 11px; }
     .export-status {
       margin-top: 8px;
       color: var(--muted);
@@ -1973,7 +2043,16 @@ INDEX_HTML = """<!doctype html>
       .clip-grid { grid-template-columns: 1fr; }
       .editor-grid { grid-template-columns: 1fr; }
       .table-column { border: 0; }
-      .task-view-inner { grid-template-columns: 1fr; }
+      .task-view { padding: 18px 14px 24px; }
+      .task-view-inner { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); }
+      .task-view-inner > * { min-width: 0; }
+      .upload-card > :not(.signal-hero) { margin-left: 20px; margin-right: 20px; }
+      .signal-hero { min-height: 258px; padding: 22px 20px 18px; }
+      .signal-hero h2 { margin-top: 24px; font-size: 28px; }
+      .signal-copy { max-width: 290px; }
+      .signal-visual { right: -28%; width: 86%; opacity: .68; }
+      .signal-hero-footer { left: 20px; right: 20px; }
+      .jobs-card .task-list { padding: 4px 0; }
     }
   </style>
 </head>
@@ -1987,15 +2066,60 @@ INDEX_HTML = """<!doctype html>
       <section id="importView" class="view task-view">
         <div class="task-view-inner">
           <div class="panel upload-card">
-            <h2 id="importTitle" class="view-title">任务管理</h2>
+            <div class="signal-hero">
+              <div class="signal-hero-top">
+                <span class="signal-eyebrow">SIGNAL DESK / 01</span>
+                <span class="signal-engine">LOCAL WHISPER ENGINE</span>
+              </div>
+              <h2 id="importTitle">把声音，落到时间线上。</h2>
+              <p class="signal-copy">从文件或链接开始，完成转写、说话人识别与字幕交付。</p>
+              <div class="signal-visual" aria-hidden="true">
+                <div class="signal-wave"></div>
+                <div class="signal-tracks">
+                  <span class="signal-track"></span>
+                  <span class="signal-track"></span>
+                  <span class="signal-track"></span>
+                </div>
+                <span class="signal-playhead"></span>
+              </div>
+              <div class="signal-hero-footer">
+                <span class="signal-status"><i></i> FFmpeg ready</span>
+                <span>transcribe / diarize / deliver</span>
+              </div>
+            </div>
             <div class="tab-bar">
               <button class="tab-btn active" data-tab="upload">上传文件</button>
               <button class="tab-btn" data-tab="url">链接下载</button>
             </div>
             <div id="uploadTab" class="tab-panel active">
-              <label for="file">选择媒体文件（可多选）</label>
-              <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
+              <label class="file-drop-zone" for="file">
+                <span class="file-drop-icon">+</span>
+                <span class="file-drop-title">拖入音频或视频，或点击选择</span>
+                <span class="file-drop-meta">MP4 · MOV · MKV · WAV · MP3 · M4A / 支持多选</span>
+                <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
+              </label>
               <div id="rerunSource" class="meta" style="margin-top:8px"></div>
+              <div id="rerunParams" class="task-params" style="display:none">
+                <div>
+                  <label>推理 Prompt</label>
+                  <textarea id="rerunPrompt" class="prompt-input" rows="2" placeholder="留空用默认"></textarea>
+                </div>
+                <div class="params-row">
+                  <div>
+                    <label>说话人数</label>
+                    <input id="rerunSpeakerCount" type="number" min="0" max="10" step="1" placeholder="自动" />
+                  </div>
+                  <div>
+                    <label>后端</label>
+                    <select id="rerunDiarization">
+                      <option value="none" selected>不分说话人</option>
+                      <option value="auto">auto（推荐）</option>
+                      <option value="pyannote">pyannote</option>
+                      <option value="cluster">cluster</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
             </div>
             <div id="urlTab" class="tab-panel">
               <label for="urlInput">视频链接（YouTube/Bilibili 等）</label>
@@ -2024,55 +2148,28 @@ INDEX_HTML = """<!doctype html>
                   <div id="cookiesResult" class="cookies-result"></div>
                 </div>
               </details>
-            </div>
-            <details class="advanced">
-              <summary>
-                <span>
-                  <span class="advanced-title">默认推理参数</span>
-                  <span class="advanced-hint">新文件继承此参数，可在下方逐个修改</span>
-                </span>
-              </summary>
-              <div class="advanced-body">
-                <label for="prompt" style="margin-top:10px">推理 Prompt</label>
-                <textarea id="prompt" class="prompt-input"></textarea>
-                <div class="row" style="margin-top:10px">
-                  <div>
-                    <label for="maxNewTokens">输出 tokens</label>
-                    <input id="maxNewTokens" type="number" min="1" step="1" value="8192" title="留默认或留空时，服务端会按音频时长自动抬高以避免截断" />
-                  </div>
-                  <div>
-                    <label for="maxLen">上下文上限</label>
-                    <input id="maxLen" type="number" min="1" step="1" value="131072" />
-                  </div>
+              <div class="task-params">
+                <div>
+                  <label>推理 Prompt</label>
+                  <textarea id="prompt" class="prompt-input" rows="2" placeholder="留空用默认"></textarea>
                 </div>
-                <div class="row" style="margin-top:10px">
+                <div class="params-row">
                   <div>
-                    <label for="decoding">解码</label>
-                    <select id="decoding"><option value="greedy">greedy</option><option value="sample">sample</option></select>
+                    <label>说话人数</label>
+                    <input id="speakerCount" type="number" min="0" max="10" step="1" placeholder="自动" />
                   </div>
                   <div>
-                    <label for="temperature">温度</label>
-                    <input id="temperature" type="number" min="0.01" step="0.05" value="1.0" />
-                  </div>
-                </div>
-                <div class="row" style="margin-top:10px">
-                  <div>
-                    <label for="speakerCount">目标说话人数</label>
-                    <input id="speakerCount" type="number" min="0" max="12" step="1" placeholder="自动；已知 4 人就填 4" />
-                  </div>
-                  <div>
-                    <label for="diarizationBackend">说话人识别后端</label>
+                    <label>说话人分离</label>
                     <select id="diarizationBackend">
-                      <option value="none" selected>none：不标说话人</option>
-                      <option value="auto">auto：优先 pyannote，失败回退</option>
-                      <option value="pyannote">pyannote：更强，需要 HF token</option>
-                      <option value="cluster">cluster：轻量本地聚类</option>
+                      <option value="none" selected>不分说话人</option>
+                      <option value="auto">auto（推荐）</option>
+                      <option value="pyannote">pyannote</option>
+                      <option value="cluster">cluster</option>
                     </select>
                   </div>
                 </div>
-                <div id="modelinfo" class="meta" style="margin-top:8px"></div>
               </div>
-            </details>
+            </div>
             <div id="pendingList" class="pending-list"></div>
             <button id="upload" class="primary">全部开始转写</button>
             <div id="importError" class="error" style="margin-top:10px"></div>
@@ -2092,13 +2189,16 @@ INDEX_HTML = """<!doctype html>
       </section>
       <section id="processingView" class="view center-view is-hidden">
         <div class="process-panel">
+          <div class="process-bar-top">
+            <button id="backFromProcessing" class="ghost" type="button">← 任务</button>
+          </div>
           <h2 id="processTitle" class="view-title">转写中</h2>
           <div id="processName"></div>
           <div id="processMeta" class="meta" style="margin-top:8px"></div>
           <div class="progress"><div id="processBar" class="bar"></div></div>
           <div id="processError" class="error"></div>
           <div class="actions" style="margin-top:14px">
-            <button id="deleteCurrent">删除任务</button>
+            <button id="deleteCurrent">取消并删除</button>
             <button id="openNew">新建任务</button>
           </div>
         </div>
@@ -2351,6 +2451,7 @@ INDEX_HTML = """<!doctype html>
               </div>
               <div class="group">
                 <label>输出</label>
+                <div class="output-intro"><strong>交付包</strong><span>字幕、原文与烧录视频</span></div>
                 <div class="downloads" id="downloads"></div>
                 <button id="exportFolder" class="ghost" type="button" style="margin-top:8px">选择文件夹保存</button>
                 <div id="exportStatus" class="export-status"></div>
@@ -2372,16 +2473,13 @@ const fileInput = document.querySelector('#file');
 const importTitleEl = document.querySelector('#importTitle');
 const rerunSourceEl = document.querySelector('#rerunSource');
 const promptInput = document.querySelector('#prompt');
-const advancedDetails = document.querySelector('.advanced');
-const maxNewTokensInput = document.querySelector('#maxNewTokens');
-const maxLenInput = document.querySelector('#maxLen');
-const decodingSelect = document.querySelector('#decoding');
-const temperatureInput = document.querySelector('#temperature');
 const speakerCountInput = document.querySelector('#speakerCount');
-speakerCountInput.min = '1';
-speakerCountInput.max = '2';
-speakerCountInput.placeholder = 'auto; 1-2 speakers';
 const diarizationBackendSelect = document.querySelector('#diarizationBackend');
+const rerunParamsEl = document.querySelector('#rerunParams');
+const rerunPromptInput = document.querySelector('#rerunPrompt');
+const rerunSpeakerCountInput = document.querySelector('#rerunSpeakerCount');
+const rerunDiarizationSelect = document.querySelector('#rerunDiarization');
+let storedDefaults = { prompt: '', speakerCount: '', backend: 'none' };
 const urlInput = document.querySelector('#urlInput');
 const pasteUrlBtn = document.querySelector('#pasteUrlBtn');
 const cookiesBrowserSelect = document.querySelector('#cookiesBrowser');
@@ -2393,6 +2491,7 @@ const newTaskBtn = document.querySelector('#newTask');
 const refreshJobsBtn = document.querySelector('#refreshJobs');
 const deleteCurrentBtn = document.querySelector('#deleteCurrent');
 const openNewBtn = document.querySelector('#openNew');
+const backFromProcessingBtn = document.querySelector('#backFromProcessing');
 const backToTasksBtn = document.querySelector('#backToTasks');
 const openSettingsBtn = document.querySelector('#openSettings');
 const closeSettingsBtn = document.querySelector('#closeSettings');
@@ -2597,21 +2696,21 @@ async function refreshRuntime() {
 }
 
 function applyInferenceDefaults(defaults) {
-  if (!promptInput.value && defaults.prompt) promptInput.value = defaults.prompt;
-  if (defaults.max_new_tokens) maxNewTokensInput.value = defaults.max_new_tokens;
-  if (defaults.max_length) maxLenInput.value = defaults.max_length;
-  if (defaults.decoding) decodingSelect.value = defaults.decoding;
-  if (defaults.temperature) temperatureInput.value = defaults.temperature;
-  updateDecodingControls();
+ if (defaults.prompt) {
+   storedDefaults.prompt = defaults.prompt;
+   if (!promptInput.value) promptInput.value = defaults.prompt;
+ }
 }
 
 function applySpeakerDefaults(defaults) {
-  if (!speakerCountInput.value && defaults.default_speaker_count) {
-    speakerCountInput.value = defaults.default_speaker_count;
-  }
-  if (defaults.default_backend) {
-    diarizationBackendSelect.value = defaults.default_backend;
-  }
+ if (defaults.default_speaker_count) {
+   storedDefaults.speakerCount = String(defaults.default_speaker_count);
+   if (!speakerCountInput.value) speakerCountInput.value = defaults.default_speaker_count;
+ }
+ if (defaults.default_backend) {
+   storedDefaults.backend = defaults.default_backend;
+   diarizationBackendSelect.value = defaults.default_backend;
+ }
 }
 
 function applyTranslatorDefaults(defaults) {
@@ -2621,10 +2720,10 @@ function applyTranslatorDefaults(defaults) {
 }
 
 function normalizedSpeakerCount(value) {
-  if (value === '' || value == null) return '';
-  const count = Number(value);
-  if (!Number.isFinite(count) || count <= 0) return '';
-  return String(Math.max(1, Math.min(2, Math.round(count))));
+ if (value === '' || value == null) return '';
+ const count = Number(value);
+ if (!Number.isFinite(count) || count <= 0) return '';
+ return String(Math.max(1, Math.min(10, Math.round(count))));
 }
 
 function renderModelInfo(model) {
@@ -2637,11 +2736,7 @@ function renderModelInfo(model) {
   if (model.dtype) parts.push(model.dtype);
   const processor = model.processor || {};
   if (processor.time_marker_every_seconds) parts.push('time marker ' + processor.time_marker_every_seconds + 's');
-  modelInfoEl.textContent = parts.join(' · ');
-}
-
-function updateDecodingControls() {
-  temperatureInput.disabled = decodingSelect.value !== 'sample';
+  if (modelInfoEl) modelInfoEl.textContent = parts.join(' · ');
 }
 
 function scheduleLayoutFit() {
@@ -2705,8 +2800,6 @@ function markEditorDirty() {
   setEditorDirty(true);
 }
 
-decodingSelect.addEventListener('change', updateDecodingControls);
-
 document.querySelectorAll('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     const target = btn.dataset.tab;
@@ -2734,16 +2827,23 @@ urlInput.addEventListener('keydown', (e) => {
   }
 });
 
+let isSubmitting = false;
 uploadBtn.addEventListener('click', async () => {
+  if (isSubmitting) return;
   if (document.querySelector('#urlTab.active') && urlInput.value.trim()) {
+    isSubmitting = true;
     await submitUrlDownload();
+    isSubmitting = false;
     return;
   }
   if (rerunDraftJob) {
+    isSubmitting = true;
     await startRerunDraft();
+    isSubmitting = false;
     return;
   }
   if (!pendingUploads.length) return;
+  isSubmitting = true;
   uploadBtn.disabled = true;
   importErrorEl.textContent = '';
   const total = pendingUploads.length;
@@ -2753,10 +2853,6 @@ uploadBtn.addEventListener('click', async () => {
     const form = new FormData();
     form.append('file', item.file);
     form.append('prompt', item.prompt);
-    if (item.maxNewTokens) form.append('max_new_tokens', item.maxNewTokens);
-    if (item.maxLen) form.append('max_len', item.maxLen);
-    form.append('decoding', item.decoding);
-    if (item.temperature) form.append('temperature', item.temperature);
     if (item.speakerCount) form.append('speaker_count', item.speakerCount);
     form.append('diarization_backend', item.diarizationBackend || 'auto');
     try {
@@ -2775,6 +2871,7 @@ uploadBtn.addEventListener('click', async () => {
   pendingUploads = [];
   renderPendingList();
   uploadBtn.disabled = false;
+  isSubmitting = false;
   updateUploadBtnLabel();
   await refreshJobs({ keepSelection: true });
 });
@@ -2792,10 +2889,6 @@ async function submitUrlDownload() {
   form.append('url', url);
   form.append('cookies_browser', cookiesBrowserSelect.value);
   if (promptInput.value) form.append('prompt', promptInput.value);
-  if (maxNewTokensInput.value) form.append('max_new_tokens', maxNewTokensInput.value);
-  if (maxLenInput.value) form.append('max_len', maxLenInput.value);
-  form.append('decoding', decodingSelect.value);
-  if (temperatureInput.value && decodingSelect.value === 'sample') form.append('temperature', temperatureInput.value);
   if (speakerCountInput.value) form.append('speaker_count', speakerCountInput.value);
   form.append('diarization_backend', diarizationBackendSelect.value || 'auto');
   if (cookiesFileInput.files && cookiesFileInput.files[0]) {
@@ -2817,6 +2910,7 @@ async function submitUrlDownload() {
     importErrorEl.textContent = '请求失败：' + (err && err.message ? err.message : String(err));
   }
   uploadBtn.disabled = false;
+  isSubmitting = false;
   updateUploadBtnLabel();
 }
 
@@ -2863,6 +2957,7 @@ checkCookiesBtn.addEventListener('click', async () => {
 
 newTaskBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 openNewBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
+backFromProcessingBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
 backToTasksBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 openSettingsBtn.addEventListener('click', openSettings);
@@ -2885,6 +2980,10 @@ deleteCurrentBtn.addEventListener('click', async () => {
 });
 
 jobListEl.addEventListener('click', async (event) => {
+  if (event.target.closest('a')) {
+    event.stopPropagation();
+    return;
+  }
   const deleteButton = event.target.closest('[data-delete-id]');
   if (deleteButton) {
     event.stopPropagation();
@@ -2897,20 +2996,17 @@ jobListEl.addEventListener('click', async (event) => {
 
 function defaultPendingParams() {
   return {
-    prompt: promptInput.value,
-    maxNewTokens: maxNewTokensInput.value,
-    maxLen: maxLenInput.value,
-    decoding: decodingSelect.value,
-    temperature: temperatureInput.value,
-    speakerCount: normalizedSpeakerCount(speakerCountInput.value),
-    diarizationBackend: diarizationBackendSelect.value
+    prompt: storedDefaults.prompt,
+    speakerCount: storedDefaults.speakerCount || '',
+    diarizationBackend: storedDefaults.backend || 'auto'
   };
 }
 
 function pendingSummary(item) {
-  const speakers = item.speakerCount ? ' · speakers ' + item.speakerCount : '';
-  const diarization = ' · ' + diarizationBackendLabel(item.diarizationBackend || 'auto');
-  return 'tokens ' + (item.maxNewTokens || '8192') + ' · ' + (item.decoding || 'greedy') + speakers + diarization;
+  const parts = [];
+  if (item.speakerCount) parts.push('speakers ' + item.speakerCount);
+  parts.push(diarizationBackendLabel(item.diarizationBackend || 'auto'));
+  return parts.join(' · ');
 }
 
 function renderPendingList() {
@@ -2923,49 +3019,31 @@ function renderPendingList() {
       <div class="pending-item-head">
         <span class="pending-item-name">${escapeHtml(item.file.name)}</span>
         <span class="pending-item-summary">${escapeHtml(pendingSummary(item))}</span>
-        <button class="pending-toggle" type="button" data-action="toggle">参数</button>
         <button class="pending-remove" type="button" data-action="remove" title="移除">✕</button>
       </div>
-      <div class="pending-item-body${item.expanded ? '' : ' is-hidden'}">
+      <div class="pending-item-body">
         <div>
           <label>推理 Prompt</label>
-          <textarea class="pending-prompt" rows="2">${escapeHtml(item.prompt)}</textarea>
+          <textarea class="pending-prompt prompt-input" rows="2">${escapeHtml(item.prompt)}</textarea>
         </div>
-        <div class="row">
+        <div class="params-row">
           <div>
-            <label>输出 tokens</label>
-            <input class="pending-tokens" type="number" min="1" step="1" value="${escapeHtml(String(item.maxNewTokens || ''))}" />
+            <label>说话人数</label>
+            <input class="pending-speakers" type="number" min="0" max="10" step="1" value="${escapeHtml(String(item.speakerCount || ''))}" />
           </div>
           <div>
-            <label>上下文上限</label>
-            <input class="pending-maxlen" type="number" min="1" step="1" value="${escapeHtml(String(item.maxLen || ''))}" />
+            <label>后端</label>
+            <select class="pending-diarization">
+              <option value="none"${(item.diarizationBackend || 'none') === 'none' ? ' selected' : ''}>不分说话人</option>
+              <option value="auto"${item.diarizationBackend === 'auto' ? ' selected' : ''}>auto（推荐）</option>
+              <option value="pyannote"${item.diarizationBackend === 'pyannote' ? ' selected' : ''}>pyannote</option>
+              <option value="cluster"${item.diarizationBackend === 'cluster' ? ' selected' : ''}>cluster</option>
+            </select>
           </div>
-        </div>
-        <div class="row">
-          <div>
-            <label>解码</label>
-            <select class="pending-decoding"><option value="greedy"${item.decoding === 'greedy' ? ' selected' : ''}>greedy</option><option value="sample"${item.decoding === 'sample' ? ' selected' : ''}>sample</option></select>
-          </div>
-          <div>
-            <label>温度</label>
-            <input class="pending-temp" type="number" min="0.01" step="0.05" value="${escapeHtml(String(item.temperature || ''))}" />
-          </div>
-        </div>
-        <div>
-          <label>目标说话人数</label>
-          <input class="pending-speakers" type="number" min="0" max="12" step="1" value="${escapeHtml(String(item.speakerCount || ''))}" />
-        </div>
-        <div>
-          <label>说话人识别后端</label>
-          <select class="pending-diarization">
-            <option value="auto"${(item.diarizationBackend || 'auto') === 'auto' ? ' selected' : ''}>auto：优先 pyannote，失败回退</option>
-            <option value="pyannote"${item.diarizationBackend === 'pyannote' ? ' selected' : ''}>pyannote：更强，需要 HF token</option>
-            <option value="cluster"${item.diarizationBackend === 'cluster' ? ' selected' : ''}>cluster：轻量本地聚类</option>
-            <option value="none"${item.diarizationBackend === 'none' ? ' selected' : ''}>none：不标说话人</option>
-          </select>
         </div>
       </div>
     </div>`).join('');
+  pendingListEl.querySelectorAll('textarea.pending-prompt').forEach(el => autoGrow(el));
 }
 
 function updatePendingSummary(id) {
@@ -2999,7 +3077,7 @@ function updateUploadBtnLabel() {
 
 function addPendingFiles(fileList) {
   for (const file of fileList) {
-    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file, expanded: false }, defaultPendingParams()));
+    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file }, defaultPendingParams()));
   }
   renderPendingList();
   updateUploadBtnLabel();
@@ -3018,14 +3096,7 @@ pendingListEl.addEventListener('click', (event) => {
   if (!row) return;
   const id = Number(row.dataset.id);
   const action = event.target.dataset.action;
-  if (action === 'toggle') {
-    const item = pendingUploads.find((p) => p.id === id);
-    if (item) {
-      item.expanded = !item.expanded;
-      const body = row.querySelector('.pending-item-body');
-      if (body) body.classList.toggle('is-hidden', !item.expanded);
-    }
-  } else if (action === 'remove') {
+  if (action === 'remove') {
     pendingUploads = pendingUploads.filter((p) => p.id !== id);
     renderPendingList();
     updateUploadBtnLabel();
@@ -3038,11 +3109,17 @@ pendingListEl.addEventListener('input', (event) => {
   const id = Number(row.dataset.id);
   const item = pendingUploads.find((p) => p.id === id);
   if (!item) return;
-  if (event.target.classList.contains('pending-prompt')) item.prompt = event.target.value;
-  else if (event.target.classList.contains('pending-tokens')) { item.maxNewTokens = event.target.value; updatePendingSummary(id); }
-  else if (event.target.classList.contains('pending-maxlen')) item.maxLen = event.target.value;
-  else if (event.target.classList.contains('pending-temp')) item.temperature = event.target.value;
+  if (event.target.classList.contains('pending-prompt')) { item.prompt = event.target.value; autoGrow(event.target); }
   else if (event.target.classList.contains('pending-speakers')) { item.speakerCount = event.target.value; updatePendingSummary(id); }
+});
+
+function autoGrow(el) {
+  el.style.height = '40px';
+  el.style.height = el.scrollHeight + 'px';
+}
+document.querySelectorAll('textarea.prompt-input').forEach(el => {
+  el.addEventListener('input', () => autoGrow(el));
+  autoGrow(el);
 });
 
 pendingListEl.addEventListener('change', (event) => {
@@ -3051,49 +3128,7 @@ pendingListEl.addEventListener('change', (event) => {
   const id = Number(row.dataset.id);
   const item = pendingUploads.find((p) => p.id === id);
   if (!item) return;
-  if (event.target.classList.contains('pending-decoding')) { item.decoding = event.target.value; updatePendingSummary(id); }
-  else if (event.target.classList.contains('pending-diarization')) { item.diarizationBackend = event.target.value; updatePendingSummary(id); }
-});
-
-uploadBtn.addEventListener('click', async () => {
-  if (rerunDraftJob) {
-    await startRerunDraft();
-    return;
-  }
-  if (!pendingUploads.length) return;
-  uploadBtn.disabled = true;
-  importErrorEl.textContent = '';
-  const total = pendingUploads.length;
-  let created = 0;
-  for (const item of pendingUploads) {
-    uploadBtn.textContent = '上传中 ' + (created + 1) + '/' + total;
-    const form = new FormData();
-    form.append('file', item.file);
-    form.append('prompt', item.prompt);
-    if (item.maxNewTokens) form.append('max_new_tokens', item.maxNewTokens);
-    if (item.maxLen) form.append('max_len', item.maxLen);
-    form.append('decoding', item.decoding);
-    if (item.temperature) form.append('temperature', item.temperature);
-    if (item.speakerCount) form.append('speaker_count', item.speakerCount);
-    form.append('diarization_backend', item.diarizationBackend || 'auto');
-    try {
-      const res = await fetch(apiUrl('api/jobs'), { method: 'POST', body: form });
-      const data = await res.json();
-      if (!res.ok) {
-        importErrorEl.textContent = (data && data.detail) || '上传失败';
-        break;
-      }
-      created += 1;
-    } catch (err) {
-      importErrorEl.textContent = '上传失败：' + (err && err.message ? err.message : String(err));
-      break;
-    }
-  }
-  pendingUploads = [];
-  renderPendingList();
-  uploadBtn.disabled = false;
-  updateUploadBtnLabel();
-  await refreshJobs({ keepSelection: true });
+  if (event.target.classList.contains('pending-diarization')) { item.diarizationBackend = event.target.value; updatePendingSummary(id); }
 });
 
 saveBtn.addEventListener('click', async () => {
@@ -3369,6 +3404,12 @@ function renderJobList() {
     const dlInfo = (job.status === 'downloading' && job.download_info)
       ? `<div class="meta">下载: ${job.download_info.percent || 0}%${job.download_info.speed ? ' | ' + escapeHtml(job.download_info.speed) : ''}${job.download_info.eta ? ' | ETA ' + escapeHtml(job.download_info.eta) : ''}</div>`
       : '';
+    const outputKinds = EDIT_STATES.has(job.status)
+      ? [['srt', 'SRT'], ['ass', 'ASS'], ['transcript', 'TXT']].concat(job.status === 'done' ? [['mp4', 'MP4']] : [])
+      : [];
+    const outputLinks = outputKinds.length
+      ? `<div class="task-output-row"><span class="task-output-label">OUTPUT</span>${outputKinds.map(([kind, label]) => `<a href="${apiUrl(`api/jobs/${job.id}/download?kind=${kind}`)}" target="_blank" rel="noreferrer">${label}</a>`).join('<span class="meta">·</span>')}</div>`
+      : '';
     return `
       <div class="task-item${active}" data-job-id="${escapeHtml(job.id)}">
         <div class="task-row">
@@ -3377,12 +3418,13 @@ function renderJobList() {
         </div>
         <div class="task-id meta">${escapeHtml(job.id)}</div>
         ${dlInfo}
-        <div class="meta">${escapeHtml(tokenUsageSummary(job))}</div>
+        ${job.status === 'downloading' ? '' : `<div class="meta">${escapeHtml(tokenUsageSummary(job))}</div>`}
         ${warning ? `<div class="warning">${escapeHtml(warning)}</div>` : ''}
         <div class="task-foot">
           <div class="progress task-progress"><div class="bar" style="width:${percent}%"></div></div>
           ${canDelete ? `<button class="small ghost" data-delete-id="${escapeHtml(job.id)}">${RUNNING_STATES.has(job.status) ? '取消并删除' : '删除'}</button>` : ''}
         </div>
+        ${outputLinks}
       </div>`;
   }).join('');
 }
@@ -3435,6 +3477,7 @@ function resetImportMode() {
   importTitleEl.textContent = '任务管理';
   rerunSourceEl.textContent = '';
   fileInput.disabled = false;
+  if (rerunParamsEl) rerunParamsEl.style.display = 'none';
   pendingUploads = [];
   renderPendingList();
   if (urlInput) urlInput.value = '';
@@ -3461,27 +3504,28 @@ function showProcessingPlaceholder(name) {
 }
 
 function showProcessing(job) {
-  if (job.status === 'downloading') {
-    processTitleEl.textContent = '下载中';
-  } else if (job.status === 'failed') {
+  if (job.status === 'failed') {
     processTitleEl.textContent = '任务失败';
   } else {
-    processTitleEl.textContent = '转写中';
+    processTitleEl.textContent = statusLabel(job.status);
   }
   processNameEl.textContent = job.media_name || 'input.media';
-  let meta = jobSummary(job);
-  if (job.status === 'downloading' && job.download_info) {
-    const dl = job.download_info;
+  let meta;
+  if (job.status === 'downloading') {
+    const dl = job.download_info || {};
     const parts = ['下载 ' + (dl.percent || 0) + '%'];
     if (dl.speed) parts.push(dl.speed);
     if (dl.eta) parts.push('ETA ' + dl.eta);
-    meta = parts.join(' | ') + (meta ? ' | ' + meta : '');
+    meta = parts.join(' | ');
+  } else {
+    meta = jobSummary(job);
   }
   processMetaEl.textContent = meta;
   const rawPercent = Math.round((job.progress || 0) * 100);
-  const isIndeterminate = job.status === 'transcribing' && rawPercent <= 12;
+  const staticPhases = new Set(['loading_model', 'postprocessing', 'labeling_speakers']);
+  const isIndeterminate = (job.status === 'transcribing' && rawPercent <= 12) || staticPhases.has(job.status);
   processBarEl.classList.toggle('indeterminate', isIndeterminate);
-  processBarEl.style.width = isIndeterminate ? '38%' : `${rawPercent}%`;
+  processBarEl.style.width = `${Math.max(rawPercent, 5)}%`;
   processErrorEl.textContent = job.error || truncationWarning(job);
   updateTranslateProgress(job);
   deleteCurrentBtn.disabled = false;
@@ -3671,26 +3715,17 @@ function updateRerunAction(job) {
 }
 
 function showRerunDraft(job) {
-  const usage = job.usage || {};
   const inference = job.inference || {};
-  const currentMax = Number(usage.max_new_tokens || inference.max_new_tokens || 0);
   rerunDraftJob = job;
   currentJob = null;
   importTitleEl.textContent = '重跑转写';
   fileInput.value = '';
   fileInput.disabled = true;
   rerunSourceEl.textContent = '来源媒体：' + (job.media_name || 'input.media');
-  promptInput.value = inference.prompt || '';
-  maxNewTokensInput.value = usage.possibly_truncated && currentMax > 0
-    ? Math.max(currentMax * 2, currentMax + 512)
-    : currentMax || '';
-  maxLenInput.value = inference.max_length || '';
-  decodingSelect.value = inference.decoding || 'greedy';
-  temperatureInput.value = inference.temperature == null ? '1.0' : inference.temperature;
-  speakerCountInput.value = job.speaker_count || '';
-  diarizationBackendSelect.value = job.diarization_backend || 'auto';
-  updateDecodingControls();
-  advancedDetails.open = true;
+  rerunPromptInput.value = inference.prompt || '';
+  rerunSpeakerCountInput.value = job.speaker_count || '';
+  rerunDiarizationSelect.value = job.diarization_backend || 'auto';
+  rerunParamsEl.style.display = '';
   uploadBtn.textContent = '开始重跑';
   importErrorEl.textContent = '';
   setVisible(importView);
@@ -3701,16 +3736,12 @@ async function startRerunDraft() {
   if (!rerunDraftJob) return;
   const source = rerunDraftJob;
   const payload = {
-    prompt: promptInput.value,
-    max_new_tokens: Number(maxNewTokensInput.value || 0),
-    max_len: Number(maxLenInput.value || 0),
-    decoding: decodingSelect.value,
+    prompt: rerunPromptInput.value,
   };
-  if (temperatureInput.value) payload.temperature = Number(temperatureInput.value);
-  if (normalizedSpeakerCount(speakerCountInput.value)) payload.speaker_count = Number(normalizedSpeakerCount(speakerCountInput.value));
-  payload.diarization_backend = diarizationBackendSelect.value || 'auto';
+  if (normalizedSpeakerCount(rerunSpeakerCountInput.value)) payload.speaker_count = Number(normalizedSpeakerCount(rerunSpeakerCountInput.value));
+  payload.diarization_backend = rerunDiarizationSelect.value || 'auto';
   uploadBtn.disabled = true;
-  advancedDetails.open = false;
+  rerunParamsEl.style.display = 'none';
   importErrorEl.textContent = '';
   showProcessingPlaceholder(source.media_name || 'input.media');
   const res = await fetch(apiUrl(`api/jobs/${source.id}/rerun`), {
@@ -3720,6 +3751,7 @@ async function startRerunDraft() {
   });
   const data = await res.json();
   uploadBtn.disabled = false;
+  isSubmitting = false;
   if (!res.ok) {
     importErrorEl.textContent = data.detail || '重跑失败';
     showImportView({ clearDraft: false, preserveError: true });
@@ -3738,8 +3770,6 @@ function setVisible(view) {
 }
 
 async function deleteJob(jobId) {
-  const job = jobs.find((item) => item.id === jobId);
-  if (job && RUNNING_STATES.has(job.status)) return;
   const res = await fetch(apiUrl(`api/jobs/${jobId}`), { method: 'DELETE' });
   if (!res.ok) return;
   if (currentJob && currentJob.id === jobId) {

@@ -41,12 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate editable subtitles and optionally burn them into video.")
     parser.add_argument("input", help="Input audio or video path.")
     parser.add_argument("--segments-input", default=None, help="Use an existing segments JSON file and skip transcription.")
-    parser.add_argument("--backend", choices=["whisper", "hf", "vllm"], default="whisper")
+    parser.add_argument("--backend", choices=["whisper"], default="whisper")
     parser.add_argument("--model", default=str(DEFAULT_MODEL))
-    parser.add_argument("--vllm-base-url", default=None, help="OpenAI-compatible vLLM base URL, e.g. http://127.0.0.1:8000/v1.")
-    parser.add_argument("--vllm-model", default=None, help="vLLM served model name. Defaults to --model.")
-    parser.add_argument("--vllm-api-key", default="EMPTY")
-    parser.add_argument("--vllm-timeout", type=float, default=600.0)
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--device", default="auto")
@@ -98,23 +94,7 @@ def main() -> None:
             "segments_input": str(Path(args.segments_input).expanduser()),
         }
     else:
-        if args.backend == "vllm":
-            if not args.vllm_base_url:
-                raise SystemExit("--vllm-base-url is required when --backend vllm.")
-            from .vllm_runner import VllmRunner
-
-            runner = VllmRunner(
-                base_url=args.vllm_base_url,
-                model=args.vllm_model or args.model,
-                api_key=args.vllm_api_key,
-                timeout=args.vllm_timeout,
-            )
-        elif args.backend == "hf":
-            from .model_runner import ModelRunner
-
-            runner = ModelRunner(args.model, device=args.device, dtype=args.dtype)
-        else:
-            runner = WhisperRunner(args.model, device=args.device, dtype=args.dtype)
+        runner = WhisperRunner(args.model, device=args.device, dtype=args.dtype)
         result = runner.transcribe(
             input_path,
             prompt=args.prompt,

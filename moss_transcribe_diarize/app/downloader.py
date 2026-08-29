@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 ProgressCallback = Callable[[float, dict[str, Any]], None]
 CancelCheck = Callable[[], bool]
+TitleCallback = Callable[[str], None]
 
 _PROGRESS_RE = re.compile(
     r"\[download\]\s+([\d.]+)%"
@@ -23,6 +26,15 @@ _MERGE_RE = re.compile(r"\(Merger|Deleting\)", re.I)
 _FILEPATH_RE = re.compile(r"^(?:Destination:|File is already|Merging|Deleting)\s+(.+)$", re.I)
 
 _NETSCAPE_COOKIE_RE = re.compile(r"^(?:#\s*(?:HTTP|Netscape)|\S+\t\S+\t\S+)", re.MULTILINE)
+
+# --print 输出自定义前缀模板，避免和 yt-dlp 的状态行/警告混淆。
+_TITLE_PRINT_PREFIX = "mtd_title:"
+
+
+@dataclass(slots=True)
+class DownloadResult:
+    path: Path
+    title: str | None = None
 
 
 def find_yt_dlp() -> Path:
@@ -173,8 +185,9 @@ def download_with_yt_dlp(
     format_selector: str = "bv*[height<=1080]+ba/b[height<=1080]",
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    title_callback: TitleCallback | None = None,
     extra_args: list[str] | None = None,
-) -> Path:
+) -> DownloadResult:
     yt_dlp = find_yt_dlp()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -197,6 +210,12 @@ def download_with_yt_dlp(
         "--no-write-thumbnail",
         "--no-write-subs",
         "--no-write-auto-subs",
+        # --print 默认等价于 --simulate 且隐式激活 quiet（关闭全部进度输出），
+        # 必须显式 --no-simulate 恢复真实下载、显式 --progress 恢复进度行。
+        "--no-simulate",
+        "--print",
+        f"{_TITLE_PRINT_PREFIX}%(title)s",
+        "--progress",
     ]
 
     js_runtime = _find_js_runtime(yt_dlp)
@@ -222,6 +241,9 @@ def download_with_yt_dlp(
         creationflags = subprocess.CREATE_NO_WINDOW
 
     try:
+        # PyInstaller 打包的 yt-dlp 在管道 stdout 下按块缓冲，进度行会长期积压
+        # 导致上层永远拿到 0%；PYTHONUNBUFFERED 强制逐行写出。
+        child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -229,6 +251,7 @@ def download_with_yt_dlp(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=child_env,
             creationflags=creationflags,
             bufsize=1,
         )
@@ -241,11 +264,20 @@ def download_with_yt_dlp(
     downloaded_file: Path | None = None
     last_progress: dict[str, Any] = {}
     error_lines: list[str] = []
+    video_title: str | None = None
 
     assert proc.stdout is not None
     for line in proc.stdout:
         line = line.rstrip("\r\n")
         if not line:
+            continue
+
+        if line.startswith(_TITLE_PRINT_PREFIX):
+            raw_title = line[len(_TITLE_PRINT_PREFIX):].strip()
+            if raw_title and not video_title:
+                video_title = raw_title
+                if title_callback:
+                    title_callback(raw_title)
             continue
 
         if line.startswith("Destination:"):
@@ -296,7 +328,7 @@ def download_with_yt_dlp(
     if downloaded_file.suffix.lower() != ".mkv":
         downloaded_file = _remux_to_mkv(downloaded_file)
 
-    return downloaded_file
+    return DownloadResult(path=downloaded_file, title=video_title)
 
 
 def _remux_to_mkv(src: Path) -> Path:

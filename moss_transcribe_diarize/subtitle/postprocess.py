@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 from moss_transcribe_diarize.transcript_parser import TranscriptSegment, parse_transcript
@@ -35,6 +36,40 @@ _EN_DANGLING_WORDS = {
     "had", "will", "would", "can", "could", "shall", "should", "may", "might",
     "must", "not", "it's", "its", "i", "there", "here", "then", "also", "just",
 }
+
+
+def drop_repeated_hallucinations(
+    segments: Iterable[SubtitleSegment],
+    *,
+    min_words: int = 6,
+) -> list[SubtitleSegment]:
+    """丢弃重复出现的幻觉文本。
+
+    whisper 在音乐段常见的幻觉模式：同一句"不存在的话"在整条音轨里
+    反复冒出来（如 "It was hard, but it was hard for me to tell."
+    隔几分钟再来一遍）。这里按归一化文本判重：
+    - 与更早的段完全相同（>=min_words 词）-> 丢弃；
+    - 是更早的段（>=min_words 词）的子串 -> 丢弃（幻觉常被截断复述）。
+    短句（<min_words 词）不动：口号/歌词/短答的合法重复太常见。
+    首次出现无法仅凭文本判定真伪，保留。
+    """
+    kept: list[SubtitleSegment] = []
+    seen: list[str] = []
+    for segment in segments:
+        text = " ".join((segment.text or "").split())
+        if text:
+            normalized = _normalize_hallucination_text(text)
+            if normalized and len(normalized.split()) >= min_words:
+                duplicated = any(normalized == earlier or normalized in earlier for earlier in seen)
+                if duplicated:
+                    continue
+                seen.append(normalized)
+        kept.append(segment)
+    return kept
+
+
+def _normalize_hallucination_text(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", "", text.casefold()).split())
 
 
 def subtitle_segments_from_transcript(
@@ -176,10 +211,10 @@ def _merge_tiny_word_segments(
 ) -> list[SubtitleSegment]:
     """合并过短的词级片段。
 
-    句末短答（"Yes." / "Easily." / "Absolutely not." 等）被标点收成独立 unit
-    后会单独占一行，显示太碎。这里把时长极短且字数极少的片段向后并入相邻行：
-    只要装得下（不超单行字数上限）就并入上一行，从而消除 400ms 量级的孤立碎片，
-    也能让一连串短答（Yes./Easily./Very much.）链式合并成一行。
+    半句碎片（逗号尾/无标点尾）向后并入相邻行，消除 400ms 量级的孤立
+    碎片。但上一行以句末标点结尾时不吸收——regroup 阶段没有说话人信息，
+    "句末短答"极可能是换人插话，揉进一行会让两人的话混在一条字幕里
+    （翻译最怕的粘行）。
     """
     if len(segments) < 2:
         return segments
@@ -190,16 +225,22 @@ def _merge_tiny_word_segments(
     merged: list[SubtitleSegment] = [segments[0]]
     for seg in segments[1:]:
         prev = merged[-1]
-        if is_tiny(seg) and _text_weight(prev.text) + _text_weight(seg.text) <= max_chars:
-            merged[-1] = SubtitleSegment(
-                id=prev.id,
-                start=prev.start,
-                end=seg.end,
-                speaker=prev.speaker,
-                text=_join_text(prev.text, seg.text),
-            )
-        else:
+        if not is_tiny(seg) or _text_weight(prev.text) + _text_weight(seg.text) > max_chars:
             merged.append(seg)
+            continue
+        # 反粘行：上一行以句末标点结尾就一律不回吸——regroup 阶段没有
+        # 说话人信息，"Yes./Easily. 连发"与"Thank you./No worries. 互答"
+        # 无法区分，而后者揉进一行翻译就报废——宁可多出一条短行。
+        if _ends_sentence(prev.text):
+            merged.append(seg)
+            continue
+        merged[-1] = SubtitleSegment(
+            id=prev.id,
+            start=prev.start,
+            end=seg.end,
+            speaker=prev.speaker,
+            text=_join_text(prev.text, seg.text),
+        )
     return merged
 
 
