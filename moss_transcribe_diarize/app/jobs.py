@@ -14,6 +14,7 @@ from typing import Any
 from moss_transcribe_diarize.subtitle import (
     SubtitleSegment,
     SubtitleStyle,
+    clean_source_captions,
     coerce_subtitle_segments,
     drop_repeated_hallucinations,
     export_ass,
@@ -34,7 +35,7 @@ from . import vocal_separator
 from .text_translator import apply_translations, collect_pretranslation_skips, validate_translation_outputs
 
 
-RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "rendering"}
+RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "proofreading", "rendering"}
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
 
 
@@ -99,10 +100,15 @@ class JobRecord:
     speaker_count: int | None = None
     diarization_backend: str = "none"
     translation_info: dict[str, Any] = field(default_factory=dict)
+    proofread_info: dict[str, Any] = field(default_factory=dict)
+    hotwords: str = ""
     source: str = "upload"
     source_url: str | None = None
     cookies_config: dict[str, Any] = field(default_factory=dict)
     download_info: dict[str, Any] = field(default_factory=dict)
+    force_transcribe: bool = False
+    transcript_source: str | None = None
+    source_subtitles: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -115,6 +121,10 @@ class JobRecord:
     @property
     def source_segments_path(self) -> Path:
         return Path(self.job_dir) / "segments.source.json"
+
+    @property
+    def proofread_path(self) -> Path:
+        return Path(self.job_dir) / "proofread.json"
 
     @property
     def srt_path(self) -> Path:
@@ -170,6 +180,10 @@ class JobRecord:
             **self.translation_info,
             "source_available": self.source_segments_path.exists(),
         }
+        data["proofread"] = {
+            **self.proofread_info,
+            "result_available": self.proofread_path.exists(),
+        }
         data["source"] = self.source
         if self.source_url:
             data["source_url"] = self.source_url
@@ -208,6 +222,8 @@ class JobRecord:
             speaker_count=None if data.get("speaker_count") in ("", None) else int(data.get("speaker_count")),
             diarization_backend=str(data.get("diarization_backend") or "auto"),
             translation_info=dict(data.get("translation_info") or data.get("translation") or {}),
+            proofread_info=dict(data.get("proofread_info") or data.get("proofread") or {}),
+            hotwords=str(data.get("hotwords") or ""),
             source=str(data.get("source") or "upload"),
             source_url=data.get("source_url"),
             cookies_config=dict(data.get("cookies_config") or {}),
@@ -249,6 +265,7 @@ class JobManager:
         self._queue: queue.Queue[str] = queue.Queue()
         self._render_lock = threading.Lock()
         self._translate_lock = threading.Lock()
+        self._proofread_lock = threading.Lock()
         self._progress_save_times: dict[str, float] = {}
         self._cancelled_jobs: set[str] = set()
         self._load_existing_jobs()
@@ -267,6 +284,7 @@ class JobManager:
         temperature: float | None = None,
         speaker_count: int | None = None,
         diarization_backend: str | None = None,
+        hotwords: str | None = None,
     ) -> JobRecord:
         options = self._resolve_inference_options(
             prompt=prompt,
@@ -298,6 +316,7 @@ class JobManager:
             backend=self._runner_backend(),
             speaker_count=self._resolve_speaker_count(speaker_count),
             diarization_backend=self._resolve_diarization_backend(diarization_backend),
+            hotwords=str(hotwords or ""),
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -315,6 +334,7 @@ class JobManager:
         temperature: float | None = None,
         speaker_count: int | None = None,
         diarization_backend: str | None = None,
+        hotwords: str | None = None,
     ) -> tuple[JobRecord, Path]:
         options = self._resolve_inference_options(
             prompt=prompt,
@@ -344,6 +364,7 @@ class JobManager:
             backend=self._runner_backend(),
             speaker_count=self._resolve_speaker_count(speaker_count),
             diarization_backend=self._resolve_diarization_backend(diarization_backend),
+            hotwords=str(hotwords or ""),
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -362,6 +383,8 @@ class JobManager:
         temperature: float | None = None,
         speaker_count: int | None = None,
         diarization_backend: str | None = None,
+        force_transcribe: bool = False,
+        hotwords: str | None = None,
     ) -> JobRecord:
         options = self._resolve_inference_options(
             prompt=prompt,
@@ -393,6 +416,8 @@ class JobManager:
             source="url",
             source_url=url,
             cookies_config=cookies_config,
+            force_transcribe=bool(force_transcribe),
+            hotwords=str(hotwords or ""),
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -401,6 +426,67 @@ class JobManager:
 
     def enqueue(self, job_id: str) -> None:
         self._queue.put(job_id)
+
+    # ------------------------------------------------------------ 热词词表
+
+    @property
+    def hotwords_glossary_path(self) -> Path:
+        return Path(self.runs_dir).parent / "config" / "hotwords.json"
+
+    def load_hotwords_glossary(self) -> list[str]:
+        path = self.hotwords_glossary_path
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        terms = data.get("terms") if isinstance(data, dict) else data
+        if not isinstance(terms, list):
+            return []
+        seen: list[str] = []
+        for term in terms:
+            term = str(term or "").strip()
+            if term and term not in seen:
+                seen.append(term)
+        return seen
+
+    def save_hotwords_glossary(self, terms: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for term in terms:
+            term = str(term or "").strip()
+            if term and term not in cleaned:
+                cleaned.append(term)
+        path = self.hotwords_glossary_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"terms": cleaned}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return cleaned
+
+    def add_hotwords_to_glossary(self, new_terms: list[str]) -> list[str]:
+        if not new_terms:
+            return self.load_hotwords_glossary()
+        merged = self.load_hotwords_glossary()
+        changed = False
+        for term in new_terms:
+            term = str(term or "").strip()
+            if term and term not in merged:
+                merged.append(term)
+                changed = True
+        if changed:
+            self.save_hotwords_glossary(merged)
+        return merged
+
+    def _effective_hotwords(self, job: JobRecord) -> str:
+        """job 手填热词 + 全局词表 合并（去重、保序）。"""
+        tokens: list[str] = []
+        for raw in (job.hotwords, " ".join(self.load_hotwords_glossary())):
+            for token in re.split(r"[\s,，;；]+", str(raw or "")):
+                token = token.strip()
+                if token and token not in tokens:
+                    tokens.append(token)
+        return " ".join(tokens)
 
     def rerun_job(
         self,
@@ -413,6 +499,7 @@ class JobManager:
         temperature: float | None = None,
         speaker_count: int | None = None,
         diarization_backend: str | None = None,
+        hotwords: str | None = None,
     ) -> JobRecord:
         source = self.get_job(job_id)
         input_path = Path(source.input_path)
@@ -428,6 +515,7 @@ class JobManager:
             temperature=source.temperature if temperature is None else temperature,
             speaker_count=source.speaker_count if speaker_count is None else speaker_count,
             diarization_backend=source.diarization_backend if diarization_backend is None else diarization_backend,
+            hotwords=source.hotwords if hotwords is None else hotwords,
         )
 
     def list_jobs(self) -> list[JobRecord]:
@@ -718,6 +806,184 @@ class JobManager:
         self._touch(job, error=None)
         return {"segments": [segment.to_dict() for segment in segments], "count": len(segments)}
 
+    def _proofread_target(self, job: JobRecord) -> tuple[Path, str]:
+        """校对目标: 已翻译过用源稿(译文不受影响), 否则用当前稿。"""
+        if job.source_segments_path.exists():
+            return job.source_segments_path, "source"
+        return job.segments_path, "segments"
+
+    def proofread(
+        self,
+        job_id: str,
+        proofreader: Any,
+    ) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot proofread while the job is running.")
+        if not job.segments_path.exists():
+            raise RuntimeError("No subtitle segments are available for this job.")
+
+        with self._proofread_lock:
+            self._set_status(job, "proofreading", max(job.progress, 0.95), error=None)
+            try:
+                target_path, target_kind = self._proofread_target(job)
+                segments = [
+                    SubtitleSegment.from_dict(item)
+                    for item in json.loads(target_path.read_text(encoding="utf-8"))
+                ]
+                started = time.time()
+
+                def update_proofread_progress(phase: str, done: int, total: int) -> None:
+                    ratio = 0.7 * (done / total) if phase == "pass1" and total else 0.7
+                    if phase == "pass2" and done:
+                        ratio = 1.0
+                    job.proofread_info = {
+                        **job.proofread_info,
+                        "in_progress": True,
+                        "applied": False,
+                        "phase": phase,
+                        "done": done,
+                        "total": total,
+                        "percent": round(ratio * 100, 1),
+                        "target": target_kind,
+                    }
+                    self._set_status(job, "proofreading", 0.95 + 0.04 * ratio, error=None)
+
+                job.proofread_info = {
+                    **job.proofread_info,
+                    "in_progress": True,
+                    "applied": False,
+                    "phase": "pass1",
+                    "done": 0,
+                    "total": 0,
+                    "percent": 0.0,
+                    "target": target_kind,
+                }
+                self._touch(job, error=None)
+                result = proofreader.proofread(segments, progress_callback=update_proofread_progress)
+                result["target"] = target_kind
+                result["created_at"] = time.time()
+                result["elapsed_sec"] = round(time.time() - started, 1)
+                write_text(job.proofread_path, json.dumps(result, ensure_ascii=False, indent=2))
+                job.proofread_info = {
+                    "in_progress": False,
+                    "applied": False,
+                    "target": target_kind,
+                    "typo_count": len(result.get("suggestions") or []),
+                    "term_count": len(result.get("term_corrections") or []),
+                    "merge_count": len((result.get("reference") or {}).get("merge_suggestions") or []),
+                    "speaker_question_count": len((result.get("reference") or {}).get("speaker_questions") or []),
+                    "elapsed_sec": result["elapsed_sec"],
+                }
+                job.status = "waiting_review"
+                job.progress = 0.95
+                self._touch(job, error=None)
+                return result
+            except Exception as exc:
+                job.proofread_info = {
+                    **job.proofread_info,
+                    "in_progress": False,
+                    "error": str(exc),
+                }
+                self._set_status(job, "waiting_review", max(job.progress, 0.95), error=f"Proofread failed: {exc}")
+                raise
+
+    def get_proofread_result(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if not job.proofread_path.exists():
+            raise FileNotFoundError("No proofread result is available for this job.")
+        result = json.loads(job.proofread_path.read_text(encoding="utf-8"))
+        result["applied"] = bool(job.proofread_info.get("applied"))
+        return result
+
+    def apply_proofread(self, job_id: str, ids: list[str], terms: list[dict[str, Any]]) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot apply proofread while the job is running.")
+        if not job.proofread_path.exists():
+            raise FileNotFoundError("No proofread result is available for this job.")
+        result = json.loads(job.proofread_path.read_text(encoding="utf-8"))
+        target_path, target_kind = self._proofread_target(job)
+        segments = [
+            SubtitleSegment.from_dict(item)
+            for item in json.loads(target_path.read_text(encoding="utf-8"))
+        ]
+
+        wanted = {str(item) for item in ids or []}
+        applied_ids: set[str] = set()
+        for suggestion in result.get("suggestions") or []:
+            seg_id = str(suggestion.get("id") or "")
+            if seg_id not in wanted:
+                continue
+            for index, segment in enumerate(segments):
+                if segment.id == seg_id and segment.text == suggestion.get("original"):
+                    segments[index] = SubtitleSegment(
+                        id=segment.id,
+                        start=segment.start,
+                        end=segment.end,
+                        speaker=segment.speaker,
+                        text=str(suggestion.get("corrected") or segment.text),
+                    )
+                    applied_ids.add(seg_id)
+                    break
+
+        term_hits = 0
+        applied_terms: list[dict[str, Any]] = []
+        valid_terms = {
+            (str(t.get("wrong") or ""), str(t.get("right") or ""))
+            for t in result.get("term_corrections") or []
+        }
+        for term in terms or []:
+            wrong = str(term.get("wrong") or "").strip()
+            right = str(term.get("right") or "").strip()
+            if not wrong or not right or (wrong, right) not in valid_terms:
+                continue
+            pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+            changed = 0
+            for index, segment in enumerate(segments):
+                new_text, count = pattern.subn(right, segment.text)
+                if count and new_text != segment.text:
+                    segments[index] = SubtitleSegment(
+                        id=segment.id,
+                        start=segment.start,
+                        end=segment.end,
+                        speaker=segment.speaker,
+                        text=new_text,
+                    )
+                    changed += count
+            if changed:
+                term_hits += changed
+                applied_terms.append({"wrong": wrong, "right": right, "hits": changed})
+
+        needs_retranslate = False
+        if target_kind == "segments":
+            self._write_subtitle_files(job, segments)
+        else:
+            write_text(target_path, export_json(segments))
+            needs_retranslate = True
+        # 应用的术语自动沉淀进全局热词词表，下次转录 whisper 直接带进去
+        glossary_terms = self.add_hotwords_to_glossary(
+            [t.get("right") for t in applied_terms]
+        )
+        job.proofread_info = {
+            **job.proofread_info,
+            "applied": True,
+            "applied_ids": sorted(applied_ids),
+            "applied_terms": applied_terms,
+            "term_hits": term_hits,
+            "needs_retranslate": needs_retranslate,
+        }
+        self._touch(job, error=None)
+        return {
+            "applied_count": len(applied_ids),
+            "applied_ids": sorted(applied_ids),
+            "applied_terms": applied_terms,
+            "term_hits": term_hits,
+            "needs_retranslate": needs_retranslate,
+            "glossary_terms": glossary_terms,
+            "segments": [segment.to_dict() for segment in segments] if target_kind == "segments" else None,
+        }
+
     def clip_download_path(self, job_id: str, filename: str) -> Path:
         job = self.get_job(job_id)
         path = (job.clips_dir / Path(filename).name).resolve()
@@ -784,7 +1050,11 @@ class JobManager:
                 save = generated_tokens is None or self._should_save_live_progress(job.id)
                 self._set_status(job, status, progress if progress is not None else job.progress, save=save)
 
-            self._apply_auto_max_new_tokens(job)
+            # 人工平台字幕优先：URL 任务若有人工 CC，直接当文稿跳过 whisper；
+            # auto-CC 仍走转录。force_transcribe 可强制转录。
+            caption_segments = self._load_source_captions(job)
+            if caption_segments is None:
+                self._apply_auto_max_new_tokens(job)
             self._raise_if_cancelled(job.id)
 
             # 人声分离与 whisper 并行：demucs(~2GB) + whisper(~3GB) 显存
@@ -802,27 +1072,37 @@ class JobManager:
                     vocal_separator.separate_vocals, job.input_path, job.job_dir
                 )
 
-            result = self.model_runner.transcribe(
-                job.input_path,
-                prompt=job.inference_prompt,
-                max_length=job.max_length,
-                max_new_tokens=job.max_new_tokens,
-                decoding=job.decoding,
-                temperature=job.temperature,
-                status_callback=update,
-            )
-            self._raise_if_cancelled(job.id)
-            job.generated_tokens = result.generated_tokens
-            self._set_status(job, "postprocessing", 0.85, error=None)
-            job.raw_transcript_path.write_text(result.text, encoding="utf-8")
-            # 优先词级重组（时间戳精确、不受原始 segment 边界限制）；
-            # 引擎未提供词时间戳时降级为 segment 级重组。
-            if result.words:
-                segments = regroup_sentences_from_words(result.words)
+            if caption_segments is not None:
+                result = None
+                job.generated_tokens = 0
+                self._set_status(job, "postprocessing", 0.85, error=None)
+                job.raw_transcript_path.write_text(
+                    "\n".join(segment.text for segment in caption_segments), encoding="utf-8"
+                )
+                segments = caption_segments
             else:
-                segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
-            # 重复幻觉过滤：音乐段里同一句"不存在的话"反复出现的模式。
-            segments = drop_repeated_hallucinations(segments)
+                result = self.model_runner.transcribe(
+                    job.input_path,
+                    prompt=job.inference_prompt,
+                    max_length=job.max_length,
+                    max_new_tokens=job.max_new_tokens,
+                    decoding=job.decoding,
+                    temperature=job.temperature,
+                    hotwords=self._effective_hotwords(job),
+                    status_callback=update,
+                )
+                self._raise_if_cancelled(job.id)
+                job.generated_tokens = result.generated_tokens
+                self._set_status(job, "postprocessing", 0.85, error=None)
+                job.raw_transcript_path.write_text(result.text, encoding="utf-8")
+                # 优先词级重组（时间戳精确、不受原始 segment 边界限制）；
+                # 引擎未提供词时间戳时降级为 segment 级重组。
+                if result.words:
+                    segments = regroup_sentences_from_words(result.words)
+                else:
+                    segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
+                # 重复幻觉过滤：音乐段里同一句"不存在的话"反复出现的模式。
+                segments = drop_repeated_hallucinations(segments)
             self._raise_if_cancelled(job.id)
 
             if vocals_future is not None:
@@ -835,7 +1115,7 @@ class JobManager:
                 # 背景音门控：纯对白音轨（无 BGM）不值得喂分离人声，
                 # 丢弃结果直接用原始音频。
                 if vocals_path is not None and not vocal_separator.has_background_audio(
-                    result.words, job.input_path, job.job_dir
+                    result.words if result else None, job.input_path, job.job_dir
                 ):
                     try:
                         Path(vocals_path).unlink(missing_ok=True)
@@ -854,7 +1134,7 @@ class JobManager:
                 hf_token=self.hf_token,
                 pyannote_model=self.pyannote_model,
                 device=self.diarization_device,
-                words=result.words,
+                words=result.words if result else None,
                 audio_path=vocals_path,
             )
             if vocals_path is not None:
@@ -864,8 +1144,9 @@ class JobManager:
                     pass
             job.speaker_labeling = speaker_info.to_dict()
             self._write_subtitle_files(job, segments)
-            job.prompt_len = result.prompt_len
-            job.elapsed_sec = result.elapsed_sec
+            if result is not None:
+                job.prompt_len = result.prompt_len
+                job.elapsed_sec = result.elapsed_sec
             self._set_status(job, "waiting_review", 0.95, error=None)
             self._progress_save_times.pop(job.id, None)
         except JobCancelled:
@@ -919,7 +1200,38 @@ class JobManager:
             job.media_name = downloaded.name
         job.input_path = str(downloaded)
         job.download_info = {"completed": True, "filename": downloaded.name}
+        job.source_subtitles = list(result.subtitles)
         self._save_job(job)
+
+    def _load_source_captions(self, job: JobRecord) -> list[SubtitleSegment] | None:
+        """URL 任务带人工平台字幕时返回可作文稿的段落；否则返回 None 走转录。
+
+        只信任人工字幕：auto-CC 无标点、全小写，质量通常不如 whisper，
+        所以 auto 字幕不作为文稿来源。
+        """
+        if job.force_transcribe or job.source != "url" or not job.source_subtitles:
+            return None
+        from .downloader import pick_best_subtitle
+
+        manual = [s for s in job.source_subtitles if s.get("kind") == "manual"]
+        if not manual:
+            return None
+        picked = pick_best_subtitle(manual)
+        if not picked:
+            return None
+        path = Path(picked["path"])
+        if not path.is_file():
+            return None
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            segments = clean_source_captions(parse_srt(raw))
+        except Exception:
+            return None
+        if not segments:
+            return None
+        job.transcript_source = f"captions:{picked.get('kind', 'manual')}:{picked.get('lang', '')}"
+        self._save_job(job)
+        return segments
 
     def _apply_auto_max_new_tokens(self, job: JobRecord) -> None:
         """Raise ``max_new_tokens`` to a non-truncating floor based on audio duration.

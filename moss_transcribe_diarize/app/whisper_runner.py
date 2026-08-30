@@ -122,6 +122,7 @@ class WhisperRunner:
         max_new_tokens: int = 0,
         decoding: str = "greedy",
         temperature: float | None = None,
+        hotwords: str | None = None,
         status_callback: StatusCallback | None = None,
         **_: object,
     ) -> TranscriptionResult:
@@ -135,7 +136,9 @@ class WhisperRunner:
 
             started = time.time()
             if self._engine == "faster-whisper":
-                parts, segment_count, words = self._transcribe_faster_whisper(audio_path, prompt, status_callback)
+                parts, segment_count, words = self._transcribe_faster_whisper(
+                    audio_path, prompt, status_callback, hotwords=hotwords
+                )
                 # 即使 vad_filter=False，no_speech_threshold 也可能把段落判为无声而提前结束，
                 # 所以这里不再以 vad_filter 为前提，只看 _looks_sparse 的判定结果（含覆盖率检查）
                 if self._looks_sparse(parts, segment_count, audio_path):
@@ -144,6 +147,7 @@ class WhisperRunner:
                         prompt,
                         status_callback,
                         vad_filter=False,
+                        hotwords=hotwords,
                     )
                     if len("".join(fallback_parts).strip()) > len("".join(parts).strip()):
                         parts = fallback_parts
@@ -228,6 +232,7 @@ class WhisperRunner:
         status_callback: StatusCallback | None,
         *,
         vad_filter: bool | None = None,
+        hotwords: str | None = None,
     ) -> tuple[list[str], int, list[tuple[float, float, str]]]:
         path = str(Path(audio_path).expanduser())
         kwargs = {
@@ -245,6 +250,9 @@ class WhisperRunner:
             # 静音超过该阈值时跳过幻觉输出（whisper 在长静音易生成 "Thank you./Bye."），纯增益无副作用
             "hallucination_silence_threshold": self.hallucination_silence_threshold,
         }
+        # 热词表（人名/专名/领域术语，空格分隔）: whisper 框架内唯一能针对性救错听的杠杆
+        if hotwords and hotwords.strip():
+            kwargs["hotwords"] = hotwords.strip()
         # VAD 调优：仅在显式传参时覆盖 faster-whisper 默认（默认 None 保持原生行为，
         # 实测调小会经 condition_on_previous_text 连锁引入撇号缺失/个别错字）
         _vad_params: dict[str, object] = {}
@@ -274,6 +282,7 @@ class WhisperRunner:
                 "log_prob_threshold",
                 "no_speech_threshold",
                 "word_timestamps",
+                "hotwords",
             ):
                 kwargs.pop(key, None)
             segments_iter, info = self._model.transcribe(path, **kwargs)

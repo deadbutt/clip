@@ -284,28 +284,41 @@ class RegroupSentencesFromWordsTest(unittest.TestCase):
         self.assertEqual(len(segments), 2)
         self.assertGreaterEqual(segments[1].start, segments[0].end)
 
-    def test_overlapping_tiny_words_merge_instead_of_clamp(self):
-        # 两个时长都在 tiny 阈值内的句末短答 → 应被合并成一行而非各自独立
+    def test_overlapping_tiny_sentence_final_words_keep_own_lines(self):
+        # 句末短答（句点结尾）即使短小也互不回吸：regroup 阶段没有说话人信息，
+        # 相邻的句末短答极可能是换人插话，揉进一行会让翻译粘行报废。
         words = [(0.0, 1.0, " hello."), (0.9, 1.5, " world.")]
         segments = regroup_sentences_from_words(words)
 
-        self.assertEqual(len(segments), 1)
-        self.assertLessEqual(segments[0].end, 1.5)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].text, "hello.")
+        self.assertEqual(segments[1].text, "world.")
+        # 时间仍被 clamp 到词的真实区间，不越界
+        self.assertLessEqual(segments[1].start, segments[0].end + 1e-6)
+        self.assertGreaterEqual(segments[1].end, segments[0].end)
+        self.assertLessEqual(segments[1].end, 1.5)
 
-    def test_merges_tiny_sentence_final_fragments(self):
-        # 问句后跟一连串句末短答（Yes./Easily./Very much.），不应各自独占一行
+    def test_overlapping_tiny_comma_tailed_fragments_merge(self):
+        # 半句碎片（逗号尾/无标点尾）仍应向后并入相邻行
+        words = [(0.0, 0.8, " hello,"), (0.8, 1.6, " world."), (2.0, 2.6, " bye.")]
+        segments = regroup_sentences_from_words(words)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].text, "hello, world.")
+        self.assertEqual(segments[1].text, "bye.")
+        self.assertLessEqual(segments[0].end, 1.6)
+
+    def test_keeps_tiny_sentence_final_answers_as_separate_lines(self):
+        # 问句后跟一连串句末短答（Yes./Easily./Very much.）：宁可多出短行，
+        # 也不把疑似换人的对话揉进同一条字幕（反粘行设计）。
         words = self._words([
             " Six", " figures", " plus?", " Yes.", " Easily.", " Very", " much.",
         ])
         segments = regroup_sentences_from_words(words)
-        # 至少把 400ms 量级的 "Yes." / "Easily." 并掉，行数显著少于词数
-        self.assertLess(len(segments), 5)
-        joined = " ".join(s.text for s in segments)
-        self.assertIn("Yes", joined)
-        self.assertIn("Easily", joined)
-        # 不应出现只有 "Yes." 的孤立行
-        for segment in segments:
-            self.assertGreater(len(segment.text), 5)
+
+        texts = [s.text for s in segments]
+        # 每个句末单元独立成行，疑似换人的短答没有被吸进上一行
+        self.assertEqual(texts, ["Six figures plus?", "Yes.", "Easily.", "Very much."])
 
 
 if __name__ == "__main__":

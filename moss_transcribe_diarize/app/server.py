@@ -23,6 +23,12 @@ def _parse_protected_terms(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip() for item in items if str(item).strip())
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "on", "yes")
+
+
 def create_app(
     *,
     model_path: str | Path,
@@ -74,6 +80,9 @@ def create_app(
         diarization_device=diarization_device,
     )
     app.state.manager = manager
+    from .llm_profiles import LlmProfileStore
+
+    app.state.llm_store = LlmProfileStore(Path(runs_dir).parent / "config")
     translator = None
     translator_url = translator_base_url
     if translator_provider == "opus-mt":
@@ -90,9 +99,9 @@ def create_app(
 
         translator = TextTranslator(
             base_url=translator_url,
-            model=translator_model or vllm_model or "local",
-            api_key=translator_api_key or vllm_api_key or "EMPTY",
-            timeout=translator_timeout if translator_timeout is not None else vllm_timeout,
+            model=translator_model or "local",
+            api_key=translator_api_key or "EMPTY",
+            timeout=translator_timeout if translator_timeout is not None else 600.0,
             provider=translator_provider,
             protected_terms=translator_protected_terms or tuple(PROTECTED_TERMS),
         )
@@ -140,6 +149,7 @@ def create_app(
         temperature: float | None = Form(None),
         speaker_count: int | None = Form(None),
         diarization_backend: str | None = Form(None),
+        hotwords: str | None = Form(None),
     ):
         try:
             job, input_path = manager.create_job_for_upload(
@@ -151,6 +161,7 @@ def create_app(
                 temperature=temperature,
                 speaker_count=speaker_count,
                 diarization_backend=diarization_backend,
+                hotwords=hotwords,
             )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -211,6 +222,10 @@ def create_app(
                 temperature=form.get("temperature") if "multipart/form-data" in content_type else payload.get("temperature"),
                 speaker_count=form.get("speaker_count") if "multipart/form-data" in content_type else payload.get("speaker_count"),
                 diarization_backend=form.get("diarization_backend") if "multipart/form-data" in content_type else payload.get("diarization_backend"),
+                force_transcribe=_as_bool(
+                    form.get("force_transcribe") if "multipart/form-data" in content_type else payload.get("force_transcribe")
+                ),
+                hotwords=str(form.get("hotwords") if "multipart/form-data" in content_type else payload.get("hotwords") or ""),
             )
             return job.to_dict()
         except Exception as exc:
@@ -388,6 +403,181 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    # ------------------------------------------------------------ LLM profiles
+
+    @app.get("/api/llm/profiles")
+    def list_llm_profiles():
+        return app.state.llm_store.list_profiles()
+
+    # ------------------------------------------------------------ hotwords glossary
+
+    @app.get("/api/hotwords")
+    def get_hotwords():
+        return {"terms": manager.load_hotwords_glossary()}
+
+    @app.put("/api/hotwords")
+    async def update_hotwords(request: Request):
+        try:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            terms = payload.get("terms")
+            if not isinstance(terms, list):
+                raise ValueError("terms must be a list.")
+            return {"terms": manager.save_hotwords_glossary(terms)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/llm/profiles")
+    async def create_llm_profile(request: Request):
+        try:
+            payload = await request.json()
+            payload = payload if isinstance(payload, dict) else {}
+            if not str(payload.get("name") or "").strip():
+                raise ValueError("Profile name is required.")
+            if not str(payload.get("base_url") or "").strip():
+                raise ValueError("Base URL is required.")
+            return app.state.llm_store.add_profile(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/llm/profiles/{profile_id}")
+    async def update_llm_profile(profile_id: str, request: Request):
+        try:
+            payload = await request.json()
+            payload = payload if isinstance(payload, dict) else {}
+            return app.state.llm_store.update_profile(profile_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/llm/profiles/{profile_id}")
+    def delete_llm_profile(profile_id: str):
+        try:
+            app.state.llm_store.delete_profile(profile_id)
+            return app.state.llm_store.list_profiles()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/llm/profiles/{profile_id}/activate")
+    def activate_llm_profile(profile_id: str):
+        try:
+            return app.state.llm_store.set_active(profile_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/llm/test")
+    async def test_llm_connection(request: Request):
+        from .proofreader import Proofreader
+
+        try:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            profile_id = payload.get("profile_id")
+            if profile_id:
+                data = app.state.llm_store.list_profiles()
+                profile = next(
+                    (p for p in data["profiles"] if str(p.get("id")) == str(profile_id)),
+                    None,
+                )
+                if profile is None:
+                    raise KeyError(f"Profile not found: {profile_id}")
+                api_key = profile.get("api_key") or ""
+                if not api_key:
+                    # masked key means update flow never set a real one: pull from store
+                    active = app.state.llm_store.get_active()
+                    if active and str(active.get("id")) == str(profile_id):
+                        api_key = active.get("api_key") or ""
+            else:
+                profile = app.state.llm_store.get_active()
+                if profile is None:
+                    return JSONResponse(
+                        {"ok": False, "message": "没有可用的 API 配置。请先添加并激活一个配置。"},
+                        status_code=400,
+                    )
+                api_key = profile.get("api_key") or ""
+            proofreader = Proofreader(
+                base_url=str(profile.get("base_url") or ""),
+                model=str(profile.get("model") or ""),
+                api_key=api_key,
+                provider=str(profile.get("provider") or "openai"),
+                disable_thinking=bool(profile.get("disable_thinking")),
+                timeout=60.0,
+            )
+            return await asyncio.to_thread(proofreader.test_connection)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # -------------------------------------------------------------- proofread
+
+    def _active_proofreader():
+        from .proofreader import Proofreader
+
+        profile = app.state.llm_store.get_active()
+        if profile is None:
+            raise RuntimeError("No LLM API profile is active. Configure one in 设置 → AI 服务.")
+        return Proofreader(
+            base_url=str(profile.get("base_url") or ""),
+            model=str(profile.get("model") or ""),
+            api_key=str(profile.get("api_key") or "EMPTY"),
+            provider=str(profile.get("provider") or "openai"),
+            disable_thinking=bool(profile.get("disable_thinking")),
+        )
+
+    @app.post("/api/jobs/{job_id}/proofread")
+    async def run_proofread(job_id: str):
+        try:
+            proofreader = _active_proofreader()
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        try:
+            return await asyncio.to_thread(manager.proofread, job_id, proofreader)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/jobs/{job_id}/proofread")
+    def get_proofread(job_id: str):
+        try:
+            return manager.get_proofread_result(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/proofread/apply")
+    async def apply_proofread(job_id: str, request: Request):
+        try:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            ids = payload.get("ids") or []
+            terms = payload.get("terms") or []
+            if not isinstance(ids, list) or not isinstance(terms, list):
+                raise ValueError("ids and terms must be lists.")
+            return await asyncio.to_thread(manager.apply_proofread, job_id, ids, terms)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=409)
 
@@ -1960,6 +2150,143 @@ INDEX_HTML = """<!doctype html>
       gap: 8px;
       margin-top: 8px;
     }
+    .proofread-section {
+      margin-top: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .proofread-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .proofread-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+    }
+    .proofread-check input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: #008f83;
+    }
+    .proofread-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 260px;
+      overflow: auto;
+    }
+    .proofread-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .proofread-item.unchecked {
+      opacity: 0.55;
+    }
+    .proofread-item-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .proofread-item-head .id {
+      font-weight: 700;
+      color: var(--text);
+    }
+    .proofread-diff {
+      margin-top: 6px;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .proofread-diff .before {
+      color: #b3423a;
+      text-decoration: line-through;
+      text-decoration-color: rgba(179, 66, 58, 0.5);
+    }
+    .proofread-diff .after {
+      color: #0d7a5f;
+      font-weight: 600;
+    }
+    .proofread-reference-item {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-top: 6px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      background: rgba(255, 255, 255, 0.5);
+    }
+    .proofread-reference-item .meta {
+      display: block;
+      margin-bottom: 2px;
+    }
+    .llm-profile-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .llm-profile-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 12px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .llm-profile-item.active {
+      border-color: #008f83;
+      box-shadow: 0 0 0 1px rgba(0, 143, 131, 0.25);
+    }
+    .llm-profile-item-info {
+      min-width: 0;
+      flex: 1;
+    }
+    .llm-profile-item-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .llm-profile-item-name .active-badge {
+      font-size: 11px;
+      font-weight: 700;
+      color: #0d7a5f;
+      background: rgba(0, 143, 131, 0.12);
+      border-radius: 999px;
+      padding: 1px 8px;
+    }
+    .llm-profile-item-meta {
+      margin-top: 2px;
+      font-size: 12px;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .llm-profile-item-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .llm-profile-editor {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 10px;
+      background: rgba(255, 255, 255, 0.55);
+    }
     .clip-card-head {
       display: flex;
       align-items: center;
@@ -2098,6 +2425,12 @@ INDEX_HTML = """<!doctype html>
                 <span class="file-drop-meta">MP4 · MOV · MKV · WAV · MP3 · M4A / 支持多选</span>
                 <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
               </label>
+              <div class="task-params" style="margin-top:10px">
+                <div>
+                  <label>热词（人名/专名/术语，空格或逗号分隔，可显著减少错听）</label>
+                  <textarea id="uploadHotwords" class="prompt-input" rows="2" placeholder="例如: Neuro Vedal bajiru"></textarea>
+                </div>
+              </div>
               <div id="rerunSource" class="meta" style="margin-top:8px"></div>
               <div id="rerunParams" class="task-params" style="display:none">
                 <div>
@@ -2127,6 +2460,10 @@ INDEX_HTML = """<!doctype html>
                 <input id="urlInput" type="text" placeholder="https://..." />
                 <button id="pasteUrlBtn" class="small">粘贴</button>
               </div>
+              <label style="display:flex;align-items:center;gap:6px;margin:6px 2px;font-size:13px;opacity:.85">
+                <input id="forceTranscribe" type="checkbox" />
+                <span title="默认：视频有人工上传的平台字幕（CC）时直接采用，跳过 Whisper 转录；自动生成字幕仍走转录。勾选后忽略人工字幕强制转录">强制 Whisper 转录（忽略人工平台字幕）</span>
+              </label>
               <details class="cookies-settings">
                 <summary>Cookies 设置（会员/受限视频需要）</summary>
                 <div class="cookies-body">
@@ -2152,6 +2489,10 @@ INDEX_HTML = """<!doctype html>
                 <div>
                   <label>推理 Prompt</label>
                   <textarea id="prompt" class="prompt-input" rows="2" placeholder="留空用默认"></textarea>
+                </div>
+                <div>
+                  <label>热词（人名/专名/术语，空格或逗号分隔，可显著减少错听）</label>
+                  <textarea id="hotwordsInput" class="prompt-input" rows="2" placeholder="例如: Neuro Vedal bajiru"></textarea>
                 </div>
                 <div class="params-row">
                   <div>
@@ -2215,6 +2556,7 @@ INDEX_HTML = """<!doctype html>
           <button id="syncSubtitles" class="ghost" type="button">Sync SRT</button>
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
+          <button id="openProofread" class="ghost" type="button">AI 校对</button>
           <button id="openTranslate" class="ghost" type="button">英译中</button>
           <button id="openClips" class="ghost" type="button">精华切片</button>
           <button id="render" class="warn" disabled>检测 FFmpeg...</button>
@@ -2277,6 +2619,43 @@ INDEX_HTML = """<!doctype html>
                 </thead>
                 <tbody id="segments"></tbody>
               </table>
+            </div>
+          </div>
+        </div>
+        <div id="proofreadModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card wide">
+            <div class="settings-modal-head">
+              <strong>AI 校对</strong>
+              <button id="closeProofread" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="proofreadModelStatus" class="meta model-state"></div>
+              <div id="proofreadProgressMeta" class="render-progress-meta is-hidden" style="margin-top:10px"><span>校对进度</span><strong id="proofreadProgressText">0%</strong></div>
+              <div id="proofreadProgress" class="progress is-hidden"><div id="proofreadProgressBar" class="bar"></div></div>
+              <div class="actions" style="margin-top:12px">
+                <button id="proofreadRun" class="primary small" type="button">开始校对</button>
+                <button id="proofreadApply" class="warn small" type="button" disabled>应用选中修改</button>
+                <span id="proofreadSelectionMeta" class="meta"></span>
+              </div>
+              <div id="proofreadStatus" class="export-status"></div>
+              <div id="proofreadTermSection" class="proofread-section is-hidden">
+                <div class="proofread-section-head">
+                  <label class="proofread-check"><input type="checkbox" id="proofreadTermsAll" checked /> <strong>术语修正</strong></label>
+                  <span id="proofreadTermsMeta" class="meta"></span>
+                </div>
+                <div id="proofreadTermsList" class="proofread-list"></div>
+              </div>
+              <div id="proofreadTypoSection" class="proofread-section is-hidden">
+                <div class="proofread-section-head">
+                  <label class="proofread-check"><input type="checkbox" id="proofreadTyposAll" checked /> <strong>错字 / 标点修正</strong></label>
+                  <span id="proofreadTyposMeta" class="meta"></span>
+                </div>
+                <div id="proofreadTyposList" class="proofread-list"></div>
+              </div>
+              <details id="proofreadReferenceSection" class="proofread-section is-hidden">
+                <summary>参考建议（仅人工审核，不自动应用）</summary>
+                <div id="proofreadReferenceList"></div>
+              </details>
             </div>
           </div>
         </div>
@@ -2390,6 +2769,66 @@ INDEX_HTML = """<!doctype html>
                 <div id="taskParams" class="meta task-meta"></div>
               </div>
               <div class="group">
+                <label>AI 服务（校对用 LLM API）</label>
+                <div id="llmProfileList" class="llm-profile-list"></div>
+                <div class="actions" style="margin-top:8px">
+                  <button id="llmProfileAdd" class="ghost small" type="button">新增配置</button>
+                </div>
+                <div id="llmProfileEditor" class="llm-profile-editor is-hidden">
+                  <div class="row">
+                    <div>
+                      <label for="llmProfileName">名称</label>
+                      <input id="llmProfileName" type="text" placeholder="DeepSeek 官方" />
+                    </div>
+                    <div>
+                      <label for="llmProfileProvider">类型</label>
+                      <select id="llmProfileProvider"><option value="openai">OpenAI 兼容</option><option value="ollama">Ollama</option></select>
+                    </div>
+                  </div>
+                  <div class="row" style="margin-top:8px">
+                    <div>
+                      <label for="llmProfileBaseUrl">Base URL</label>
+                      <input id="llmProfileBaseUrl" type="text" placeholder="https://api.deepseek.com/v1" />
+                    </div>
+                    <div>
+                      <label for="llmProfileModel">模型</label>
+                      <input id="llmProfileModel" type="text" placeholder="deepseek-v4-flash" />
+                    </div>
+                  </div>
+                  <div class="row" style="margin-top:8px">
+                    <div>
+                      <label for="llmProfileApiKey">API Key（编辑时留空 = 不修改）</label>
+                      <input id="llmProfileApiKey" type="password" placeholder="sk-..." autocomplete="off" />
+                    </div>
+                    <div>
+                      <label for="llmProfileDisableThinking">关闭思考模式</label>
+                      <select id="llmProfileDisableThinking"><option value="false">否</option><option value="true">是（DeepSeek 推荐）</option></select>
+                    </div>
+                  </div>
+                  <div class="actions" style="margin-top:10px">
+                    <button id="llmProfileSave" class="primary small" type="button">保存</button>
+                    <button id="llmProfileCancel" class="ghost small" type="button">取消</button>
+                    <button id="llmProfileTest" class="ghost small" type="button">测试连通</button>
+                  </div>
+                  <div id="llmProfileTestResult" class="meta" style="margin-top:6px"></div>
+                </div>
+              </div>
+              <div class="group">
+                <label>转录热词词表（所有新任务自动带上）</label>
+                <div id="hotwordsGlossaryView" class="llm-profile-list"></div>
+                <div class="actions" style="margin-top:8px">
+                  <button id="hotwordsGlossaryEdit" class="ghost small" type="button">编辑词表</button>
+                </div>
+                <div id="hotwordsGlossaryEditor" class="llm-profile-editor is-hidden">
+                  <textarea id="hotwordsGlossaryText" class="prompt-input" rows="3" placeholder="每行一个或空格分隔"></textarea>
+                  <div class="meta" style="margin-top:4px">校对时应用的术语会自动加入此词表。</div>
+                  <div class="actions" style="margin-top:8px">
+                    <button id="hotwordsGlossarySave" class="primary small" type="button">保存</button>
+                    <button id="hotwordsGlossaryCancel" class="ghost small" type="button">取消</button>
+                  </div>
+                </div>
+              </div>
+              <div class="group">
                 <label>说话人名称</label>
                 <div id="speakerMap" class="speaker-map"></div>
               </div>
@@ -2466,15 +2905,18 @@ INDEX_HTML = """<!doctype html>
     </section>
   </main>
 <script>
-const RUNNING_STATES = new Set(['queued', 'downloading', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'rendering']);
+const RUNNING_STATES = new Set(['queued', 'downloading', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'proofreading', 'rendering']);
 const EDIT_STATES = new Set(['waiting_review', 'rendering', 'done']);
 const TERMINAL_STATES = new Set(['waiting_review', 'done', 'failed', 'cancelled']);
 const fileInput = document.querySelector('#file');
 const importTitleEl = document.querySelector('#importTitle');
 const rerunSourceEl = document.querySelector('#rerunSource');
 const promptInput = document.querySelector('#prompt');
+const hotwordsInput = document.querySelector('#hotwordsInput');
+const uploadHotwordsInput = document.querySelector('#uploadHotwords');
 const speakerCountInput = document.querySelector('#speakerCount');
 const diarizationBackendSelect = document.querySelector('#diarizationBackend');
+const forceTranscribeInput = document.querySelector('#forceTranscribe');
 const rerunParamsEl = document.querySelector('#rerunParams');
 const rerunPromptInput = document.querySelector('#rerunPrompt');
 const rerunSpeakerCountInput = document.querySelector('#rerunSpeakerCount');
@@ -2601,6 +3043,52 @@ const clipQueueListEl = document.querySelector('#clipQueueList');
 const clipCandidateCountEl = document.querySelector('#clipCandidateCount');
 const clipQueueCountEl = document.querySelector('#clipQueueCount');
 const clipModelStatusEl = document.querySelector('#clipModelStatus');
+const openProofreadBtn = document.querySelector('#openProofread');
+const closeProofreadBtn = document.querySelector('#closeProofread');
+const proofreadModal = document.querySelector('#proofreadModal');
+const proofreadModelStatusEl = document.querySelector('#proofreadModelStatus');
+const proofreadRunBtn = document.querySelector('#proofreadRun');
+const proofreadApplyBtn = document.querySelector('#proofreadApply');
+const proofreadStatusEl = document.querySelector('#proofreadStatus');
+const proofreadSelectionMetaEl = document.querySelector('#proofreadSelectionMeta');
+const proofreadProgressMetaEl = document.querySelector('#proofreadProgressMeta');
+const proofreadProgressTextEl = document.querySelector('#proofreadProgressText');
+const proofreadProgressEl = document.querySelector('#proofreadProgress');
+const proofreadProgressBarEl = document.querySelector('#proofreadProgressBar');
+const proofreadTermSectionEl = document.querySelector('#proofreadTermSection');
+const proofreadTermsAllEl = document.querySelector('#proofreadTermsAll');
+const proofreadTermsMetaEl = document.querySelector('#proofreadTermsMeta');
+const proofreadTermsListEl = document.querySelector('#proofreadTermsList');
+const proofreadTypoSectionEl = document.querySelector('#proofreadTypoSection');
+const proofreadTyposAllEl = document.querySelector('#proofreadTyposAll');
+const proofreadTyposMetaEl = document.querySelector('#proofreadTyposMeta');
+const proofreadTyposListEl = document.querySelector('#proofreadTyposList');
+const proofreadReferenceSectionEl = document.querySelector('#proofreadReferenceSection');
+const proofreadReferenceListEl = document.querySelector('#proofreadReferenceList');
+const llmProfileListEl = document.querySelector('#llmProfileList');
+const llmProfileAddBtn = document.querySelector('#llmProfileAdd');
+const llmProfileEditorEl = document.querySelector('#llmProfileEditor');
+const llmProfileNameInput = document.querySelector('#llmProfileName');
+const llmProfileProviderSelect = document.querySelector('#llmProfileProvider');
+const llmProfileBaseUrlInput = document.querySelector('#llmProfileBaseUrl');
+const llmProfileModelInput = document.querySelector('#llmProfileModel');
+const llmProfileApiKeyInput = document.querySelector('#llmProfileApiKey');
+const llmProfileDisableThinkingSelect = document.querySelector('#llmProfileDisableThinking');
+const llmProfileSaveBtn = document.querySelector('#llmProfileSave');
+const llmProfileCancelBtn = document.querySelector('#llmProfileCancel');
+const llmProfileTestBtn = document.querySelector('#llmProfileTest');
+const llmProfileTestResultEl = document.querySelector('#llmProfileTestResult');
+let llmProfiles = [];
+let llmEditingProfileId = null;
+let proofreadResult = null;
+let proofreadPollTimer = null;
+const hotwordsGlossaryViewEl = document.querySelector('#hotwordsGlossaryView');
+const hotwordsGlossaryEditBtn = document.querySelector('#hotwordsGlossaryEdit');
+const hotwordsGlossaryEditorEl = document.querySelector('#hotwordsGlossaryEditor');
+const hotwordsGlossaryTextEl = document.querySelector('#hotwordsGlossaryText');
+const hotwordsGlossarySaveBtn = document.querySelector('#hotwordsGlossarySave');
+const hotwordsGlossaryCancelBtn = document.querySelector('#hotwordsGlossaryCancel');
+let hotwordsGlossary = [];
 let jobs = [];
 let currentJob = null;
 let rerunDraftJob = null;
@@ -2853,6 +3341,7 @@ uploadBtn.addEventListener('click', async () => {
     const form = new FormData();
     form.append('file', item.file);
     form.append('prompt', item.prompt);
+    if (item.hotwords) form.append('hotwords', item.hotwords);
     if (item.speakerCount) form.append('speaker_count', item.speakerCount);
     form.append('diarization_backend', item.diarizationBackend || 'auto');
     try {
@@ -2889,8 +3378,10 @@ async function submitUrlDownload() {
   form.append('url', url);
   form.append('cookies_browser', cookiesBrowserSelect.value);
   if (promptInput.value) form.append('prompt', promptInput.value);
+  if (hotwordsInput.value.trim()) form.append('hotwords', hotwordsInput.value.trim());
   if (speakerCountInput.value) form.append('speaker_count', speakerCountInput.value);
   form.append('diarization_backend', diarizationBackendSelect.value || 'auto');
+  if (forceTranscribeInput && forceTranscribeInput.checked) form.append('force_transcribe', '1');
   if (cookiesFileInput.files && cookiesFileInput.files[0]) {
     form.append('cookies_file', cookiesFileInput.files[0]);
   }
@@ -2960,10 +3451,60 @@ openNewBtn.addEventListener('click', () => showImportView({ clearDraft: true }))
 backFromProcessingBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
 backToTasksBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
-openSettingsBtn.addEventListener('click', openSettings);
+openSettingsBtn.addEventListener('click', () => { openSettings(); loadLlmProfiles(); loadHotwordsGlossary(); });
 closeSettingsBtn.addEventListener('click', closeSettings);
 openTranslateBtn.addEventListener('click', openTranslate);
 closeTranslateBtn.addEventListener('click', closeTranslate);
+openProofreadBtn.addEventListener('click', openProofreadModal);
+closeProofreadBtn.addEventListener('click', () => { stopProofreadPolling(); proofreadModal.classList.add('is-hidden'); });
+proofreadRunBtn.addEventListener('click', runProofread);
+proofreadApplyBtn.addEventListener('click', applyProofread);
+proofreadTermsAllEl.addEventListener('change', () => toggleProofreadGroup('term'));
+proofreadTyposAllEl.addEventListener('change', () => toggleProofreadGroup('typo'));
+llmProfileAddBtn.addEventListener('click', () => showLlmProfileEditor(null));
+llmProfileSaveBtn.addEventListener('click', saveLlmProfile);
+llmProfileCancelBtn.addEventListener('click', hideLlmProfileEditor);
+llmProfileTestBtn.addEventListener('click', testLlmProfile);
+hotwordsGlossaryEditBtn.addEventListener('click', () => {
+  hotwordsGlossaryTextEl.value = (hotwordsGlossary || []).join(' ');
+  hotwordsGlossaryEditorEl.classList.remove('is-hidden');
+});
+hotwordsGlossaryCancelBtn.addEventListener('click', () => hotwordsGlossaryEditorEl.classList.add('is-hidden'));
+hotwordsGlossarySaveBtn.addEventListener('click', async () => {
+  const terms = hotwordsGlossaryTextEl.value.split(/[\\s,，;；\\n]+/).map((s) => s.trim()).filter(Boolean);
+  try {
+    const res = await fetch(apiUrl('api/hotwords'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ terms })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '保存失败');
+    hotwordsGlossary = data.terms || [];
+    renderHotwordsGlossary();
+    hotwordsGlossaryEditorEl.classList.add('is-hidden');
+  } catch (err) {
+    alert('保存失败：' + (err.message || err));
+  }
+});
+
+async function loadHotwordsGlossary() {
+  try {
+    const res = await fetch(apiUrl('api/hotwords'));
+    if (!res.ok) return;
+    const data = await res.json();
+    hotwordsGlossary = data.terms || [];
+    renderHotwordsGlossary();
+  } catch (err) { /* ignore */ }
+}
+
+function renderHotwordsGlossary() {
+  if (!hotwordsGlossary || !hotwordsGlossary.length) {
+    hotwordsGlossaryViewEl.innerHTML = '<div class="meta">词表为空。可手动添加，或在校对应用术语时自动积累。</div>';
+    return;
+  }
+  hotwordsGlossaryViewEl.innerHTML = `<div class="llm-profile-item"><div class="llm-profile-item-info"><div class="llm-profile-item-meta" style="white-space:normal">${hotwordsGlossary.map(escapeHtml).join(' · ')}</div></div><div class="llm-profile-item-meta">${hotwordsGlossary.length} 个热词</div></div>`;
+}
 openClipsBtn.addEventListener('click', openClips);
 closeClipsBtn.addEventListener('click', closeClips);
 settingsModal.addEventListener('click', (event) => {
@@ -3005,6 +3546,10 @@ function defaultPendingParams() {
 function pendingSummary(item) {
   const parts = [];
   if (item.speakerCount) parts.push('speakers ' + item.speakerCount);
+  if (item.hotwords) {
+    const count = item.hotwords.split(/[\\s,，;；]+/).filter(Boolean).length;
+    if (count) parts.push('热词 ' + count);
+  }
   parts.push(diarizationBackendLabel(item.diarizationBackend || 'auto'));
   return parts.join(' · ');
 }
@@ -3077,7 +3622,7 @@ function updateUploadBtnLabel() {
 
 function addPendingFiles(fileList) {
   for (const file of fileList) {
-    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file }, defaultPendingParams()));
+    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file, hotwords: uploadHotwordsInput.value.trim() }, defaultPendingParams()));
   }
   renderPendingList();
   updateUploadBtnLabel();
@@ -3564,6 +4109,7 @@ function updateEditorChrome(job) {
   else setTaskNotice('', '');
   updateRenderAction(job);
   updateTranslateAction();
+  updateProofreadAction();
   updateClipActions();
   updateRerunAction(job);
   if (syncSubtitlesBtn) syncSubtitlesBtn.disabled = editorDirty || !EDIT_STATES.has(job.status);
@@ -5219,6 +5765,415 @@ async function exportCurrentJobToFolder() {
   }
 }
 
+function activeLlmProfile() {
+  const profiles = (llmProfiles && llmProfiles.profiles) || [];
+  return profiles.find((p) => p.id === llmProfiles.active_id) || null;
+}
+
+function updateProofreadAction() {
+  const busy = currentJob && RUNNING_STATES.has(currentJob.status);
+  const active = activeLlmProfile();
+  proofreadRunBtn.disabled = !currentJob || busy || !active;
+  proofreadRunBtn.textContent = busy && currentJob && currentJob.status === 'proofreading' ? '校对中...' : (active ? '开始校对' : '未配置 AI 服务');
+  openProofreadBtn.disabled = !currentJob;
+  const target = currentJob && currentJob.translation && currentJob.translation.source_available ? '英文源稿（译文不受影响，应用后需重新翻译）' : '当前字幕稿';
+  proofreadModelStatusEl.textContent = active
+    ? `已激活：${active.name} · ${active.model || '默认模型'}。校对目标：${target}。`
+    : '未配置 AI 服务。请到 设置 → AI 服务 添加并激活一个 API 配置。';
+}
+
+function openProofreadModal() {
+  updateProofreadAction();
+  proofreadModal.classList.remove('is-hidden');
+  if (!currentJob) return;
+  const proof = (currentJob && currentJob.proofread) || {};
+  if (proof.result_available && !proofreadResult) {
+    loadProofreadResult();
+  } else if (!proof.read_result && proofreadResult) {
+    renderProofreadResult(proofreadResult);
+  } else {
+    updateProofreadAction();
+  }
+}
+
+async function loadProofreadResult() {
+  if (!currentJob) return;
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/proofread`));
+    if (!res.ok) return;
+    const data = await res.json();
+    proofreadResult = data;
+    renderProofreadResult(data);
+  } catch (err) { /* ignore */ }
+}
+
+function stopProofreadPolling() {
+  if (proofreadPollTimer) {
+    clearInterval(proofreadPollTimer);
+    proofreadPollTimer = null;
+  }
+}
+
+function startProofreadPolling() {
+  stopProofreadPolling();
+  if (!currentJob) return;
+  proofreadPollTimer = setInterval(async () => {
+    if (!currentJob || !proofreadModal || proofreadModal.classList.contains('is-hidden')) {
+      stopProofreadPolling();
+      return;
+    }
+    try {
+      const res = await fetch(apiUrl(`api/jobs/${currentJob.id}`));
+      if (!res.ok) return;
+      const job = await res.json();
+      const proof = job.proofread || {};
+      const percent = Number(proof.percent || 0);
+      proofreadProgressMetaEl.classList.remove('is-hidden');
+      proofreadProgressEl.classList.remove('is-hidden');
+      proofreadProgressTextEl.textContent = `${Math.round(percent)}%`;
+      proofreadProgressBarEl.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+      if (job.status !== 'proofreading') {
+        stopProofreadPolling();
+        proofreadProgressTextEl.textContent = '100%';
+        proofreadProgressBarEl.style.width = '100%';
+      }
+    } catch (err) { /* ignore */ }
+  }, 2000);
+}
+
+async function runProofread() {
+  if (!currentJob) return;
+  const active = activeLlmProfile();
+  if (!active) {
+    proofreadStatusEl.textContent = '未配置 AI 服务。请到 设置 → AI 服务 添加并激活一个 API 配置。';
+    return;
+  }
+  const saved = await saveSegments();
+  if (!saved) return;
+  proofreadRunBtn.disabled = true;
+  proofreadStatusEl.textContent = '校对中...（错字修正 + 全片术语分析）';
+  proofreadProgressMetaEl.classList.remove('is-hidden');
+  proofreadProgressEl.classList.remove('is-hidden');
+  proofreadProgressTextEl.textContent = '0%';
+  proofreadProgressBarEl.style.width = '2%';
+  currentJob = { ...currentJob, status: 'proofreading' };
+  jobs = jobs.map((job) => job.id === currentJob.id ? currentJob : job);
+  renderCurrentJob(currentJob, { skipSegments: true });
+  ensurePolling();
+  startProofreadPolling();
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/proofread`), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '校对失败');
+    stopProofreadPolling();
+    proofreadProgressTextEl.textContent = '100%';
+    proofreadProgressBarEl.style.width = '100%';
+    proofreadResult = data;
+    renderProofreadResult(data);
+    await refreshJobs({ keepSelection: true, skipSegments: true });
+  } catch (err) {
+    stopProofreadPolling();
+    proofreadStatusEl.textContent = '校对失败：' + (err.message || err);
+  } finally {
+    updateProofreadAction();
+  }
+}
+
+function renderProofreadResult(data) {
+  if (!data) return;
+  const suggestions = data.suggestions || [];
+  const terms = data.term_corrections || [];
+  const reference = data.reference || {};
+  const merges = reference.merge_suggestions || [];
+  const speakerQuestions = reference.speaker_questions || [];
+  const applied = !!data.applied;
+
+  proofreadStatusEl.textContent = applied
+    ? '以下为最近一次校对结果（已应用过一次，可重新勾选应用其余项）。'
+    : `校对完成，耗时 ${data.elapsed_sec || 0}s：${suggestions.length} 处错字修正、${terms.length} 条术语、参考建议 ${merges.length + speakerQuestions.length} 条。`;
+
+  // ---- terms
+  proofreadTermSectionEl.classList.toggle('is-hidden', !terms.length);
+  proofreadTermsMetaEl.textContent = terms.length ? `${terms.length} 条，共命中 ${terms.reduce((sum, t) => sum + Number(t.hits || 0), 0)} 处` : '';
+  proofreadTermsListEl.innerHTML = terms.map((t, i) => `
+    <div class="proofread-item" data-term-index="${i}">
+      <div class="proofread-item-head">
+        <label class="proofread-check"><input type="checkbox" data-term-check="${i}" ${applied ? '' : 'checked'} /> <span class="id">${escapeHtml(t.wrong || '')}</span> → <span class="id">${escapeHtml(t.right || '')}</span></label>
+        <span>命中 ${Number(t.hits || 0)} 处</span>
+      </div>
+      ${(t.previews || []).slice(0, 2).map((p) => `
+        <div class="proofread-diff"><span class="before">${escapeHtml(p.original || '')}</span><br />→ <span class="after">${escapeHtml(p.corrected || '')}</span></div>`).join('')}
+    </div>`).join('');
+
+  // ---- typos
+  proofreadTypoSectionEl.classList.toggle('is-hidden', !suggestions.length);
+  proofreadTyposMetaEl.textContent = suggestions.length ? `${suggestions.length} 处` : '';
+  proofreadTyposListEl.innerHTML = suggestions.map((s, i) => `
+    <div class="proofread-item" data-typo-index="${i}">
+      <div class="proofread-item-head">
+        <label class="proofread-check"><input type="checkbox" data-typo-check="${i}" ${applied ? '' : 'checked'} /> <span class="id">${escapeHtml(s.id || '')}</span></label>
+        <span>${s.type === 'typo' ? '错字/标点' : s.type}</span>
+      </div>
+      <div class="proofread-diff"><span class="before">${escapeHtml(s.original || '')}</span><br />→ <span class="after">${escapeHtml(s.corrected || '')}</span></div>
+    </div>`).join('');
+
+  // ---- reference (read-only)
+  const referenceItems = [
+    ...merges.map((m) => ({ kind: '合并建议', id: m.id, text: `${m.id} 与下一段疑似同一句被拆开${m.reason ? '：' + m.reason : ''}` })),
+    ...speakerQuestions.map((q) => ({ kind: '说话人质疑', id: q.id, text: `${q.id} 当前 ${q.current}，疑似应为 ${q.suspect}${q.reason ? '：' + q.reason : ''}` })),
+  ];
+  proofreadReferenceSectionEl.classList.toggle('is-hidden', !referenceItems.length);
+  proofreadReferenceListEl.innerHTML = referenceItems.map((item) => `
+    <div class="proofread-reference-item">
+      <span class="meta">${escapeHtml(item.kind)} · ${escapeHtml(item.id || '')}</span>
+      ${escapeHtml(item.text || '')}
+    </div>`).join('');
+
+  if (!terms.length && !suggestions.length && !referenceItems.length) {
+    proofreadStatusEl.textContent = '校对完成：没有发现需要修改的地方。';
+  }
+  updateProofreadSelection();
+}
+
+function toggleProofreadGroup(group) {
+  const master = group === 'term' ? proofreadTermsAllEl : proofreadTyposAllEl;
+  const selector = group === 'term' ? '[data-term-check]' : '[data-typo-check]';
+  document.querySelectorAll(selector).forEach((box) => { box.checked = master.checked; });
+  document.querySelectorAll(group === 'term' ? '[data-term-index]' : '[data-typo-index]').forEach((item) => {
+    item.classList.toggle('unchecked', !master.checked);
+  });
+  updateProofreadSelection();
+}
+
+function updateProofreadSelection() {
+  const typoBoxes = Array.from(document.querySelectorAll('[data-typo-check]'));
+  const termBoxes = Array.from(document.querySelectorAll('[data-term-check]'));
+  const typoCount = typoBoxes.filter((b) => b.checked).length;
+  const termCount = termBoxes.filter((b) => b.checked).length;
+  const total = typoCount + termCount;
+  proofreadSelectionMetaEl.textContent = total ? `已选 ${typoCount} 处修正 + ${termCount} 条术语` : '未选择任何修改';
+  proofreadApplyBtn.disabled = !currentJob || total === 0;
+}
+
+[proofreadTermsListEl, proofreadTyposListEl].forEach((listEl) => {
+  listEl.addEventListener('change', (event) => {
+    const box = event.target;
+    if (!box || box.type !== 'checkbox') return;
+    const item = box.closest('.proofread-item');
+    if (item) item.classList.toggle('unchecked', !box.checked);
+    updateProofreadSelection();
+  });
+});
+
+async function applyProofread() {
+  if (!currentJob || !proofreadResult) return;
+  const ids = Array.from(document.querySelectorAll('[data-typo-check]'))
+    .filter((b) => b.checked)
+    .map((b) => proofreadResult.suggestions[Number(b.dataset.typoCheck)].id);
+  const terms = Array.from(document.querySelectorAll('[data-term-check]'))
+    .filter((b) => b.checked)
+    .map((b) => {
+      const t = proofreadResult.term_corrections[Number(b.dataset.termCheck)];
+      return { wrong: t.wrong, right: t.right };
+    });
+  if (!ids.length && !terms.length) return;
+  proofreadApplyBtn.disabled = true;
+  proofreadStatusEl.textContent = '正在应用修改...';
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/proofread/apply`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, terms })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '应用失败');
+    if (Array.isArray(data.segments) && data.segments.length) {
+      renderSegments(data.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
+      setEditorDirty(false);
+    }
+    let message = `已应用 ${data.applied_count || 0} 处修正`;
+    if (data.term_hits) message += `、术语替换 ${data.term_hits} 处`;
+    message += '。';
+    if (data.needs_retranslate) message += '本次修改写入了英文源稿，请重新翻译以同步译文。';
+    proofreadStatusEl.textContent = message;
+    proofreadResult = { ...proofreadResult, applied: true };
+    await refreshJobs({ keepSelection: true, skipSegments: false });
+  } catch (err) {
+    proofreadStatusEl.textContent = '应用失败：' + (err.message || err);
+  } finally {
+    updateProofreadSelection();
+    updateProofreadAction();
+  }
+}
+
+// ------------------------------------------------------------ LLM profiles
+
+async function loadLlmProfiles() {
+  try {
+    const res = await fetch(apiUrl('api/llm/profiles'));
+    if (!res.ok) return;
+    const data = await res.json();
+    llmProfiles = data || { active_id: null, profiles: [] };
+    renderLlmProfiles();
+    updateProofreadAction();
+  } catch (err) { /* ignore */ }
+}
+
+function renderLlmProfiles() {
+  const profiles = (llmProfiles && llmProfiles.profiles) || [];
+  const activeId = llmProfiles && llmProfiles.active_id;
+  if (!profiles.length) {
+    llmProfileListEl.innerHTML = '<div class="meta">还没有 API 配置。点击"新增配置"添加一个。</div>';
+    return;
+  }
+  llmProfileListEl.innerHTML = profiles.map((p) => `
+    <div class="llm-profile-item ${p.id === activeId ? 'active' : ''}" data-profile-id="${escapeHtml(p.id)}">
+      <div class="llm-profile-item-info">
+        <div class="llm-profile-item-name">
+          <span>${escapeHtml(p.name || '未命名')}</span>
+          ${p.id === activeId ? '<span class="active-badge">使用中</span>' : ''}
+        </div>
+        <div class="llm-profile-item-meta">${escapeHtml(p.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容')} · ${escapeHtml(p.model || '默认模型')} · ${escapeHtml(p.base_url || '')} · ${escapeHtml(p.api_key_masked || '无 Key')}</div>
+      </div>
+      <div class="llm-profile-item-actions">
+        ${p.id === activeId ? '' : `<button class="ghost small" type="button" data-llm-action="activate">启用</button>`}
+        <button class="ghost small" type="button" data-llm-action="edit">编辑</button>
+        <button class="ghost small" type="button" data-llm-action="delete">删除</button>
+      </div>
+    </div>`).join('');
+}
+
+function showLlmProfileEditor(profile) {
+  llmEditingProfileId = profile ? profile.id : null;
+  llmProfileNameInput.value = profile ? profile.name : '';
+  llmProfileProviderSelect.value = profile ? (profile.provider || 'openai') : 'openai';
+  llmProfileBaseUrlInput.value = profile ? profile.base_url : '';
+  llmProfileModelInput.value = profile ? (profile.model || '') : '';
+  llmProfileApiKeyInput.value = '';
+  llmProfileApiKeyInput.placeholder = profile && profile.api_key_masked ? `当前 ${profile.api_key_masked}，留空不修改` : 'sk-...';
+  llmProfileDisableThinkingSelect.value = profile && profile.disable_thinking ? 'true' : 'false';
+  llmProfileTestResultEl.textContent = '';
+  llmProfileEditorEl.classList.remove('is-hidden');
+}
+
+function hideLlmProfileEditor() {
+  llmEditingProfileId = null;
+  llmProfileEditorEl.classList.add('is-hidden');
+}
+
+async function saveLlmProfile() {
+  const name = llmProfileNameInput.value.trim();
+  const baseUrl = llmProfileBaseUrlInput.value.trim();
+  if (!name) { llmProfileTestResultEl.textContent = '请填写名称。'; return; }
+  if (!baseUrl) { llmProfileTestResultEl.textContent = '请填写 Base URL。'; return; }
+  const payload = {
+    name,
+    base_url: baseUrl,
+    model: llmProfileModelInput.value.trim(),
+    provider: llmProfileProviderSelect.value,
+    api_key: llmProfileApiKeyInput.value.trim(),
+    disable_thinking: llmProfileDisableThinkingSelect.value === 'true',
+  };
+  try {
+    const res = await fetch(llmEditingProfileId
+      ? apiUrl(`api/llm/profiles/${llmEditingProfileId}`)
+      : apiUrl('api/llm/profiles'), {
+      method: llmEditingProfileId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '保存失败');
+    llmProfiles = data && data.profiles ? data : llmProfiles;
+    hideLlmProfileEditor();
+    await loadLlmProfiles();
+    llmProfileTestResultEl.textContent = '';
+  } catch (err) {
+    llmProfileTestResultEl.textContent = '保存失败：' + (err.message || err);
+  }
+}
+
+llmProfileListEl.addEventListener('click', async (event) => {
+  const btn = event.target.closest('button[data-llm-action]');
+  if (!btn) return;
+  const item = btn.closest('[data-profile-id]');
+  const profileId = item ? item.dataset.profileId : null;
+  if (!profileId) return;
+  const action = btn.dataset.llmAction;
+  try {
+    if (action === 'activate') {
+      const res = await fetch(apiUrl(`api/llm/profiles/${profileId}/activate`), { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '切换失败');
+      llmProfiles = data;
+      renderLlmProfiles();
+      updateProofreadAction();
+    } else if (action === 'edit') {
+      const profile = (llmProfiles.profiles || []).find((p) => p.id === profileId);
+      if (profile) showLlmProfileEditor(profile);
+    } else if (action === 'delete') {
+      if (!window.confirm('确定删除这个 API 配置？')) return;
+      const res = await fetch(apiUrl(`api/llm/profiles/${profileId}`), { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '删除失败');
+      llmProfiles = data;
+      renderLlmProfiles();
+      updateProofreadAction();
+    }
+  } catch (err) {
+    llmProfileTestResultEl.textContent = (err.message || err);
+  }
+});
+
+async function testLlmProfile() {
+  llmProfileTestResultEl.textContent = '测试中...';
+  const baseUrl = llmProfileBaseUrlInput.value.trim();
+  if (!baseUrl) { llmProfileTestResultEl.textContent = '请先填写 Base URL。'; return; }
+  const payload = {
+    name: llmProfileNameInput.value.trim() || '未命名',
+    base_url: baseUrl,
+    model: llmProfileModelInput.value.trim(),
+    provider: llmProfileProviderSelect.value,
+    api_key: llmProfileApiKeyInput.value.trim(),
+    disable_thinking: llmProfileDisableThinkingSelect.value === 'true',
+  };
+  try {
+    // 临时保存后测试（编辑态的 key 可能来自存储）
+    let profileId = llmEditingProfileId;
+    if (!profileId) {
+      const res = await fetch(apiUrl('api/llm/profiles'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '保存失败');
+      profileId = data.id;
+      await loadLlmProfiles();
+      hideLlmProfileEditor();
+    } else {
+      const res = await fetch(apiUrl(`api/llm/profiles/${profileId}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '保存失败');
+      await loadLlmProfiles();
+    }
+    const res = await fetch(apiUrl('api/llm/test'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '测试失败');
+    llmProfileTestResultEl.textContent = data.message || (data.ok ? '连接成功' : '连接失败');
+  } catch (err) {
+    llmProfileTestResultEl.textContent = '测试失败：' + (err.message || err);
+  }
+}
+
 async function translateCurrentSubtitles() {
   if (!currentJob || !translatorAvailable) {
     translateStatusEl.textContent = '翻译服务未启动。请用 start_ollama.bat 或 start_vllm.bat 启动。';
@@ -5730,6 +6685,11 @@ async function renderQueuedClips() {
 
 function jobSummary(job) {
   const inference = job.inference || {};
+  if (job.transcript_source && String(job.transcript_source).indexOf('captions:') === 0) {
+    const parts = String(job.transcript_source).split(':');
+    const kind = parts[1] === 'auto' ? '自动' : '人工';
+    return '平台字幕（' + kind + (parts[2] ? ' ' + parts[2] : '') + '）· 已跳过转录';
+  }
   if (job.status === 'translating') return translationProgressSummary(job);
   if (isWhisperJob(job)) return tokenUsageSummary(job);
   const temp = inference.temperature ? (' · temp ' + inference.temperature) : '';
@@ -5738,9 +6698,10 @@ function jobSummary(job) {
 
 function parameterSummary(job) {
   const inference = job.inference || {};
-  if (isWhisperJob(job)) return 'Whisper backend' + speakerLabelSummary(job);
+  const hotwords = job.hotwords ? (' · 热词 ' + job.hotwords.split(/[\\s,，;；]+/).filter(Boolean).length) : '';
+  if (isWhisperJob(job)) return 'Whisper backend' + speakerLabelSummary(job) + hotwords;
   const temp = inference.temperature ? (' · temp ' + inference.temperature) : '';
-  return 'max_len ' + inference.max_length + ' · ' + inference.decoding + temp;
+  return 'max_len ' + inference.max_length + ' · ' + inference.decoding + temp + hotwords;
 }
 
 function tokenUsageSummary(job) {
@@ -5805,6 +6766,7 @@ function statusLabel(status) {
     postprocessing: '处理中',
     labeling_speakers: '标记说话人',
     translating: '翻译中',
+    proofreading: 'AI 校对中',
     waiting_review: '待校对',
     rendering: '烧录中',
     done: '已完成',
@@ -5825,6 +6787,8 @@ function escapeHtml(value) {
 
 refreshRuntime();
 refreshJobs();
+loadLlmProfiles();
+loadHotwordsGlossary();
 </script>
 </body>
 </html>

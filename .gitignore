@@ -21,3 +21,10 @@ models/
 *.pth
 *.onnx
 *.log
+
+# Tooling workspace and transient eval artifacts.
+.zcode/tmp/
+node_modules/
+
+# Runtime config (LLM profiles contain API keys).
+config/

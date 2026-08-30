@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
@@ -289,3 +290,45 @@ def _display_text(
 
 def _ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "(").replace("}", ")").replace("\n", "\\N")
+
+
+_CAPTION_TAG_RE = re.compile(r"<[^>]+>")
+_CAPTION_MUSIC_RE = re.compile(r"^\s*[♪♫]+[\s♪♫]*$")
+_CAPTION_ADJACENT_GAP = 0.6
+
+
+def clean_source_captions(segments: list[SubtitleSegment]) -> list[SubtitleSegment]:
+    """清洗平台字幕（YouTube auto-CC 转出的 SRT 等）。
+
+    处理三类问题：内嵌标签/HTML 实体；滚动字幕产生的重复或前缀补全
+    cue（与上一条时间重叠/紧邻且文本相同或互为前缀 → 合并）；纯音乐
+    占位行（♪♪）。时间上分离的重复内容（副歌歌词）不会被误合并。
+    """
+    cleaned: list[SubtitleSegment] = []
+    for seg in segments:
+        text = _CAPTION_TAG_RE.sub("", seg.text)
+        text = html.unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or _CAPTION_MUSIC_RE.match(text):
+            continue
+        if cleaned:
+            prev = cleaned[-1]
+            adjacent = seg.start <= prev.end + _CAPTION_ADJACENT_GAP
+            low_new, low_prev = text.casefold(), prev.text.casefold()
+            if adjacent and (low_new == low_prev or low_new.startswith(low_prev) or low_prev.startswith(low_new)):
+                if len(text) >= len(prev.text):
+                    prev.text = text
+                prev.end = max(prev.end, seg.end)
+                continue
+        cleaned.append(
+            SubtitleSegment(
+                id=seg.id,
+                start=seg.start,
+                end=max(seg.start, seg.end),
+                speaker=seg.speaker,
+                text=text,
+            )
+        )
+    for index, seg in enumerate(cleaned, start=1):
+        seg.id = f"seg_{index:04d}"
+    return cleaned

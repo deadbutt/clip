@@ -26,15 +26,27 @@ class SubtitleExportTest(unittest.TestCase):
 
         self.assertIn("Alice: hello", text)
 
-    def test_export_ass(self):
+    def test_export_ass_defaults_to_single_style(self):
         text = export_ass(
             [SubtitleSegment("seg_0001", 0.5, 2.0, "S01", "hello")],
-            style=SubtitleStyle(font_size=42, show_speaker=False),
+            style=SubtitleStyle(font_size=42),
             video_width=1280,
             video_height=720,
         )
 
         self.assertIn("PlayResX: 1280", text)
+        self.assertNotIn("Speaker_S01", text)
+        self.assertIn("Dialogue: 0,0:00:00.50,0:00:02.00,Default", text)
+        self.assertIn("hello", text)
+
+    def test_export_ass_with_speaker_colors(self):
+        text = export_ass(
+            [SubtitleSegment("seg_0001", 0.5, 2.0, "S01", "hello")],
+            style=SubtitleStyle(font_size=42, show_speaker=False, speaker_colors=True),
+            video_width=1280,
+            video_height=720,
+        )
+
         self.assertIn("Style: Speaker_S01,Noto Sans CJK SC,42", text)
         self.assertIn("Dialogue: 0,0:00:00.50,0:00:02.00,Speaker_S01", text)
         self.assertIn("hello", text)
@@ -42,7 +54,7 @@ class SubtitleExportTest(unittest.TestCase):
     def test_export_ass_with_speaker_names(self):
         text = export_ass(
             [SubtitleSegment("seg_0001", 0.5, 2.0, "S01", "hello")],
-            style=SubtitleStyle(font_size=42, speaker_names={"S01": "Alice"}),
+            style=SubtitleStyle(font_size=42, show_speaker=True, speaker_names={"S01": "Alice"}),
             video_width=1280,
             video_height=720,
         )

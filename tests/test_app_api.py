@@ -136,7 +136,9 @@ class AppApiTest(unittest.TestCase):
             segments[0]["text"] = "edited"
             updated = client.put(
                 f"/api/jobs/{job_id}/segments",
-                json={"segments": segments, "style": {"speaker_names": {"S01": "Alice"}}},
+                # 前端保存样式时总是提交完整 style；show_speaker 默认关闭，
+                # 显式打开才会在 SRT 里输出说话人前缀。
+                json={"segments": segments, "style": {"show_speaker": True, "speaker_names": {"S01": "Alice"}}},
             )
             self.assertEqual(updated.status_code, 200)
             self.assertEqual(updated.json()["segments"][0]["text"], "edited")

@@ -4,7 +4,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -35,6 +35,32 @@ _TITLE_PRINT_PREFIX = "mtd_title:"
 class DownloadResult:
     path: Path
     title: str | None = None
+    # 下载到的源字幕文件：{"lang": "en", "path": "...", "kind": "manual"|"auto"}
+    subtitles: list[dict[str, str]] = field(default_factory=list)
+
+
+# 平台字幕抓取范围：匹配不到就一个文件都没有，宁可多列几种。
+# auto 原生轨在 YouTube 上会带 -orig 后缀（如 en-orig）。
+_SUB_LANGS = "en.*,zh.*,ja.*,ko.*"
+_SUB_LANG_PRIORITY = ("zh-Hans", "zh-Hant", "zh", "en", "ja", "ko")
+# 源语-目标语双语种码 = 机翻轨（en-zh-Hans）；en-orig/en-US 不匹配。
+_TRANSLATED_LANG_RE = re.compile(r"^[a-z]{2,3}-[a-z]{2,3}(?:[-.].*)?$")
+
+
+def pick_best_subtitle(subtitles: list[dict[str, str]]) -> dict[str, str] | None:
+    """优先人工字幕；同类里按常见语种顺序挑（字幕语言应贴近音频语言）。"""
+    if not subtitles:
+        return None
+
+    def rank(entry: dict[str, str]) -> tuple[int, int]:
+        kind_rank = 0 if entry.get("kind") == "manual" else 1
+        lang = entry.get("lang", "")
+        for i, prefix in enumerate(_SUB_LANG_PRIORITY):
+            if lang == prefix or lang.startswith(prefix):
+                return (kind_rank, i)
+        return (kind_rank, len(_SUB_LANG_PRIORITY))
+
+    return sorted(subtitles, key=rank)[0]
 
 
 def find_yt_dlp() -> Path:
@@ -208,8 +234,12 @@ def download_with_yt_dlp(
         output_template,
         "--no-write-info-json",
         "--no-write-thumbnail",
-        "--no-write-subs",
-        "--no-write-auto-subs",
+        # 只抓人工上传的平台字幕（CC）；auto-CC 质量通常不如 whisper，不走它。
+        "--write-subs",
+        "--sub-langs",
+        _SUB_LANGS,
+        "--convert-subs",
+        "srt",
         # --print 默认等价于 --simulate 且隐式激活 quiet（关闭全部进度输出），
         # 必须显式 --no-simulate 恢复真实下载、显式 --progress 恢复进度行。
         "--no-simulate",
@@ -328,7 +358,23 @@ def download_with_yt_dlp(
     if downloaded_file.suffix.lower() != ".mkv":
         downloaded_file = _remux_to_mkv(downloaded_file)
 
-    return DownloadResult(path=downloaded_file, title=video_title)
+    subtitles = _collect_subtitle_files(out_dir)
+    return DownloadResult(path=downloaded_file, title=video_title, subtitles=subtitles)
+
+
+def _collect_subtitle_files(out_dir: Path) -> list[dict[str, str]]:
+    """扫描 `input.<lang>.srt`，标记 manual（无 -orig/-auto 后缀）或 auto。"""
+    entries: list[dict[str, str]] = []
+    for srt in sorted(out_dir.glob("input.*.srt")):
+        lang = srt.stem[len("input."):]
+        if not lang:
+            continue
+        # YouTube 的机翻轨形如 en-zh-Hans（源语-目标语）；排除，避免误当文稿。
+        if _TRANSLATED_LANG_RE.match(lang):
+            continue
+        kind = "auto" if ("-orig" in lang or "-auto" in lang) else "manual"
+        entries.append({"lang": lang, "path": str(srt), "kind": kind})
+    return entries
 
 
 def _remux_to_mkv(src: Path) -> Path:

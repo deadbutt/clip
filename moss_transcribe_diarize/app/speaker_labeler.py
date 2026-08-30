@@ -172,19 +172,7 @@ def _label_speakers_pyannote(
     words: list[tuple[float, float, str]] | None = None,
     audio_path: str | Path | None = None,
 ) -> tuple[list[SubtitleSegment], SpeakerLabelingInfo]:
-    try:
-        import speechbrain  # noqa: F401 先行导入以便打桩生效
-
-        _stub_speechbrain_k2()
-        _ensure_numpy_compat()
-        _patch_hub_use_auth_token()
-        _patch_torch_load_trusted()
-        from pyannote.audio import Pipeline  # noqa: F401  确认依赖可用
-
-        _patch_get_plda_optional()
-    except ImportError as exc:
-        raise RuntimeError("pyannote.audio is not installed. Install the diarization extra first.") from exc
-
+    # 依赖可用性与第三方兼容层统一在 _load_pipeline 咽喉处处理。
     if audio_path is not None:
         # 调用方预备好的音频（如 demucs 人声），直接使用，不负责清理。
         audio_file = Path(audio_path)
@@ -396,9 +384,21 @@ HUB_LOCAL_MANIFEST = Path(__file__).resolve().parents[2] / "models" / "pyannote-
 
 
 def _load_pipeline(model_name: str, token: str | None):
-    """加载顺序：hf_hub_download 本地劫持(清单存在时) > HF 仓库(token 兼容新旧参数名)。"""
+    """加载顺序：hf_hub_download 本地劫持(清单存在时) > HF 仓库(token 兼容新旧参数名)。
+
+    全部第三方兼容层（numpy/speechbrain 懒加载/hub 参数/torch 权重加载/PLDA 可选化）
+    统一在此咽喉应用，保证任何调用路径行为一致。
+    """
     try:
+        import speechbrain  # noqa: F401 先行导入以便打桩生效
+
+        _stub_speechbrain_k2()
+        _ensure_numpy_compat()
+        _patch_hub_use_auth_token()
+        _patch_torch_load_trusted()
         from pyannote.audio import Pipeline
+
+        _patch_get_plda_optional()
     except ImportError as exc:
         raise RuntimeError("pyannote.audio is not installed. Install the diarization extra first.") from exc
 
