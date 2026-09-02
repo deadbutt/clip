@@ -2,7 +2,11 @@ import unittest
 
 import numpy as np
 
-from moss_transcribe_diarize.app.speaker_labeler import _apply_cluster_labels, _assign_turns_to_segments, _cluster_features
+from moss_transcribe_diarize.app.speaker_labeler import (
+    _apply_cluster_labels,
+    _assign_turns_to_segments,
+    _cluster_features,
+)
 from moss_transcribe_diarize.subtitle import SubtitleSegment
 
 

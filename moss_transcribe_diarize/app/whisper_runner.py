@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-import threading
-import time
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
 
 from .ffmpeg import detect_ffmpeg
+
+if TYPE_CHECKING:
+    import numpy as np
 
 StatusCallback = Callable[[str, float | None, int | None], None]
 

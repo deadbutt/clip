@@ -3,10 +3,12 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from moss_transcribe_diarize.transcript_parser import TranscriptSegment, parse_transcript
+from moss_transcribe_diarize.transcript_parser import (
+    TranscriptSegment,
+    parse_transcript,
+)
 
 from .models import SubtitleItem, SubtitleSegment
-
 
 DEFAULT_MIN_DURATION = 1.0
 DEFAULT_MAX_DURATION = 6.0

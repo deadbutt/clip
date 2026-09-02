@@ -146,7 +146,7 @@ mtd-subtitle --help
 │   │   └── llm_profiles.py      # LLM 配置存储
 │   ├── subtitle/                # 数据模型、SRT/ASS/文本导出、后处理
 │   └── transcript_parser.py     # whisper 原始输出解析
-├── tests/                       # pytest 测试（126 个）
+├── tests/                       # pytest 测试（142 个）
 ├── config/                      # 运行时配置（不入库）
 ├── models/                      # 本地模型（不入库）
 ├── tools/                       # ffmpeg / yt-dlp 可执行（不入库）

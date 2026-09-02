@@ -8,7 +8,6 @@ from typing import Iterable
 
 from .models import SubtitleSegment, SubtitleStyle
 
-
 SPEAKER_COLORS = [
     "&H00FFFFFF",
     "&H005BE7FF",

@@ -295,7 +295,6 @@ def download_with_yt_dlp(
         ) from e
 
     downloaded_file: Path | None = None
-    last_progress: dict[str, Any] = {}
     error_lines: list[str] = []
     video_title: str | None = None
 
@@ -338,7 +337,6 @@ def download_with_yt_dlp(
         if line.startswith("[download]") and "%" in line:
             info = _parse_progress_line(line)
             if info:
-                last_progress = info
                 ratio = max(0.0, min(1.0, info["percent"] / 100.0))
                 if progress_callback:
                     progress_callback(ratio, info)

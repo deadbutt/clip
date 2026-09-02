@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from moss_transcribe_diarize.app.ffmpeg import FFmpegAvailability, detect_ffmpeg, probe_video_size
+from moss_transcribe_diarize.app.ffmpeg import (
+    FFmpegAvailability,
+    detect_ffmpeg,
+    probe_video_size,
+)
 
 
 class FFmpegTest(unittest.TestCase):

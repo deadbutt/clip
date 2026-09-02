@@ -1,10 +1,13 @@
+import os
 import sys
 import types
-import os
 import unittest
 from unittest.mock import patch
 
-from moss_transcribe_diarize.app.whisper_runner import WhisperRunner, _RepeatedPhraseGuard
+from moss_transcribe_diarize.app.whisper_runner import (
+    WhisperRunner,
+    _RepeatedPhraseGuard,
+)
 
 
 class FakeWord:

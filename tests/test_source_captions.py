@@ -4,9 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from moss_transcribe_diarize.app.downloader import _collect_subtitle_files, pick_best_subtitle
+from moss_transcribe_diarize.app.downloader import (
+    _collect_subtitle_files,
+    pick_best_subtitle,
+)
 from moss_transcribe_diarize.app.jobs import JobManager, JobRecord
-from moss_transcribe_diarize.subtitle import SubtitleSegment, clean_source_captions, parse_srt
+from moss_transcribe_diarize.subtitle import (
+    SubtitleSegment,
+    clean_source_captions,
+)
 
 
 def seg(start: float, end: float, text: str, index: int = 1) -> SubtitleSegment:
@@ -15,7 +21,6 @@ def seg(start: float, end: float, text: str, index: int = 1) -> SubtitleSegment:
 
 class CollectSubtitleFilesTest(unittest.TestCase):
     def test_skips_machine_translated_tracks(self):
-        import os
 
         with tempfile.TemporaryDirectory() as tmp:
             for name in ("input.en.srt", "input.en-orig.srt", "input.en-US.srt", "input.en-zh-Hans.srt", "input.zh-Hans.srt"):

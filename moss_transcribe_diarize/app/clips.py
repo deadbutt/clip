@@ -6,7 +6,6 @@ from typing import Iterable
 
 from moss_transcribe_diarize.subtitle import SubtitleSegment
 
-
 HOOK_PATTERNS = [
     "why",
     "how",

@@ -1,6 +1,9 @@
 import unittest
 
-from moss_transcribe_diarize.app.clips import generate_clip_candidates, rebase_segments_for_clip
+from moss_transcribe_diarize.app.clips import (
+    generate_clip_candidates,
+    rebase_segments_for_clip,
+)
 from moss_transcribe_diarize.subtitle import SubtitleSegment
 
 

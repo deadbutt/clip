@@ -13,9 +13,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from moss_transcribe_diarize.app.llm_profiles import LlmProfileStore
-from moss_transcribe_diarize.app.speaker_labeler import _merge_turn_clusters
 from moss_transcribe_diarize.app.proofreader import Proofreader
-from moss_transcribe_diarize.app.text_translator import _RetryableTranslationError, TextTranslator
+from moss_transcribe_diarize.app.speaker_labeler import _merge_turn_clusters
+from moss_transcribe_diarize.app.text_translator import (
+    TextTranslator,
+    _RetryableTranslationError,
+)
 from moss_transcribe_diarize.app.whisper_runner import _shift_part_times
 from moss_transcribe_diarize.subtitle import SubtitleItem, SubtitleSegment
 
@@ -330,7 +333,7 @@ class ProofreadAppliesItemsAlignmentTest(unittest.TestCase):
 class CookiesTempCleanupTest(unittest.TestCase):
     """URL 任务下载结束后必须删除上传的 .cookies.txt 临时文件;用户自备路径不删。"""
 
-    def _make_url_job(self, manager: JobManager, tmpdir: Path, cookies_file: str) -> object:
+    def _make_url_job(self, manager, tmpdir: Path, cookies_file: str) -> object:
         job = manager.create_job_for_url("https://example.com/v", cookies_file=cookies_file)
         manager._set_status(job, "queued", 0.0, error=None)
         return job
@@ -477,7 +480,6 @@ class PostJsonRetryClassificationTest(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, _RetryableTranslationError)
 
     def test_connection_refused_fails_fast(self):
-        import socket
 
         with self.assertRaises(RuntimeError):
             self._post_with(urllib.error.URLError(ConnectionRefusedError()))
@@ -684,7 +686,6 @@ if __name__ == "__main__":
 class DownloaderCancelTest(unittest.TestCase):
     def test_cancel_fires_during_progress_lines(self):
         """取消检查必须在 [download] 进度行内生效,而不是等下载结束。"""
-        import subprocess as sp
 
         from moss_transcribe_diarize.app import downloader
 
@@ -716,7 +717,7 @@ class DownloaderCancelTest(unittest.TestCase):
 
         with patch.object(downloader, "find_yt_dlp", return_value=Path("C:/fake/yt-dlp.exe")), patch.object(
             downloader.subprocess, "Popen", return_value=FakeProc()
-        ) as popen_mock, patch.object(downloader, "_find_js_runtime", return_value=None), patch.object(
+        ), patch.object(downloader, "_find_js_runtime", return_value=None), patch.object(
             downloader, "_find_ffmpeg_dir", return_value=None
         ):
             with self.assertRaises(RuntimeError) as ctx:

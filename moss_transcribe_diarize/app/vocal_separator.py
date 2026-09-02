@@ -49,8 +49,8 @@ def separate_vocals(
     try:
         import torch
         import torchaudio
-        from demucs.hf import load_safetensors_model
         from demucs.apply import apply_model
+        from demucs.hf import load_safetensors_model
 
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"

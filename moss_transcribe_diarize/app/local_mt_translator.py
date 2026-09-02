@@ -8,7 +8,6 @@ from moss_transcribe_diarize.subtitle import SubtitleSegment
 
 from .text_translator import translation_skip_reason
 
-
 DEFAULT_OPUS_MODEL_DIR = Path("models/opus-mt-en-zh-ct2-int8")
 DEFAULT_OPUS_TOKENIZER_DIR = Path("models/opus-mt-en-zh")
 DEFAULT_TARGET_PREFIX = ">>cmn_Hans<<"

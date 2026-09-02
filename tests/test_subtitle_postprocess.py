@@ -261,14 +261,19 @@ class RegroupSentencesFromWordsTest(unittest.TestCase):
     def test_long_sentence_soft_breaks_at_comma(self):
         # 长句超重(weight>max_chars)时不在词中间硬切，等下一个逗号软切。
         # 解决 "the reason" 孤立开头类问题：切点落在语义断点（逗号）。
-        from moss_transcribe_diarize.subtitle.postprocess import _sentence_units_from_words
+        from moss_transcribe_diarize.subtitle.postprocess import (
+            _sentence_units_from_words,
+        )
         words = []
         t = 0.0
         for _ in range(45):  # 45 词 * 2.0 weight = 90 > 80(max_chars)，dur 8.8s < 15
-            words.append((t, t + 0.3, "word")); t += 0.2
-        words.append((t, t + 0.3, "comma,")); t += 0.2  # 逗号软切点
+            words.append((t, t + 0.3, "word"))
+            t += 0.2
+        words.append((t, t + 0.3, "comma,"))  # 逗号软切点
+        t += 0.2
         for _ in range(5):
-            words.append((t, t + 0.3, "more")); t += 0.2
+            words.append((t, t + 0.3, "more"))
+            t += 0.2
         units = _sentence_units_from_words(words, max_chars=80, max_duration=15.0)
         self.assertGreaterEqual(len(units), 2)
         self.assertTrue(units[0][-1][2].endswith(','))  # 第一unit止于逗号（非词中间）

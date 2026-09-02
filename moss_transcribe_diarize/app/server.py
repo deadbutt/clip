@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -266,8 +265,9 @@ def create_app(
 
     @app.post("/api/cookies/check")
     async def check_cookies(request: Request):
-        from .downloader import check_browser_cookies, check_cookies_file
         import tempfile
+
+        from .downloader import check_browser_cookies, check_cookies_file
 
         content_type = request.headers.get("content-type", "")
         browser = "firefox"

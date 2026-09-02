@@ -20,9 +20,14 @@ from moss_transcribe_diarize.subtitle import (
 )
 
 from .clips import generate_clip_candidates, rebase_segments_for_clip
-from .ffmpeg import burn_ass_subtitles, burn_ass_subtitles_clip, detect_ffmpeg, probe_video_size
-from .speaker_labeler import SpeakerLabelingInfo, label_speakers
+from .ffmpeg import (
+    burn_ass_subtitles,
+    burn_ass_subtitles_clip,
+    detect_ffmpeg,
+    probe_video_size,
+)
 from .local_mt_translator import LocalMtTranslator
+from .speaker_labeler import SpeakerLabelingInfo, label_speakers
 from .text_translator import (
     PROTECTED_TERMS,
     TextTranslator,
@@ -31,7 +36,6 @@ from .text_translator import (
     validate_translation_outputs,
 )
 from .whisper_runner import WhisperRunner
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODEL = "small"

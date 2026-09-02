@@ -16,7 +16,11 @@ from moss_transcribe_diarize.subtitle import (
 )
 
 from .local_mt_translator import LocalMtTranslator
-from .text_translator import apply_translations, collect_pretranslation_skips, validate_translation_outputs
+from .text_translator import (
+    apply_translations,
+    collect_pretranslation_skips,
+    validate_translation_outputs,
+)
 
 
 def parse_args() -> argparse.Namespace:

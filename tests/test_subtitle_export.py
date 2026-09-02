@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 import unittest
 
-from moss_transcribe_diarize.subtitle import SubtitleSegment, SubtitleStyle, export_ass, export_json, export_srt
+from moss_transcribe_diarize.subtitle import (
+    SubtitleSegment,
+    SubtitleStyle,
+    export_ass,
+    export_json,
+    export_srt,
+)
 from moss_transcribe_diarize.subtitle.export import format_ass_time, format_srt_time
 
 

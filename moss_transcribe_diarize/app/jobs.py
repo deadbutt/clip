@@ -32,12 +32,21 @@ from moss_transcribe_diarize.subtitle import (
     write_text,
 )
 
-from .clips import generate_clip_candidates, rebase_segments_for_clip
-from .ffmpeg import burn_ass_subtitles, burn_ass_subtitles_clip, detect_ffmpeg, probe_media_duration, probe_video_size
-from .speaker_labeler import label_speakers
 from . import vocal_separator
-from .text_translator import apply_translations, collect_pretranslation_skips, validate_translation_outputs
-
+from .clips import generate_clip_candidates, rebase_segments_for_clip
+from .ffmpeg import (
+    burn_ass_subtitles,
+    burn_ass_subtitles_clip,
+    detect_ffmpeg,
+    probe_media_duration,
+    probe_video_size,
+)
+from .speaker_labeler import label_speakers
+from .text_translator import (
+    apply_translations,
+    collect_pretranslation_skips,
+    validate_translation_outputs,
+)
 
 RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "proofreading", "rendering"}
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}

@@ -142,8 +142,8 @@ def _patch_get_plda_optional() -> None:
     的 PLDA 下载。此处让 None 透传返回 None。
     注意 speaker_diarization.py 是按名字导入 get_plda 的，两处都要替换。
     """
-    from pyannote.audio.pipelines.utils import getter
     import pyannote.audio.pipelines.speaker_diarization as sd
+    from pyannote.audio.pipelines.utils import getter
 
     if getattr(sd.get_plda, "_mtd_plda_optional", False):
         return
@@ -276,7 +276,6 @@ def _stub_speechbrain_k2() -> None:
     if target not in sys.modules:
         try:
             import speechbrain  # noqa: F401  # 触发别名注册
-
             import speechbrain.integrations as integrations  # noqa: F401
         except Exception:
             return
@@ -698,7 +697,7 @@ def _merge_turn_clusters(
     mapping = {label: label for label in labels}
     while True:
         # 组时长 = 组内原始簇时长之和
-        group_dur = {g: sum(d for l, d in durations.items() if mapping[l] == g) for g in set(mapping.values())}
+        group_dur = {g: sum(d for lbl, d in durations.items() if mapping[lbl] == g) for g in set(mapping.values())}
         groups = sorted(set(mapping.values()), key=lambda g: -group_dur[g])
         if len(groups) <= target:
             break
@@ -706,7 +705,7 @@ def _merge_turn_clusters(
         largest = groups[0]
         dest = largest
         if matrix is not None:
-            members = {g: [l for l in labels if mapping[l] == g] for g in groups}
+            members = {g: [lbl for lbl in labels if mapping[lbl] == g] for g in groups}
             best_sim = 0.3
             for g in groups:
                 if g == smallest:

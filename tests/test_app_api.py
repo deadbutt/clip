@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
-import threading
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from moss_transcribe_diarize.app.whisper_runner import TranscriptionResult
-
 
 FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
 
@@ -66,6 +65,7 @@ class BlockingRunner:
 class UploadWhitelistTest(unittest.TestCase):
     def test_upload_rejects_non_media_suffix(self):
         from fastapi.testclient import TestClient
+
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -80,6 +80,7 @@ class UploadWhitelistTest(unittest.TestCase):
 
     def test_upload_accepts_media_suffix(self):
         from fastapi.testclient import TestClient
+
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -97,6 +98,7 @@ class CookiesTempFileTest(unittest.TestCase):
     def test_check_cookies_deletes_uploaded_temp_file(self):
         """cookies 检测接口用完临时文件必须删除,登录凭据不能残留在 runs 根目录。"""
         from fastapi.testclient import TestClient
+
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -120,6 +122,7 @@ class CookiesTempFileTest(unittest.TestCase):
 class AppApiTest(unittest.TestCase):
     def test_job_lifecycle_and_missing_ffmpeg_render_error(self):
         from fastapi.testclient import TestClient
+
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -216,6 +219,7 @@ class AppApiTest(unittest.TestCase):
 
     def test_auto_max_new_tokens_bumped_by_duration(self):
         from fastapi.testclient import TestClient
+
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -247,6 +251,7 @@ class AppApiTest(unittest.TestCase):
 
     def test_running_job_exposes_live_token_progress(self):
         from fastapi.testclient import TestClient
+
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:

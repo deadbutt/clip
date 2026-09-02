@@ -18,7 +18,6 @@ from .transcript_parser import (
     parse_transcript,
 )
 
-
 __all__ = [
     "SubtitleSegment",
     "SubtitleStyle",
