@@ -40,6 +40,8 @@ const clipsModal = document.querySelector('#clipsModal');
 const pendingListEl = document.querySelector('#pendingList');
 const saveBtn = document.querySelector('#save');
 const syncSubtitlesBtn = document.querySelector('#syncSubtitles');
+const undoBtn = document.querySelector('#undoBtn');
+const redoBtn = document.querySelector('#redoBtn');
 const renderBtn = document.querySelector('#render');
 const rerunBtn = document.querySelector('#rerun');
 const addSegmentBtn = document.querySelector('#addSegment');
@@ -205,6 +207,9 @@ let clipDragState = null;
 let subtitleSyncTimer = 0;
 let subtitleSyncInFlight = false;
 let cachedSegments = null;
+let undoStack = [];
+let redoStack = [];
+const MAX_UNDO = 50;
 let cachedTimelineSegments = [];
 let cachedTimelineLayout = { lanes: new Map(), count: 1 };
 let syncActiveFrame = 0;
@@ -379,6 +384,39 @@ function setEditorDirty(dirty) {
 function markEditorDirty() {
   if (!currentJob) return;
   setEditorDirty(true);
+}
+
+function pushUndoSnapshot() {
+  if (!cachedSegments) return;
+  const snapshot = JSON.stringify(cachedSegments);
+  if (undoStack.length > 0 && undoStack[undoStack.length - 1] === snapshot) return;
+  undoStack.push(snapshot);
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  redoStack = [];
+  updateUndoRedoButtons();
+}
+
+async function undoEdit() {
+  if (undoStack.length === 0 || !cachedSegments) return;
+  redoStack.push(JSON.stringify(cachedSegments));
+  const prev = JSON.parse(undoStack.pop());
+  renderSegments(prev);
+  await saveSegments(true);
+  updateUndoRedoButtons();
+}
+
+async function redoEdit() {
+  if (redoStack.length === 0 || !cachedSegments) return;
+  undoStack.push(JSON.stringify(cachedSegments));
+  const next = JSON.parse(redoStack.pop());
+  renderSegments(next);
+  await saveSegments(true);
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
 }
 
 document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -776,6 +814,8 @@ syncSubtitlesBtn.addEventListener('click', async () => {
   if (!currentJob) return;
   await loadSegments(currentJob.id, { preserveSelection: true, force: true });
 });
+undoBtn.addEventListener('click', undoEdit);
+redoBtn.addEventListener('click', redoEdit);
 
 addSegmentBtn.addEventListener('click', addSegmentAtPlayhead);
 deleteSegmentBtn.addEventListener('click', deleteActiveSegment);
@@ -937,6 +977,8 @@ if ('ResizeObserver' in window) {
 }
 tbody.addEventListener('input', (event) => {
   const tr = event.target.closest('tr[data-index]');
+  // 首次修改时推快照（保存改之前的状态），用于撤销文本编辑
+  if (!editorDirty) pushUndoSnapshot();
   updateCachedSegmentFromRow(tr);
   markEditorDirty();
   if (event.target.classList.contains('text')) {
@@ -1459,9 +1501,9 @@ async function deleteJob(jobId) {
   await refreshJobs({ keepSelection: true });
 }
 
-async function saveSegments() {
+async function saveSegments(force = false) {
   if (!currentJob) return false;
-  if (!editorDirty) return true;
+  if (!editorDirty && !force) return true;
   setSaveState('saving', '正在保存...');
   const segments = collectSegments();
   try {
@@ -2460,6 +2502,7 @@ function deleteActiveSegment() {
 
 function deleteSegmentAtIndex(index) {
   if (!currentJob || index < 0) return;
+  pushUndoSnapshot();
   const segments = collectSegments();
   if (!segments[index]) return;
   segments.splice(index, 1);
@@ -2474,6 +2517,7 @@ async function splitSegmentAtCursor(index, textarea) {
   if (!segment) return;
   // 拆分是服务端操作(需要词级 items),先把未保存的编辑落盘
   if (editorDirty && !(await saveSegments())) return;
+  pushUndoSnapshot();
   const fresh = (cachedSegments || [])[index] || segment;
   const cursor = textarea.selectionStart != null ? Number(textarea.selectionStart) : 0;
   const text = textarea.value != null ? textarea.value : fresh.text;
@@ -2531,6 +2575,7 @@ async function mergeSegmentWithNext(index) {
   const next = segments[index + 1];
   if (!current || !next) return;
   if (editorDirty && !(await saveSegments())) return;
+  pushUndoSnapshot();
   setTaskNotice('正在合并...', '');
   try {
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/segments/merge`), {
@@ -3570,7 +3615,11 @@ async function findClipCandidates(strategy = 'model') {
   try {
     const minDuration = Math.max(10, Number(clipMinDurationInput.value || 60));
     const targetDuration = Math.max(minDuration, Number(clipTargetDurationInput.value || 120));
-    const maxDuration = Math.max(targetDuration, Number(clipMaxDurationInput.value || 180));
+    // 最长秒数留空 = 不设上限，长度由目标秒数评分和 AI 判断
+    const rawMax = Number(clipMaxDurationInput.value);
+    const maxDuration = clipMaxDurationInput.value.trim() === '' || !Number.isFinite(rawMax) || rawMax <= 0
+      ? 0
+      : Math.max(targetDuration, rawMax);
     const limit = strategy === 'model' ? 8 : 24;
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips?min_duration=${minDuration}&target_duration=${targetDuration}&max_duration=${maxDuration}&limit=${limit}&strategy=${strategy}`), { cache: 'no-store' });
     const data = await res.json();
@@ -4035,3 +4084,19 @@ refreshRuntime();
 refreshJobs();
 loadLlmProfiles();
 loadHotwordsGlossary();
+
+// 撤销/重做快捷键：Ctrl+Z 撤销，Ctrl+Y 或 Ctrl+Shift+Z 重做
+// 在 textarea/input 内不拦截，让浏览器原生文本撤销工作
+document.addEventListener('keydown', (e) => {
+  const isMod = e.ctrlKey || e.metaKey;
+  if (!isMod) return;
+  const tag = e.target.tagName;
+  if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+  if (e.key === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    undoEdit();
+  } else if (e.key === 'y' || (e.key === 'z' && e.shiftKey)) {
+    e.preventDefault();
+    redoEdit();
+  }
+});

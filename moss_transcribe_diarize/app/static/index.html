@@ -224,6 +224,8 @@
           <span id="renderProgressMeta" class="render-progress-meta is-hidden"><span>烧录进度</span><strong id="renderProgressText">0%</strong></span>
           <div id="renderProgress" class="progress bar-progress is-hidden"><div id="renderProgressBar" class="bar"></div></div>
           <div class="bar-spacer"></div>
+          <button id="undoBtn" class="ghost icon-btn" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销" disabled>↶</button>
+          <button id="redoBtn" class="ghost icon-btn" type="button" title="重做 (Ctrl+Y)" aria-label="重做" disabled>↷</button>
           <button id="syncSubtitles" class="ghost" type="button">Sync SRT</button>
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
@@ -385,7 +387,7 @@
                     <div class="row">
                       <div><label for="clipMinDuration">最短秒数</label><input id="clipMinDuration" type="number" min="10" step="5" value="60" /></div>
                       <div><label for="clipTargetDuration">目标秒数</label><input id="clipTargetDuration" type="number" min="20" step="5" value="120" /></div>
-                      <div><label for="clipMaxDuration">最长秒数</label><input id="clipMaxDuration" type="number" min="30" step="5" value="180" /></div>
+                      <div><label for="clipMaxDuration">最长秒数(留空不限)</label><input id="clipMaxDuration" type="number" min="0" step="5" placeholder="不限" /></div>
                     </div>
                     <div class="clip-actions" style="margin-top:10px">
                       <button id="findClips" class="primary small" type="button">AI 精选</button>

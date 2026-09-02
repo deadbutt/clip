@@ -305,6 +305,7 @@ class WhisperRunner:
             segments_iter, info = self._model.transcribe(path, **kwargs)
         duration = float(getattr(info, "duration", 0.0) or 0.0)
         repeat_guard = _RepeatedPhraseGuard()
+        used_prompt = kwargs.get("initial_prompt")
         parts: list[str] = []
         words: list[tuple[float, float, str]] = []
         segment_count = 0
@@ -316,6 +317,16 @@ class WhisperRunner:
             if not text:
                 continue
             if repeat_guard.should_skip(text):
+                if status_callback is not None:
+                    progress = _duration_progress(end, duration)
+                    status_callback("transcribing", progress, segment_count)
+                continue
+            if _is_likely_hallucination(
+                text,
+                avg_logprob=float(getattr(segment, "avg_logprob", 0.0) or 0.0),
+                no_speech_prob=float(getattr(segment, "no_speech_prob", 0.0) or 0.0),
+                prompt=used_prompt,
+            ):
                 if status_callback is not None:
                     progress = _duration_progress(end, duration)
                     status_callback("transcribing", progress, segment_count)
@@ -480,6 +491,7 @@ class WhisperRunner:
         duration = float(result.get("duration") or 0.0)
         segments = result.get("segments") or []
         repeat_guard = _RepeatedPhraseGuard()
+        used_prompt = _whisper_initial_prompt(prompt, self.language)
         parts: list[str] = []
         words: list[tuple[float, float, str]] = []
         segment_count = 0
@@ -493,6 +505,16 @@ class WhisperRunner:
             if not text:
                 continue
             if repeat_guard.should_skip(text):
+                if status_callback is not None:
+                    progress = _duration_progress(end, duration)
+                    status_callback("transcribing", progress, segment_count)
+                continue
+            if _is_likely_hallucination(
+                text,
+                avg_logprob=float(segment.get("avg_logprob", 0.0) or 0.0),
+                no_speech_prob=float(segment.get("no_speech_prob", 0.0) or 0.0),
+                prompt=used_prompt,
+            ):
                 if status_callback is not None:
                     progress = _duration_progress(end, duration)
                     status_callback("transcribing", progress, segment_count)
@@ -613,6 +635,74 @@ def _is_repeated_phrase_candidate(normalized: str) -> bool:
         return False
     words = normalized.split()
     return 1 <= len(words) <= 6
+
+
+# Whisper 常见幻觉文本（静音/背景音乐时的典型输出）
+# 整句模式用 [\s.,。]*$ 锚定（只允许尾部标点/空白），前缀模式用 .*$ 允许后跟填充词
+# 无条件丢弃：正常语音不会产出这些
+_HALLUCINATION_RE = re.compile(
+    r"^(?:"
+    r"thanks\s+for\s+watching[\s.,。]*$"
+    r"|please\s+subscribe[\s.,。]*$"
+    r"|am+[\s.,。]*$"
+    r"|um+[\s.,。]*$"
+    r"|ah+[\s.,。]*$"
+    r"|uh+[\s.,。]*$"
+    r"|the\s+end[\s.,。]*$"
+    r"|subtitles?\s+by\b.*$"
+    r"|satsang\s+with\s+mooji.*$"
+    r")",
+    re.IGNORECASE,
+)
+
+# 条件丢弃：可能是真实语气词/感谢/告别，需配合置信度或静音概率才判为幻觉
+_HALLUCINATION_SOFT_RE = re.compile(
+    r"^(?:thank\s+you[\s.,。]*$|bye[\s.,。]*$)",
+    re.IGNORECASE,
+)
+
+
+def _is_likely_hallucination(
+    text: str,
+    *,
+    avg_logprob: float = 0.0,
+    no_speech_prob: float = 0.0,
+    prompt: str | None = None,
+) -> bool:
+    """检测 Whisper 输出是否可能为幻觉，命中则丢弃该段。
+
+    faster-whisper 内部用 log_prob_threshold/no_speech_threshold 做 AND 逻辑过滤，
+    会漏掉单条件超标的段。这里用更严格的 OR 逻辑 + 文本模式做二次检测。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # 1. 下划线幻觉（静音段可能输出大量下划线）
+    if stripped.count("_") / max(len(stripped), 1) > 0.3:
+        return True
+    # 2. 无条件幻觉文本模式（正常语音不会产出这些）
+    if _HALLUCINATION_RE.match(stripped):
+        return True
+    # 3. prompt 回显（输出与 initial_prompt 高度重叠）
+    if prompt:
+        prompt_clean = prompt.strip()
+        if prompt_clean and len(prompt_clean) <= 120:
+            pw = set(prompt_clean.split())
+            tw = set(stripped.split())
+            if pw and len(pw & tw) / len(pw) > 0.8 and abs(len(stripped) - len(prompt_clean)) < len(prompt_clean) * 0.3:
+                return True
+    # 4. 条件幻觉文本（thank you/bye 可能是真实内容，需配合低置信度/高静音概率）
+    if _HALLUCINATION_SOFT_RE.match(stripped):
+        if avg_logprob < -0.8 or no_speech_prob > 0.6:
+            return True
+        return False
+    # 5. 低置信度 + 长文本（avg_logprob < -1.0 且 >80 字符 → 很可能幻觉）
+    if avg_logprob < -1.0 and len(stripped) > 80:
+        return True
+    # 6. 高静音概率（no_speech_prob > 0.8 → 几乎肯定是静音误识别）
+    if no_speech_prob > 0.8:
+        return True
+    return False
 
 
 def _looks_like_unsupported_transcribe_option(exc: TypeError) -> bool:

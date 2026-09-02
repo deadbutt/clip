@@ -685,12 +685,13 @@ def create_app(
                     selector = _active_proofreader()
                 except RuntimeError as exc:
                     return JSONResponse({"detail": str(exc)}, status_code=503)
+            # max_duration <= 0 表示不设时长上限，长度交给目标秒数评分与 AI 判断
             return {
                 "clips": manager.list_clip_candidates(
                     job_id,
                     min_duration=min_duration,
                     target_duration=target_duration,
-                    max_duration=max_duration,
+                    max_duration=max_duration if max_duration > 0 else None,
                     limit=limit,
                     selector=selector,
                 )

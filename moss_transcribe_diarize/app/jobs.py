@@ -204,6 +204,10 @@ class JobRecord:
         return Path(self.job_dir) / "raw_transcript.txt"
 
     @property
+    def raw_words_path(self) -> Path:
+        return Path(self.job_dir) / "raw_words.json"
+
+    @property
     def segments_path(self) -> Path:
         return Path(self.job_dir) / "segments.json"
 
@@ -954,7 +958,7 @@ class JobManager:
         *,
         min_duration: float = 45.0,
         target_duration: float = 120.0,
-        max_duration: float = 180.0,
+        max_duration: float | None = 180.0,
         limit: int = 24,
         selector: Any | None = None,
     ) -> list[dict[str, Any]]:
@@ -1403,18 +1407,22 @@ class JobManager:
                 if not job.job_dir:
                     job.job_dir = str(path.parent)
                 if job.status in RUNNING_STATES:
-                    job.status = "failed"
-                    job.progress = 1.0
-                    job.error = "Interrupted by previous server shutdown."
+                    # 断点续传：中断的任务自动重新入队，而不是标 failed
+                    job.status = "queued"
+                    job.progress = 0.0
+                    job.error = None
                     job.updated_at = time.time()
                     self._save_job(job)
+                    self._jobs[job.id] = job
+                    self.enqueue(job.id)
+                    continue
                 self._jobs[job.id] = job
             except Exception:
                 continue
 
     def _process_job(self, job: JobRecord) -> None:
         try:
-            if job.source == "url" and job.source_url:
+            if job.source == "url" and job.source_url and not Path(job.input_path).exists():
                 self._download_phase(job)
 
             def update(status: str, progress: float | None, generated_tokens: int | None = None) -> None:
@@ -1448,6 +1456,15 @@ class JobManager:
                     vocal_separator.separate_vocals, job.input_path, job.job_dir
                 )
 
+            # 断点续传：检查转录是否已完成（raw_words.json 存在则跳过 whisper）
+            checkpoint_words = None
+            if caption_segments is None and job.raw_words_path.exists():
+                try:
+                    _words_data = json.loads(job.raw_words_path.read_text(encoding="utf-8"))
+                    checkpoint_words = [(float(s), float(e), str(t)) for s, e, t in _words_data]
+                except Exception:
+                    checkpoint_words = None
+
             if caption_segments is not None:
                 result = None
                 job.generated_tokens = 0
@@ -1456,6 +1473,13 @@ class JobManager:
                     "\n".join(segment.text for segment in caption_segments), encoding="utf-8"
                 )
                 segments = caption_segments
+            elif checkpoint_words is not None:
+                # 断点续传：转录已完成，从 checkpoint 恢复，跳过 whisper
+                result = None
+                segments = regroup_sentences_from_words(checkpoint_words)
+                segments = drop_repeated_hallucinations(segments)
+                job.generated_tokens = job.generated_tokens or 0
+                self._set_status(job, "postprocessing", 0.85, error=None)
             else:
                 result = self.model_runner.transcribe(
                     job.input_path,
@@ -1471,9 +1495,12 @@ class JobManager:
                 job.generated_tokens = result.generated_tokens
                 self._set_status(job, "postprocessing", 0.85, error=None)
                 job.raw_transcript_path.write_text(result.text, encoding="utf-8")
-                # 优先词级重组（时间戳精确、不受原始 segment 边界限制）；
-                # 引擎未提供词时间戳时降级为 segment 级重组。
+                # 保存 words checkpoint（断点续传用）
                 if result.words:
+                    job.raw_words_path.write_text(
+                        json.dumps([[s, e, t] for s, e, t in result.words], ensure_ascii=False),
+                        encoding="utf-8",
+                    )
                     segments = regroup_sentences_from_words(result.words)
                 else:
                     segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
@@ -1513,7 +1540,7 @@ class JobManager:
                 hf_token=self.hf_token,
                 pyannote_model=self.pyannote_model,
                 device=self.diarization_device,
-                words=result.words if result else None,
+                words=(result.words if result else checkpoint_words),
                 audio_path=vocals_path,
             )
             if vocals_path is not None:
