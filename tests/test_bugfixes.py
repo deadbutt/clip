@@ -482,6 +482,44 @@ class ProofreaderResilienceTest(unittest.TestCase):
         self.assertEqual(results[0]["hits"], 1)
         self.assertEqual(results[0]["previews"][0]["corrected"], "go to C:\\new\\dir now")
 
+    def test_rank_clip_candidates_maps_and_clamps_model_choices(self):
+        class _RankedChat(Proofreader):
+            def _chat(self, system, user, temperature=0.0):
+                return json.dumps(
+                    {
+                        "selected": [
+                            {"id": "clip_002", "score": 250, "title": "高光", "reason": "结构完整"},
+                            {"id": "ghost", "score": 50, "title": "x", "reason": "y"},
+                            {"id": "clip_001", "score": "bad", "title": "", "reason": ""},
+                        ]
+                    }
+                )
+
+        reader = _RankedChat(base_url="http://127.0.0.1:1", model="m")
+        ranked = reader.rank_clip_candidates(
+            [
+                {"id": "clip_001", "start": 0, "end": 60, "duration": 60, "text": "a"},
+                {"id": "clip_002", "start": 100, "end": 200, "duration": 100, "text": "b"},
+            ],
+            limit=8,
+        )
+
+        # 幽灵 id 被忽略，score 越界收敛到 100，非法 score 归 0，缺省字段有兜底
+        self.assertEqual([item["id"] for item in ranked], ["clip_002", "clip_001"])
+        self.assertEqual(ranked[0]["score"], 100.0)
+        self.assertEqual(ranked[0]["selection_method"], "model")
+        self.assertEqual(ranked[1]["score"], 0.0)
+        self.assertEqual(ranked[1]["title"], "未命名片段")
+
+    def test_rank_clip_candidates_rejects_invalid_response(self):
+        class _GarbageChat(Proofreader):
+            def _chat(self, system, user, temperature=0.0):
+                return "not json at all"
+
+        reader = _GarbageChat(base_url="http://127.0.0.1:1", model="m")
+        with self.assertRaises(RuntimeError):
+            reader.rank_clip_candidates([{"id": "clip_001", "start": 0, "end": 5, "duration": 5, "text": "a"}])
+
 
 class PostJsonRetryClassificationTest(unittest.TestCase):
     def _post_with(self, exc: Exception):

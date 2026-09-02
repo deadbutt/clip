@@ -53,6 +53,13 @@ Rules:
 - Be very conservative: empty lists are fine. Keep each reason under 15 words.
 - Output ONLY the JSON object, nothing else. No markdown fences."""
 
+CLIP_RANK_SYSTEM = """You select highlights from a long-form transcript for short video clips.
+Judge semantic quality, not keyword count. Prefer self-contained excerpts with a strong opening,
+clear development and payoff, emotional or informational value, and little dependency on missing context.
+Avoid repetitive or substantially overlapping choices. Return JSON only in this shape:
+{"selected":[{"id":"clip_001","score":92,"title":"short Chinese title","reason":"specific Chinese reason"}]}.
+Use only provided ids."""
+
 
 @dataclass(slots=True)
 class Proofreader:
@@ -130,6 +137,55 @@ class Proofreader:
             return {"ok": True, "message": f"连接成功 ({latency} ms)，模型回复: {content[:40]!r}", "latency_ms": latency}
         except Exception as exc:
             return {"ok": False, "message": str(exc), "latency_ms": int((time.time() - started) * 1000)}
+
+    # --------------------------------------------------------------- clips
+
+    def rank_clip_candidates(
+        self, candidates: Iterable[dict[str, Any]], *, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """用激活的 LLM 配置为精华切片候选打分排序。"""
+        items = list(candidates)
+        if not items:
+            return []
+        user_payload = {
+            "max_results": max(1, int(limit)),
+            "candidates": [
+                {
+                    "id": item.get("id"),
+                    "start": item.get("start"),
+                    "end": item.get("end"),
+                    "duration": item.get("duration"),
+                    "transcript": str(item.get("text") or "")[:1200],
+                }
+                for item in items
+            ],
+        }
+        content = self._chat(CLIP_RANK_SYSTEM, json.dumps(user_payload, ensure_ascii=False), temperature=0.15)
+        data = _parse_json_object(content)
+        selected = data.get("selected") if isinstance(data, dict) else None
+        if not isinstance(selected, list):
+            raise RuntimeError("Highlight model did not return a valid selected list.")
+        by_id = {str(item.get("id")): dict(item) for item in items}
+        output: list[dict[str, Any]] = []
+        for choice in selected:
+            if not isinstance(choice, dict):
+                continue
+            candidate = by_id.get(str(choice.get("id") or ""))
+            if candidate is None:
+                continue
+            try:
+                candidate["score"] = max(0.0, min(100.0, float(choice.get("score") or 0.0)))
+            except (TypeError, ValueError):
+                candidate["score"] = 0.0
+            candidate["title"] = str(choice.get("title") or candidate.get("title") or "未命名片段").strip()
+            candidate["reason"] = str(choice.get("reason") or "模型精选").strip()
+            candidate["selection_method"] = "model"
+            output.append(candidate)
+            if len(output) >= max(1, int(limit)):
+                break
+        if not output:
+            raise RuntimeError("Highlight model did not return any valid candidate ids.")
+        return output
 
     # --------------------------------------------------------------- Pass 1
 

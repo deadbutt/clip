@@ -3259,6 +3259,7 @@ async function loadLlmProfiles() {
     llmProfiles = data || { active_id: null, profiles: [] };
     renderLlmProfiles();
     updateProofreadAction();
+    updateClipActions();
   } catch (err) { /* ignore */ }
 }
 
@@ -3351,6 +3352,7 @@ llmProfileListEl.addEventListener('click', async (event) => {
       llmProfiles = data;
       renderLlmProfiles();
       updateProofreadAction();
+      updateClipActions();
     } else if (action === 'edit') {
       const profile = (llmProfiles.profiles || []).find((p) => p.id === profileId);
       if (profile) showLlmProfileEditor(profile);
@@ -3362,6 +3364,7 @@ llmProfileListEl.addEventListener('click', async (event) => {
       llmProfiles = data;
       renderLlmProfiles();
       updateProofreadAction();
+      updateClipActions();
     }
   } catch (err) {
     llmProfileTestResultEl.textContent = (err.message || err);
@@ -3555,8 +3558,8 @@ function useActiveSegmentAsClipRange() {
 
 async function findClipCandidates(strategy = 'model') {
   if (!currentJob) return;
-  if (strategy === 'model' && !translatorAvailable) {
-    clipStatusEl.textContent = 'AI 精选需要本地文本模型。请在前台运行 start_ollama.bat 或 start_vllm.bat；也可以先用规则粗筛。';
+  if (strategy === 'model' && !activeLlmProfile()) {
+    clipStatusEl.textContent = 'AI 精选需要先在首页配置并启用一个 AI 服务；也可以先用规则粗筛。';
     return;
   }
   const saved = await saveSegments();
@@ -3587,14 +3590,14 @@ async function findClipCandidates(strategy = 'model') {
 
 function updateClipActions() {
   openClipsBtn.disabled = !currentJob;
-  findClipsBtn.disabled = !translatorAvailable || !currentJob;
+  findClipsBtn.disabled = !activeLlmProfile() || !currentJob;
   findClipsRulesBtn.disabled = !currentJob;
   renderClipBtn.disabled = !currentJob || !ffmpegAvailable || !activeClip();
   renderClipQueueBtn.disabled = !currentJob || !ffmpegAvailable || !selectedClips.length;
-  const model = translatorInfo.model || 'Qwen2.5-3B-Instruct-AWQ';
-  clipModelStatusEl.textContent = translatorAvailable
-    ? `AI 精选使用本地 ${model}；规则粗筛只生成候选，不代表内容质量。`
-    : 'AI 精选模型未启动；当前只能规则粗筛。';
+  const active = activeLlmProfile();
+  clipModelStatusEl.textContent = active
+    ? `AI 精选使用 ${active.model || '默认模型'}（${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'}）；规则粗筛只生成候选，不代表内容质量。`
+    : 'AI 精选未启用（首页未配置 AI 服务）；当前只能规则粗筛。';
   if (clipQueueCountEl) clipQueueCountEl.textContent = `${selectedClips.length} 个`;
 }
 

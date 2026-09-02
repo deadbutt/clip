@@ -679,12 +679,12 @@ def create_app(
         try:
             if strategy not in {"rules", "model"}:
                 raise ValueError("strategy must be 'rules' or 'model'.")
-            selector = app.state.translator if strategy == "model" else None
-            if strategy == "model" and selector is None:
-                return JSONResponse(
-                    {"detail": "AI highlight selection is not configured. Start with start_ollama.bat or start_vllm.bat."},
-                    status_code=503,
-                )
+            selector = None
+            if strategy == "model":
+                try:
+                    selector = _active_proofreader()
+                except RuntimeError as exc:
+                    return JSONResponse({"detail": str(exc)}, status_code=503)
             return {
                 "clips": manager.list_clip_candidates(
                     job_id,
