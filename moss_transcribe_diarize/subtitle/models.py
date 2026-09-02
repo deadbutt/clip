@@ -79,6 +79,8 @@ class SubtitleStyle:
     outline: int = 3
     shadow: int = 1
     speaker_names: dict[str, str] | None = None
+    # 说话人 → 自定义字幕颜色(ASS &H00BBGGRR),未指定的说话人用调色板默认色。
+    speaker_color_overrides: dict[str, str] | None = None
     mask_enabled: bool = False
     mask_mode: str = "blur"
     mask_height: int = 120
@@ -101,6 +103,14 @@ class SubtitleStyle:
                 if isinstance(value, dict):
                     names = {str(key): str(name).strip() for key, name in value.items() if str(name).strip()}
                     setattr(style, field, names or None)
+            elif field == "speaker_color_overrides":
+                if isinstance(value, dict):
+                    overrides = {
+                        str(key): str(color)
+                        for key, color in value.items()
+                        if str(color).startswith("&H") and len(str(color)) == 10
+                    }
+                    setattr(style, field, overrides or None)
             elif field in {"alignment", "margin_v", "outline", "shadow"}:
                 setattr(style, field, int(value))
             elif field in {"mask_height", "mask_margin_v"}:

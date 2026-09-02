@@ -1303,14 +1303,47 @@
     }
     .speaker-map-row {
       display: grid;
-      grid-template-columns: 54px minmax(0, 1fr);
+      grid-template-columns: 54px minmax(0, 1fr) 34px;
       gap: 8px;
       align-items: center;
+    }
+    .speaker-map-row input.speaker-name {
+      max-width: 150px;
+    }
+    .speaker-map-row input.speaker-color {
+      width: 30px;
+      height: 26px;
+      padding: 2px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      cursor: pointer;
     }
     .speaker-tag {
       color: var(--muted);
       font-size: 12px;
       font-weight: 650;
+    }
+    /* 按说话人配色时,说话人标签/表格行内的颜色圆点(与烧录调色板一致) */
+    .speaker-dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 5px;
+      vertical-align: -1px;
+      border: 1px solid rgba(128, 128, 128, 0.55);
+      background: transparent;
+    }
+    .subtitle-table td.speaker-cell {
+      white-space: nowrap;
+    }
+    .subtitle-table td.speaker-cell .speaker-dot {
+      margin-right: 3px;
+      vertical-align: 0;
+    }
+    .subtitle-table td.speaker-cell input.speaker {
+      width: 46px;
     }
     .export-status {
       margin-top: 8px;

@@ -196,6 +196,8 @@ let layoutFitFrame = 0;
 let editorDirty = false;
 let saveStatusTimer = 0;
 let speakerNameMap = {};
+// 说话人 → 自定义字幕颜色(html #rrggbb)。未指定的说话人用调色板默认色。
+let speakerColorOverrides = {};
 let timelineDragging = false;
 let currentPixelsPerSecond = 12;
 let segmentDragState = null;
@@ -949,6 +951,7 @@ tbody.addEventListener('input', (event) => {
     if (event.target.classList.contains('speaker')) {
       renderSpeakerMap(collectSegments());
       renderTimeline(collectSegments());
+      refreshSpeakerDots();
     }
     updateSubtitlePreview();
   }
@@ -982,7 +985,18 @@ tbody.addEventListener('keydown', (event) => {
   if (!tr) return;
   splitSegmentAtCursor(Number(tr.dataset.index), textarea);
 });
-speakerMapEl.addEventListener('input', () => {
+speakerMapEl.addEventListener('input', (event) => {
+  if (event.target.classList.contains('speaker-color')) {
+    // 调色盘:记录该说话人的自定义颜色,联动行内圆点/预览/烧录。
+    const speaker = event.target.dataset.speaker || '';
+    if (speaker) speakerColorOverrides[speaker] = event.target.value;
+    refreshSpeakerDots();
+    const dot = event.target.closest('.speaker-map-row')?.querySelector('.speaker-dot');
+    if (dot) dot.style.background = event.target.value;
+    markEditorDirty();
+    updateSubtitlePreview();
+    return;
+  }
   syncSpeakerNameInputs();
   markEditorDirty();
   updateSubtitlePreview();
@@ -1001,10 +1015,18 @@ for (const id of ['fontName', 'primaryColor', 'outlineColor', 'fontSize', 'margi
   document.querySelector('#' + id).addEventListener('input', () => {
     markEditorDirty();
     updateSubtitlePreview();
+    if (id === 'speakerColors') {
+      renderSpeakerMap(collectSegments());
+      refreshSpeakerDots();
+    }
   });
   document.querySelector('#' + id).addEventListener('change', () => {
     markEditorDirty();
     updateSubtitlePreview();
+    if (id === 'speakerColors') {
+      renderSpeakerMap(collectSegments());
+      refreshSpeakerDots();
+    }
   });
 }
 
@@ -1541,6 +1563,9 @@ function collectSubtitleStyle() {
     show_speaker: document.querySelector('#showSpeaker').value === 'true',
     speaker_colors: document.querySelector('#speakerColors').value === 'true',
     speaker_names: collectSpeakerNames(),
+    speaker_color_overrides: Object.fromEntries(
+      Object.entries(speakerColorOverrides).map(([speaker, hex]) => [speaker, htmlColorToAss(hex)])
+    ),
     mask_enabled: document.querySelector('#maskEnabled').value === 'true',
     mask_mode: document.querySelector('#maskMode').value || 'blur',
     mask_height: Number(document.querySelector('#maskHeight').value || 120),
@@ -1581,11 +1606,16 @@ function applySubtitleStyle(style) {
   for (const [speaker, name] of Object.entries(names)) {
     if (String(name).trim()) speakerNameMap[String(speaker)] = String(name).trim();
   }
+  speakerColorOverrides = {};
+  const overrides = style.speaker_color_overrides || {};
+  for (const [speaker, assColor] of Object.entries(overrides)) {
+    speakerColorOverrides[String(speaker)] = assColorToHtml(assColor);
+  }
 }
 
 function collectSpeakerNames() {
   const names = {};
-  for (const input of speakerMapEl.querySelectorAll('input[data-speaker]')) {
+  for (const input of speakerMapEl.querySelectorAll('input.speaker-name[data-speaker]')) {
     const speaker = input.dataset.speaker || '';
     const name = input.value.trim();
     if (speaker && name) names[speaker] = name;
@@ -1594,7 +1624,7 @@ function collectSpeakerNames() {
 }
 
 function syncSpeakerNameInputs() {
-  for (const input of speakerMapEl.querySelectorAll('input[data-speaker]')) {
+  for (const input of speakerMapEl.querySelectorAll('input.speaker-name[data-speaker]')) {
     const speaker = input.dataset.speaker || '';
     if (!speaker) continue;
     const name = input.value.trim();
@@ -1610,12 +1640,18 @@ function renderSpeakerMap(segments) {
     speakerMapEl.innerHTML = '<div class="meta">暂无说话人</div>';
     return;
   }
+  const useColors = document.querySelector('#speakerColors').value === 'true' && speakers.length > 1;
   speakerMapEl.innerHTML = speakers.map((speaker) => {
     const name = speakerNameMap[speaker] || '';
+    const color = speakerColorOf(speaker, speakers);
+    const picker = useColors
+      ? `<input type="color" class="speaker-color" data-speaker="${escapeHtml(speaker)}" value="${color}" title="该说话人的字幕颜色（点击调整）">`
+      : '';
     return `
       <div class="speaker-map-row">
-        <div class="speaker-tag">${escapeHtml(speaker)}</div>
-        <input type="text" data-speaker="${escapeHtml(speaker)}" value="${escapeHtml(name)}" placeholder="显示名称">
+        <div class="speaker-tag"><span class="speaker-dot" style="background:${useColors ? color : 'transparent'}"></span>${escapeHtml(speaker)}</div>
+        <input type="text" class="speaker-name" data-speaker="${escapeHtml(speaker)}" value="${escapeHtml(name)}" placeholder="显示名称">
+        ${picker}
       </div>`;
   }).join('');
 }
@@ -1638,6 +1674,7 @@ function renderSegments(segments, preferredIndex = null) {
   }));
   renderSpeakerMap(segments);
   renderTimeline(segments);
+  refreshSpeakerDots();
   if (preferredIndex != null && cachedSegments[preferredIndex] && tableWrap) {
     tableWrap.scrollTop = Math.max(0, preferredIndex * TABLE_ROW_HEIGHT - tableWrap.clientHeight * 0.35);
   }
@@ -1654,10 +1691,15 @@ function createSegmentRow(segment, index) {
   const tr = document.createElement('tr');
   tr.dataset.id = segment.id;
   tr.dataset.index = String(index);
+  const speakerList = (cachedSegments || []).map((item) => item.speaker);
+  const dotColor = document.querySelector('#speakerColors').value === 'true'
+    && new Set(speakerList.filter(Boolean)).size > 1 && segment.speaker
+    ? speakerColorOf(segment.speaker, speakerList)
+    : 'transparent';
   tr.innerHTML = `
     <td><input class="start" type="number" min="0" step="0.01" value="${segment.start}"></td>
     <td><input class="end" type="number" min="0" step="0.01" value="${segment.end}"></td>
-    <td><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
+    <td class="speaker-cell"><span class="speaker-dot" style="background:${dotColor}"></span><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
     <td><textarea class="text" rows="1" title="Ctrl+Enter：在光标处拆分（按词级时间戳对齐到词边界）">${escapeHtml(segment.text)}</textarea></td>
     <td>
       <div class="segment-actions">
@@ -2926,13 +2968,44 @@ function subtitleTextShadow(scale) {
 }
 
 function speakerColor(speaker, segments) {
-  const speakers = [];
-  for (const segment of segments) {
-    if (segment.speaker && !speakers.includes(segment.speaker)) speakers.push(segment.speaker);
-  }
-  speakers.sort();
-  const index = Math.max(0, speakers.indexOf(speaker || ''));
+  return speakerColorOf(speaker, (segments || []).map((segment) => segment.speaker));
+}
+
+function speakerColorOf(speaker, speakers) {
+  if (speaker && speakerColorOverrides[speaker]) return speakerColorOverrides[speaker];
+  const sorted = [...new Set((speakers || []).filter(Boolean))].sort();
+  const index = Math.max(0, sorted.indexOf(speaker || ''));
   return speakerPalette[index % speakerPalette.length];
+}
+
+// 按说话人配色是否生效（需 >1 个说话人，与烧录/预览的回落规则一致）
+function speakerColorsEnabled() {
+  if (document.querySelector('#speakerColors').value !== 'true') return false;
+  const rows = [...tbody.querySelectorAll('tr[data-index] .speaker')];
+  const speakers = rows.map((input) => input.value.trim()).filter(Boolean);
+  if (!speakers.length && cachedSegments) {
+    return new Set(cachedSegments.map((s) => s.speaker).filter(Boolean)).size > 1;
+  }
+  return new Set(speakers).size > 1;
+}
+
+// 刷新编辑表格每行的说话人颜色点（配色模式切换/说话人改名时调用）
+function refreshSpeakerDots() {
+  const enabled = speakerColorsEnabled();
+  tbody.querySelectorAll('tr[data-index]').forEach((tr) => {
+    const dot = tr.querySelector('.speaker-dot');
+    if (!dot) return;
+    const speaker = (tr.querySelector('.speaker').value || '').trim();
+    if (enabled && speaker) {
+      const speakers = [...tbody.querySelectorAll('tr[data-index] .speaker')]
+        .map((input) => input.value.trim()).filter(Boolean);
+      dot.style.background = speakerColorOf(speaker, speakers);
+      dot.title = '按说话人配色';
+    } else {
+      dot.style.background = 'transparent';
+      dot.title = '';
+    }
+  });
 }
 
 function activeLlmProfile() {

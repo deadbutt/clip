@@ -10,7 +10,7 @@ from moss_transcribe_diarize.subtitle import (
     export_json,
     export_srt,
 )
-from moss_transcribe_diarize.subtitle.export import format_ass_time, format_srt_time
+from moss_transcribe_diarize.subtitle.export import SPEAKER_COLORS, format_ass_time, format_srt_time
 
 
 class SubtitleExportTest(unittest.TestCase):
@@ -70,6 +70,35 @@ class SubtitleExportTest(unittest.TestCase):
         self.assertIn("Style: Speaker_S02,Noto Sans CJK SC,42", multi)
         self.assertIn("Dialogue: 0,0:00:00.50,0:00:02.00,Speaker_S01", multi)
         self.assertIn("Dialogue: 0,0:00:02.00,0:00:03.50,Speaker_S02", multi)
+
+    def test_export_ass_with_speaker_color_overrides(self):
+        # 覆盖色优先于调色板默认色;未指定的说话人仍用默认色。
+        multi = export_ass(
+            [
+                SubtitleSegment("seg_0001", 0.5, 2.0, "S01", "hello"),
+                SubtitleSegment("seg_0002", 2.0, 3.5, "S02", "world"),
+            ],
+            style=SubtitleStyle(
+                font_size=42,
+                show_speaker=False,
+                speaker_colors=True,
+                speaker_color_overrides={"S01": "&H0000FFFF"},  # 纯红(ABGR)
+            ),
+            video_width=1280,
+            video_height=720,
+        )
+        # S01 样式行使用覆盖色(ass style 颜色位于第 9 个字段)
+        s01_line = next(line for line in multi.splitlines() if line.startswith("Style: Speaker_S01,"))
+        self.assertIn("&H0000FFFF", s01_line)
+        # S02 未覆盖,仍是调色板第 2 色
+        s02_line = next(line for line in multi.splitlines() if line.startswith("Style: Speaker_S02,"))
+        self.assertIn(SPEAKER_COLORS[1], s02_line)
+
+        # from_dict 往返:非法颜色被过滤,合法颜色保留。
+        style = SubtitleStyle.from_dict(
+            {"speaker_color_overrides": {"S01": "&H0000FFFF", "S02": "red", "S03": "&H00FF0000"}}
+        )
+        self.assertEqual(style.speaker_color_overrides, {"S01": "&H0000FFFF", "S03": "&H00FF0000"})
 
     def test_export_ass_with_speaker_names(self):
         text = export_ass(

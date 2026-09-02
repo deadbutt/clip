@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from moss_transcribe_diarize.app.llm_profiles import LlmProfileStore
 from moss_transcribe_diarize.app.proofreader import Proofreader
-from moss_transcribe_diarize.app.speaker_labeler import _merge_turn_clusters
+from moss_transcribe_diarize.app.speaker_labeler import _merge_turn_clusters, _real_speaker_clusters
 from moss_transcribe_diarize.app.text_translator import (
     TextTranslator,
     _RetryableTranslationError,
@@ -422,6 +422,30 @@ class MergeTurnClustersTest(unittest.TestCase):
         merged = _merge_turn_clusters(turns, embeddings=None, target=1)
 
         self.assertEqual({speaker for _, _, speaker in merged}, {"S01"})
+
+
+class RealSpeakerClustersTest(unittest.TestCase):
+    """杂簇收编判定:占比门槛 + 连续长 turn 双判据。"""
+
+    def test_short_lived_real_speaker_with_long_turn_survives(self):
+        # 复刻 d5363c 案例:第三说话人后半段登场,占比 9%(<10%)
+        # 但有 5.2s 连续长 turn——是真人,必须保留。
+        turns = [(0.0, 200.0, "S01"), (50.0, 93.7, "S02")]
+        turns += [(176.8, 178.6, "S03"), (190.0, 195.2, "S03"), (210.0, 212.4, "S03")]
+        kept = _real_speaker_clusters(turns)
+        self.assertEqual(set(kept), {"S01", "S02", "S03"})
+
+    def test_fragment_ghost_cluster_still_merged(self):
+        # 幽灵簇(TTS/噪声):占比 <10% 且全是 1~2s 碎片,不保留。
+        turns = [(0.0, 200.0, "S01"), (50.0, 93.7, "S02")]
+        turns += [(176.8, 178.2, "G"), (190.0, 191.5, "G"), (210.0, 211.3, "G")]
+        kept = _real_speaker_clusters(turns)
+        self.assertEqual(set(kept), {"S01", "S02"})
+
+    def test_dominant_share_always_kept(self):
+        turns = [(0.0, 60.0, "S01"), (60.0, 100.0, "S02")]
+        kept = _real_speaker_clusters(turns)
+        self.assertEqual(set(kept), {"S01", "S02"})
 
 
 class ShiftPartTimesTest(unittest.TestCase):

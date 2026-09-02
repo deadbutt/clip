@@ -59,8 +59,9 @@ def export_ass(
     style_lines = [_ass_style_line("Default", style, font_size, style.primary_color)]
     # 只有一个说话人时按说话人配色没有意义,回落到统一颜色(primary_color)。
     if style.speaker_colors and len(speakers) > 1:
+        overrides = style.speaker_color_overrides or {}
         for index, speaker in enumerate(speakers):
-            color = SPEAKER_COLORS[index % len(SPEAKER_COLORS)]
+            color = overrides.get(speaker) or SPEAKER_COLORS[index % len(SPEAKER_COLORS)]
             style_lines.append(_ass_style_line(_speaker_style_name(speaker), style, font_size, color))
 
     dialogue_lines = [

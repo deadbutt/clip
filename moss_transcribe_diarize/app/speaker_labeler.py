@@ -219,14 +219,12 @@ def _label_speakers_pyannote(
                     int(target_speakers),
                 )
         else:
-            # 自由聚类后的杂簇收编：时长占比过小（<10%）的簇不是真人对话方
-            # （弹幕 TTS、噪声残留），并回最相似簇，避免字幕多出"幽灵说话人"。
-            total = sum(t_end - t_start for t_start, t_end, _ in turns)
-            durations: dict[str, float] = {}
-            for t_start, t_end, speaker in turns:
-                durations[speaker] = durations.get(speaker, 0.0) + (t_end - t_start)
-            major = [spk for spk, d in durations.items() if d >= 0.10 * total]
-            if 1 <= len(major) < len(durations):
+            # 自由聚类后的杂簇收编：时长占比过小（<10%）且无连续长 turn 的簇
+            # 不是真人对话方（弹幕 TTS、噪声残留全是 1~2s 碎片），并回最相似簇。
+            # 但真人短登场（如后半段才出现的第三说话人）占比可能恰好 <10%，
+            # 只要簇内存在数秒级连续长 turn（≥4s，TTS 弹幕达不到）就保留。
+            major = _real_speaker_clusters(turns)
+            if 1 <= len(major) < len({speaker for _, _, speaker in turns}):
                 turns = _merge_turn_clusters(
                     turns,
                     getattr(diarization, "speaker_embeddings", None),
@@ -652,6 +650,35 @@ def _pyannote_turns(diarization) -> list[tuple[float, float, str]]:
             turns.append((start, end, str(speaker)))
     turns.sort(key=lambda item: (item[0], item[1], item[2]))
     return turns
+
+
+def _real_speaker_clusters(
+    turns: list[tuple[float, float, str]],
+    *,
+    min_share: float = 0.10,
+    min_long_turn: float = 4.0,
+) -> list[str]:
+    """判定哪些簇是真人对话方，返回应保留的说话人列表。
+
+    两条判据任一命中即保留：
+    - 总时长占比 >= min_share（默认 10%）；
+    - 存在单个 >= min_long_turn 秒的连续长 turn——真人短登场（如后半段
+      才出现的第三说话人）占比可能不足 10%，但连续说上 4 秒以上的
+      只能是真人；弹幕 TTS/噪声残留等幽灵簇全是 1~2s 碎片，达不到。
+    """
+    total = sum(t_end - t_start for t_start, t_end, _ in turns)
+    if total <= 0:
+        return []
+    durations: dict[str, float] = {}
+    longest: dict[str, float] = {}
+    for t_start, t_end, speaker in turns:
+        durations[speaker] = durations.get(speaker, 0.0) + (t_end - t_start)
+        longest[speaker] = max(longest.get(speaker, 0.0), t_end - t_start)
+    return [
+        speaker
+        for speaker, dur in durations.items()
+        if dur >= min_share * total or longest.get(speaker, 0.0) >= min_long_turn
+    ]
 
 
 def _merge_turn_clusters(
