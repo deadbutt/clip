@@ -14,6 +14,20 @@ from .ffmpeg import detect_ffmpeg
 
 StatusCallback = Callable[[str, float | None, int | None], None]
 
+_PART_HEAD_RE = re.compile(r"^\[(\d+(?:\.\d+)?)\]")
+_PART_TAIL_RE = re.compile(r"\[(\d+(?:\.\d+)?)\]$")
+
+
+def _shift_part_times(part: str, offset: float) -> str:
+    """把 part（形如 "[start][S00]text[end]"）的首尾时间戳平移 offset 秒。"""
+    head = _PART_HEAD_RE.match(part)
+    if head:
+        part = f"[{float(head.group(1)) + offset:.2f}]" + part[head.end():]
+    tail = _PART_TAIL_RE.search(part)
+    if tail:
+        part = part[: tail.start()] + f"[{float(tail.group(1)) + offset:.2f}]"
+    return part
+
 
 @dataclass(slots=True)
 class TranscriptionResult:
@@ -427,7 +441,11 @@ class WhisperRunner:
                         (w[0] + offset, w[1] + offset, w[2]) for w in gap_words
                     ]
                     recovered_words.extend(adjusted_words)
-                    recovered_parts.extend(gap_parts)
+                    # parts 的时间戳是相对临时片段的(≈0),必须同样加偏移,
+                    # 否则 transcribe() 按首时间戳排序时这些段会被排到全文最前。
+                    recovered_parts.extend(
+                        _shift_part_times(part, offset) for part in gap_parts
+                    )
             finally:
                 try:
                     os.unlink(tmp_path)

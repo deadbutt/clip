@@ -9,6 +9,7 @@ Pass 2: 结构分析 —— 全片只读，LLM 只输出标注(术语表/合并�
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -18,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from moss_transcribe_diarize.subtitle import SubtitleSegment
+
+logger = logging.getLogger(__name__)
 
 MAX_TEXT_RATIO = 1.5
 WINDOW_TARGETS = 10
@@ -240,7 +243,9 @@ class Proofreader:
             hits = 0
             previews: list[dict[str, Any]] = []
             for segment in items:
-                new_text, count = pattern.subn(right, segment.text)
+                # 用 lambda 提供 replacement:LLM 返回的 right 含 \ 或 \g<...>
+                # 时按替换模板解析会抛 re.error 或错误展开。
+                new_text, count = pattern.subn(lambda _match: right, segment.text)
                 if count and new_text != segment.text:
                     hits += count
                     if len(previews) < 3:
@@ -274,7 +279,13 @@ class Proofreader:
         fixed, rejected = self._run_pass1(items, pass1_progress)
         if progress_callback:
             progress_callback("pass2", 0, 1)
-        pass2 = self._run_pass2(items)
+        try:
+            pass2 = self._run_pass2(items)
+        except Exception:
+            # Pass 2 是长视频单请求,最容易超时/爆上下文;它只产结构建议
+            # (术语/合并/质疑),失败不应作废 Pass 1 已完成的全部修正。
+            logger.exception("Proofread pass 2 failed; keeping pass 1 results only")
+            pass2 = {"term_corrections": [], "merge_suggestions": [], "speaker_questions": []}
         term_results = self._apply_terms(items, pass2["term_corrections"])
         if progress_callback:
             progress_callback("pass2", 1, 1)

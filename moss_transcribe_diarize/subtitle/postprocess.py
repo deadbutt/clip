@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from moss_transcribe_diarize.transcript_parser import TranscriptSegment, parse_transcript
 
-from .models import SubtitleSegment
+from .models import SubtitleItem, SubtitleSegment
 
 
 DEFAULT_MIN_DURATION = 1.0
@@ -240,6 +240,7 @@ def _merge_tiny_word_segments(
             end=seg.end,
             speaker=prev.speaker,
             text=_join_text(prev.text, seg.text),
+            items=_concat_items(prev, seg),
         )
     return merged
 
@@ -281,6 +282,21 @@ def _sentence_units_from_words(
     return units
 
 
+def _items_from_words(words: list[tuple[float, float, str]]) -> list[SubtitleItem]:
+    return [
+        SubtitleItem(text=text, start=float(start), end=float(end))
+        for start, end, text in words
+        if str(text).strip()
+    ]
+
+
+def _concat_items(*segments: SubtitleSegment) -> list[SubtitleItem] | None:
+    """合并多段的 items；任一段缺失就返回 None（词级真源不完整宁缺毋滥）。"""
+    if any(segment.items is None for segment in segments):
+        return None
+    return [item for segment in segments for item in (segment.items or [])]
+
+
 def _cut_lines_from_words(
     unit: list[tuple[float, float, str]],
     *,
@@ -314,7 +330,7 @@ def _cut_lines_from_words(
         return []
     start = unit[0][0]
     end = max(unit[-1][1], start)
-    return [SubtitleSegment(id="", start=start, end=end, speaker="S00", text=text)]
+    return [SubtitleSegment(id="", start=start, end=end, speaker="S00", text=text, items=_items_from_words(unit))]
 
 
 def _split_words_into_display_lines(
@@ -421,7 +437,7 @@ def _segment_from_words(words: list[tuple[float, float, str]]) -> SubtitleSegmen
     start = words[0][0]
     end = max(words[-1][1], start)
     text = " ".join("".join(text for _, _, text in words).split())
-    return SubtitleSegment(id="", start=start, end=end, speaker="S00", text=text)
+    return SubtitleSegment(id="", start=start, end=end, speaker="S00", text=text, items=_items_from_words(words))
 
 
 def _clamp_word_segments(segments: list[SubtitleSegment]) -> list[SubtitleSegment]:
@@ -489,6 +505,7 @@ def coerce_subtitle_segments(segments: Iterable[SubtitleSegment | dict]) -> list
                 end=float(segment.end),
                 speaker=segment.speaker or "S00",
                 text=segment.text,
+                items=segment.items,
             )
         )
     return coerced

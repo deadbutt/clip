@@ -40,16 +40,30 @@ class SubtitleExportTest(unittest.TestCase):
         self.assertIn("hello", text)
 
     def test_export_ass_with_speaker_colors(self):
-        text = export_ass(
+        # 单说话人时按说话人配色没有意义,回落到 Default(统一颜色)。
+        single = export_ass(
             [SubtitleSegment("seg_0001", 0.5, 2.0, "S01", "hello")],
             style=SubtitleStyle(font_size=42, show_speaker=False, speaker_colors=True),
             video_width=1280,
             video_height=720,
         )
+        self.assertNotIn("Speaker_S01", single)
+        self.assertIn("Dialogue: 0,0:00:00.50,0:00:02.00,Default", single)
 
-        self.assertIn("Style: Speaker_S01,Noto Sans CJK SC,42", text)
-        self.assertIn("Dialogue: 0,0:00:00.50,0:00:02.00,Speaker_S01", text)
-        self.assertIn("hello", text)
+        # 多说话人时生成 per-speaker 样式并按说话人引用。
+        multi = export_ass(
+            [
+                SubtitleSegment("seg_0001", 0.5, 2.0, "S01", "hello"),
+                SubtitleSegment("seg_0002", 2.0, 3.5, "S02", "world"),
+            ],
+            style=SubtitleStyle(font_size=42, show_speaker=False, speaker_colors=True),
+            video_width=1280,
+            video_height=720,
+        )
+        self.assertIn("Style: Speaker_S01,Noto Sans CJK SC,42", multi)
+        self.assertIn("Style: Speaker_S02,Noto Sans CJK SC,42", multi)
+        self.assertIn("Dialogue: 0,0:00:00.50,0:00:02.00,Speaker_S01", multi)
+        self.assertIn("Dialogue: 0,0:00:02.00,0:00:03.50,Speaker_S02", multi)
 
     def test_export_ass_with_speaker_names(self):
         text = export_ass(

@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>蝶殇工作台</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>蝶殇工作台</h1>
+    <span id="runtime" class="pill">检测中</span>
+  </header>
+  <main>
+    <section class="content">
+      <section id="importView" class="view task-view">
+        <div class="task-view-inner">
+          <div class="panel upload-card">
+            <div class="signal-hero">
+              <div class="signal-hero-top">
+                <span class="signal-eyebrow">SIGNAL DESK / 01</span>
+                <span class="signal-engine">LOCAL WHISPER ENGINE</span>
+              </div>
+              <h2 id="importTitle">把声音，落到时间线上。</h2>
+              <p class="signal-copy">从文件或链接开始，完成转写、说话人识别与字幕交付。</p>
+              <div class="signal-visual" aria-hidden="true">
+                <div class="signal-wave"></div>
+                <div class="signal-tracks">
+                  <span class="signal-track"></span>
+                  <span class="signal-track"></span>
+                  <span class="signal-track"></span>
+                </div>
+                <span class="signal-playhead"></span>
+              </div>
+              <div class="signal-hero-footer">
+                <span class="signal-status"><i></i> FFmpeg ready</span>
+                <span>transcribe / diarize / deliver</span>
+              </div>
+            </div>
+            <div class="tab-bar">
+              <button class="tab-btn active" data-tab="upload">上传文件</button>
+              <button class="tab-btn" data-tab="url">链接下载</button>
+            </div>
+            <div id="uploadTab" class="tab-panel active">
+              <label class="file-drop-zone" for="file">
+                <span class="file-drop-icon">+</span>
+                <span class="file-drop-title">拖入音频或视频，或点击选择</span>
+                <span class="file-drop-meta">MP4 · MOV · MKV · WAV · MP3 · M4A / 支持多选</span>
+                <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
+              </label>
+              <div class="task-params" style="margin-top:10px">
+                <div>
+                  <label>热词（人名/专名/术语，空格或逗号分隔，可显著减少错听）</label>
+                  <textarea id="uploadHotwords" class="prompt-input" rows="2" placeholder="例如: Neuro Vedal bajiru"></textarea>
+                </div>
+              </div>
+              <div id="rerunSource" class="meta" style="margin-top:8px"></div>
+              <div id="rerunParams" class="task-params" style="display:none">
+                <div>
+                  <label>推理 Prompt</label>
+                  <textarea id="rerunPrompt" class="prompt-input" rows="2" placeholder="留空用默认"></textarea>
+                </div>
+                <div class="params-row">
+                  <div>
+                    <label>说话人数</label>
+                    <input id="rerunSpeakerCount" type="number" min="0" max="10" step="1" placeholder="自动" />
+                  </div>
+                  <div>
+                    <label>后端</label>
+                    <select id="rerunDiarization">
+                      <option value="none" selected>不分说话人</option>
+                      <option value="auto">auto（推荐）</option>
+                      <option value="pyannote">pyannote</option>
+                      <option value="cluster">cluster</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="urlTab" class="tab-panel">
+              <label for="urlInput">视频链接（YouTube/Bilibili 等）</label>
+              <div class="url-input-row">
+                <input id="urlInput" type="text" placeholder="https://..." />
+                <button id="pasteUrlBtn" class="small">粘贴</button>
+              </div>
+              <label style="display:flex;align-items:center;gap:6px;margin:6px 2px;font-size:13px;opacity:.85">
+                <input id="forceTranscribe" type="checkbox" />
+                <span title="默认：视频有人工上传的平台字幕（CC）时直接采用，跳过 Whisper 转录；自动生成字幕仍走转录。勾选后忽略人工字幕强制转录">强制 Whisper 转录（忽略人工平台字幕）</span>
+              </label>
+              <details class="cookies-settings">
+                <summary>Cookies 设置（会员/受限视频需要）</summary>
+                <div class="cookies-body">
+                  <div>
+                    <label for="cookiesBrowser">浏览器（读取登录态）</label>
+                    <select id="cookiesBrowser">
+                      <option value="firefox" selected>Firefox（推荐，SQLite 无加密）</option>
+                      <option value="chrome">Chrome</option>
+                      <option value="edge">Edge</option>
+                      <option value="brave">Brave</option>
+                      <option value="none">不使用</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="cookiesFile">Cookies.txt 文件（可选 fallback）</label>
+                    <input id="cookiesFile" type="file" accept=".txt" />
+                  </div>
+                  <button id="checkCookiesBtn" class="small ghost">检查 Cookies 可用性</button>
+                  <div id="cookiesResult" class="cookies-result"></div>
+                </div>
+              </details>
+              <div class="task-params">
+                <div>
+                  <label>推理 Prompt</label>
+                  <textarea id="prompt" class="prompt-input" rows="2" placeholder="留空用默认"></textarea>
+                </div>
+                <div>
+                  <label>热词（人名/专名/术语，空格或逗号分隔，可显著减少错听）</label>
+                  <textarea id="hotwordsInput" class="prompt-input" rows="2" placeholder="例如: Neuro Vedal bajiru"></textarea>
+                </div>
+                <div class="params-row">
+                  <div>
+                    <label>说话人数</label>
+                    <input id="speakerCount" type="number" min="0" max="10" step="1" placeholder="自动" />
+                  </div>
+                  <div>
+                    <label>说话人分离</label>
+                    <select id="diarizationBackend">
+                      <option value="none" selected>不分说话人</option>
+                      <option value="auto">auto（推荐）</option>
+                      <option value="pyannote">pyannote</option>
+                      <option value="cluster">cluster</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="pendingList" class="pending-list"></div>
+            <button id="upload" class="primary">全部开始转写</button>
+            <div id="importError" class="error" style="margin-top:10px"></div>
+            <details class="cookies-settings">
+              <summary>AI 服务（校对 / 翻译用 LLM API）</summary>
+              <div class="cookies-body">
+                <div id="llmProfileList" class="llm-profile-list"></div>
+                <div class="actions" style="margin-top:8px">
+                  <button id="llmProfileAdd" class="ghost small" type="button">新增配置</button>
+                </div>
+                <div id="llmProfileEditor" class="llm-profile-editor is-hidden">
+                  <div class="row">
+                    <div>
+                      <label for="llmProfileName">名称</label>
+                      <input id="llmProfileName" type="text" placeholder="DeepSeek 官方" />
+                    </div>
+                    <div>
+                      <label for="llmProfileProvider">类型</label>
+                      <select id="llmProfileProvider"><option value="openai">OpenAI 兼容</option><option value="ollama">Ollama</option></select>
+                    </div>
+                  </div>
+                  <div class="row" style="margin-top:8px">
+                    <div>
+                      <label for="llmProfileBaseUrl">Base URL</label>
+                      <input id="llmProfileBaseUrl" type="text" placeholder="https://api.deepseek.com/v1" />
+                    </div>
+                    <div>
+                      <label for="llmProfileModel">模型</label>
+                      <input id="llmProfileModel" type="text" placeholder="deepseek-v4-flash" />
+                    </div>
+                  </div>
+                  <div class="row" style="margin-top:8px">
+                    <div>
+                      <label for="llmProfileApiKey">API Key（编辑时留空 = 不修改）</label>
+                      <input id="llmProfileApiKey" type="password" placeholder="sk-..." autocomplete="off" />
+                    </div>
+                    <div>
+                      <label for="llmProfileDisableThinking">关闭思考模式</label>
+                      <select id="llmProfileDisableThinking"><option value="false">否</option><option value="true">是（DeepSeek 推荐）</option></select>
+                    </div>
+                  </div>
+                  <div class="actions" style="margin-top:10px">
+                    <button id="llmProfileSave" class="primary small" type="button">保存</button>
+                    <button id="llmProfileCancel" class="ghost small" type="button">取消</button>
+                    <button id="llmProfileTest" class="ghost small" type="button">测试连通</button>
+                  </div>
+                  <div id="llmProfileTestResult" class="meta" style="margin-top:6px"></div>
+                </div>
+              </div>
+            </details>
+          </div>
+          <div class="panel jobs-card">
+            <div class="jobs-head">
+              <strong>任务列表</strong>
+              <div class="jobs-tools">
+                <span id="jobCount" class="meta">0 个任务</span>
+                <button id="refreshJobs" class="small ghost">刷新</button>
+                <button id="newTask" class="small primary">新建任务</button>
+              </div>
+            </div>
+            <div id="jobList" class="task-list"></div>
+          </div>
+        </div>
+      </section>
+      <section id="processingView" class="view center-view is-hidden">
+        <div class="process-panel">
+          <div class="process-bar-top">
+            <button id="backFromProcessing" class="ghost" type="button">← 任务</button>
+          </div>
+          <h2 id="processTitle" class="view-title">转写中</h2>
+          <div id="processName"></div>
+          <div id="processMeta" class="meta" style="margin-top:8px"></div>
+          <div class="progress"><div id="processBar" class="bar"></div></div>
+          <div id="processError" class="error"></div>
+          <div class="actions" style="margin-top:14px">
+            <button id="deleteCurrent">取消并删除</button>
+            <button id="openNew">新建任务</button>
+          </div>
+        </div>
+      </section>
+      <section id="workbench" class="view workbench is-hidden">
+        <div class="workbench-bar">
+          <button id="backToTasks" class="ghost" type="button">← 任务</button>
+          <span id="selectedName" class="bar-name"></span>
+          <span id="taskStatus" class="pill">待校对</span>
+          <span id="taskNotice" class="task-notice is-hidden"></span>
+          <span id="renderProgressMeta" class="render-progress-meta is-hidden"><span>烧录进度</span><strong id="renderProgressText">0%</strong></span>
+          <div id="renderProgress" class="progress bar-progress is-hidden"><div id="renderProgressBar" class="bar"></div></div>
+          <div class="bar-spacer"></div>
+          <button id="syncSubtitles" class="ghost" type="button">Sync SRT</button>
+          <span id="saveStatus" class="save-status saved">已保存</span>
+          <button id="save" class="primary is-hidden">保存修改</button>
+          <button id="openProofread" class="ghost" type="button">AI 校对</button>
+          <button id="openTranslate" class="ghost" type="button">英译中</button>
+          <button id="openClips" class="ghost" type="button">精华切片</button>
+          <button id="render" class="warn" disabled>检测 FFmpeg...</button>
+          <button id="openSettings" class="ghost icon-btn" type="button" title="设置" aria-label="设置">⚙</button>
+        </div>
+        <div class="editor-grid">
+          <div class="preview-column">
+            <div class="video-shell">
+              <div id="videoStage" class="video-stage">
+                <video id="preview" controls></video>
+                <video id="maskPreviewVideo" class="preview-mask-video" muted playsinline></video>
+                <div id="sourceMaskOverlay" class="source-mask-overlay"></div>
+                <div id="subtitleOverlay" class="subtitle-overlay"></div>
+              </div>
+            </div>
+            <div class="timeline-panel">
+              <div class="timeline-head">
+                <span class="timeline-title">字幕轨道</span>
+                <div class="timeline-actions">
+                  <button id="addSegment" class="timeline-tool" type="button">添加字幕</button>
+                  <button id="deleteSegment" class="timeline-tool" type="button">删除当前</button>
+                  <button id="shiftSegmentLeft" class="timeline-tool" type="button" title="Move selected segment left 0.1s">&lt;0.1</button>
+                  <button id="shiftSegmentRight" class="timeline-tool" type="button" title="Move selected segment right 0.1s">0.1&gt;</button>
+                  <button id="nudgeStartLeft" class="timeline-tool" type="button" title="Move selected start left 0.1s">S-</button>
+                  <button id="nudgeStartRight" class="timeline-tool" type="button" title="Move selected start right 0.1s">S+</button>
+                  <button id="nudgeEndLeft" class="timeline-tool" type="button" title="Move selected end left 0.1s">E-</button>
+                  <button id="nudgeEndRight" class="timeline-tool" type="button" title="Move selected end right 0.1s">E+</button>
+                  <span id="timelineMeta">0 段</span>
+                </div>
+              </div>
+              <div id="timelineScroll" class="timeline-scroll">
+                <div id="timelineTrack" class="timeline-track">
+                  <div id="timelineRuler" class="timeline-ruler"></div>
+                  <div id="timelineLane" class="timeline-lane"></div>
+                  <div id="timelineClipRange" class="timeline-clip-range">
+                    <button class="timeline-clip-handle start" type="button" data-clip-drag="start" aria-label="拖动切片开头"></button>
+                    <span class="timeline-clip-label"></span>
+                    <button class="timeline-clip-handle end" type="button" data-clip-drag="end" aria-label="拖动切片结尾"></button>
+                  </div>
+                  <div id="timelinePlayhead" class="timeline-playhead"></div>
+                  <div id="timelineGuide" class="timeline-guide"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="table-column">
+            <div class="table-head">
+              <span class="table-title">字幕</span>
+            </div>
+            <div class="table-wrap">
+              <table class="subtitle-table">
+                <thead>
+                  <tr>
+                    <th class="time">开始</th>
+                    <th class="time">结束</th>
+                    <th class="speaker">说话人</th>
+                    <th>字幕</th>
+                    <th class="row-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="segments"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div id="proofreadModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card wide">
+            <div class="settings-modal-head">
+              <strong>AI 校对</strong>
+              <button id="closeProofread" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="proofreadModelStatus" class="meta model-state"></div>
+              <div id="proofreadProgressMeta" class="render-progress-meta is-hidden" style="margin-top:10px"><span>校对进度</span><strong id="proofreadProgressText">0%</strong></div>
+              <div id="proofreadProgress" class="progress is-hidden"><div id="proofreadProgressBar" class="bar"></div></div>
+              <div class="actions" style="margin-top:12px">
+                <button id="proofreadRun" class="primary small" type="button">开始校对</button>
+                <button id="proofreadApply" class="warn small" type="button" disabled>应用选中修改</button>
+                <span id="proofreadSelectionMeta" class="meta"></span>
+              </div>
+              <div id="proofreadStatus" class="export-status"></div>
+              <div id="proofreadTermSection" class="proofread-section is-hidden">
+                <div class="proofread-section-head">
+                  <label class="proofread-check"><input type="checkbox" id="proofreadTermsAll" checked /> <strong>术语修正</strong></label>
+                  <span id="proofreadTermsMeta" class="meta"></span>
+                </div>
+                <div id="proofreadTermsList" class="proofread-list"></div>
+              </div>
+              <div id="proofreadTypoSection" class="proofread-section is-hidden">
+                <div class="proofread-section-head">
+                  <label class="proofread-check"><input type="checkbox" id="proofreadTyposAll" checked /> <strong>错字 / 标点修正</strong></label>
+                  <span id="proofreadTyposMeta" class="meta"></span>
+                </div>
+                <div id="proofreadTyposList" class="proofread-list"></div>
+              </div>
+              <details id="proofreadReferenceSection" class="proofread-section is-hidden">
+                <summary>参考建议（仅人工审核，不自动应用）</summary>
+                <div id="proofreadReferenceList"></div>
+              </details>
+            </div>
+          </div>
+        </div>
+        <div id="translateModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card">
+            <div class="settings-modal-head">
+              <strong>英译中</strong>
+              <button id="closeTranslate" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="translateModelStatus" class="meta model-state"></div>
+              <div class="row">
+                <div>
+                  <label for="translateMode">字幕模式</label>
+                  <select id="translateMode"><option value="bilingual" selected>中英双语</option><option value="replace">只保留中文</option></select>
+                </div>
+                <div>
+                  <label for="targetLanguage">目标语言</label>
+                  <input id="targetLanguage" type="text" value="简体中文" />
+                </div>
+              </div>
+              <label for="translateProtectedTerms" style="margin-top:10px">Protected terms</label>
+              <textarea id="translateProtectedTerms" class="prompt-input" rows="2" placeholder="Twitter, Twitch, OBS, names..."></textarea>
+              <div id="translateProgressMeta" class="render-progress-meta is-hidden" style="margin-top:10px"><span>翻译进度</span><strong id="translateProgressText">0%</strong></div>
+              <div id="translateProgress" class="progress is-hidden"><div id="translateProgressBar" class="bar"></div></div>
+              <div class="actions" style="margin-top:12px">
+                <button id="translateZh" class="primary small" type="button">开始翻译</button>
+                <button id="restoreTranslation" class="ghost small" type="button">恢复翻译前字幕</button>
+              </div>
+              <div id="translateStatus" class="export-status"></div>
+              <div id="translationReview" class="translation-review is-hidden">
+                <div class="translation-review-head">
+                  <strong>翻译审查</strong>
+                  <span id="translationReviewMeta" class="meta"></span>
+                </div>
+                <div id="translationReviewList" class="translation-review-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="clipsModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card wide">
+            <div class="settings-modal-head">
+              <strong>精华切片</strong>
+              <button id="closeClips" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="clipModelStatus" class="meta model-state"></div>
+              <div class="clip-tools">
+                <div class="clip-grid">
+                  <section class="clip-panel">
+                    <div class="clip-panel-head">
+                      <strong>候选片段</strong>
+                      <span id="clipCandidateCount">0 个</span>
+                    </div>
+                    <div class="row">
+                      <div><label for="clipMinDuration">最短秒数</label><input id="clipMinDuration" type="number" min="10" step="5" value="60" /></div>
+                      <div><label for="clipTargetDuration">目标秒数</label><input id="clipTargetDuration" type="number" min="20" step="5" value="120" /></div>
+                      <div><label for="clipMaxDuration">最长秒数</label><input id="clipMaxDuration" type="number" min="30" step="5" value="180" /></div>
+                    </div>
+                    <div class="clip-actions" style="margin-top:10px">
+                      <button id="findClips" class="primary small" type="button">AI 精选</button>
+                      <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
+                    </div>
+                    <div id="clipList" class="clip-list" style="margin-top:10px"></div>
+                  </section>
+                  <section class="clip-panel">
+                    <div class="clip-panel-head">
+                      <strong>已选切片</strong>
+                      <span id="clipQueueCount">0 个</span>
+                    </div>
+                    <div id="clipQueueList" class="clip-list"></div>
+                    <div class="clip-editor">
+                      <div class="row">
+                        <div><label for="clipTitleInput">切片名称</label><input id="clipTitleInput" type="text" value="" placeholder="clip name" /></div>
+                      </div>
+                      <div class="row" style="margin-top:10px">
+                        <div><label for="clipStart">原片开始秒数</label><input id="clipStart" type="number" min="0" step="0.1" value="0" /></div>
+                        <div><label for="clipEnd">原片结束秒数</label><input id="clipEnd" type="number" min="0.1" step="0.1" value="120" /></div>
+                        <div><label for="clipDuration">切片时长</label><input id="clipDuration" type="number" min="0.25" step="0.1" value="120" /></div>
+                      </div>
+                      <div class="clip-nudge-actions">
+                        <button id="clipMoveBack" class="ghost small" type="button">整体 -1s</button>
+                        <button id="clipMoveForward" class="ghost small" type="button">整体 +1s</button>
+                        <button id="clipStartEarlier" class="ghost small" type="button">开头 -0.5s</button>
+                        <button id="clipEndLater" class="ghost small" type="button">结尾 +0.5s</button>
+                      </div>
+                      <div class="clip-actions" style="margin-top:10px">
+                        <button id="useActiveSegment" class="ghost small" type="button">使用当前字幕时间</button>
+                        <button id="renderClip" class="warn small" type="button">导出当前切片</button>
+                        <button id="renderClipQueue" class="ghost small" type="button">按顺序导出全部</button>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+                <div id="clipStatus" class="export-status"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="settingsModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card">
+            <div class="settings-modal-head">
+              <strong>设置</strong>
+              <button id="closeSettings" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div class="group">
+                <label>任务信息</label>
+                <div id="taskUsage" class="meta task-meta"></div>
+                <div id="taskParams" class="meta task-meta"></div>
+              </div>
+              <div class="group">
+                <label>转录热词词表（所有新任务自动带上）</label>
+                <div id="hotwordsGlossaryView" class="llm-profile-list"></div>
+                <div class="actions" style="margin-top:8px">
+                  <button id="hotwordsGlossaryEdit" class="ghost small" type="button">编辑词表</button>
+                </div>
+                <div id="hotwordsGlossaryEditor" class="llm-profile-editor is-hidden">
+                  <textarea id="hotwordsGlossaryText" class="prompt-input" rows="3" placeholder="每行一个或空格分隔"></textarea>
+                  <div class="meta" style="margin-top:4px">校对时应用的术语会自动加入此词表。</div>
+                  <div class="actions" style="margin-top:8px">
+                    <button id="hotwordsGlossarySave" class="primary small" type="button">保存</button>
+                    <button id="hotwordsGlossaryCancel" class="ghost small" type="button">取消</button>
+                  </div>
+                </div>
+              </div>
+              <div class="group">
+                <div class="row">
+                  <div>
+                    <label for="fontName">字体</label>
+                    <select id="fontName">
+                      <option value="Noto Sans CJK SC" selected>思源黑体 (Noto Sans CJK SC)</option>
+                      <option value="Microsoft YaHei">微软雅黑</option>
+                      <option value="DengXian">等线 (DengXian)</option>
+                      <option value="SimHei">黑体 (SimHei)</option>
+                      <option value="SimSun">宋体 (SimSun)</option>
+                      <option value="KaiTi">楷体 (KaiTi)</option>
+                      <option value="FangSong">仿宋 (FangSong)</option>
+                      <option value="Source Han Serif SC">思源宋体 (Source Han Serif SC)</option>
+                      <option value="LXGW WenKai">霞鹜文楷 (需安装)</option>
+                      <option value="Arial">Arial</option>
+                      <option value="Impact">Impact</option>
+                      <option value="Georgia">Georgia</option>
+                      <option value="Times New Roman">Times New Roman</option>
+                      <option value="Verdana">Verdana</option>
+                      <option value="Courier New">Courier New</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="fontSize">字号</label>
+                    <input id="fontSize" type="number" min="18" max="96" value="48" />
+                  </div>
+                  <div>
+                    <label for="marginV">底边距</label>
+                    <input id="marginV" type="number" min="12" max="220" value="56" />
+                  </div>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="primaryColor">字幕颜色</label>
+                    <input id="primaryColor" type="color" value="#ffffff" />
+                  </div>
+                  <div>
+                    <label for="outlineColor">描边颜色</label>
+                    <input id="outlineColor" type="color" value="#000000" />
+                  </div>
+                  <div>
+                    <label for="speakerColors">配色模式</label>
+                    <select id="speakerColors"><option value="false" selected>统一颜色</option><option value="true">按说话人</option></select>
+                  </div>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="showSpeaker">说话人前缀</label>
+                    <select id="showSpeaker"><option value="false" selected>隐藏</option><option value="true">显示</option></select>
+                  </div>
+                </div>
+                <div class="meta" style="margin-top:6px">"说话人前缀=显示"时，预览、SRT 导出与烧录视频会在每条字幕前加 "名称: "（名称在下方设置）；"按说话人"配色会覆盖统一颜色。</div>
+              </div>
+              <div class="group">
+                <label>说话人名称</label>
+                <div id="speakerMap" class="speaker-map"></div>
+                <div class="meta" style="margin-top:6px">配合上方"说话人前缀=显示"使用；烧录和 SRT 中显示为 "名称: 字幕"。</div>
+              </div>
+              <div class="group">
+                <label for="maskEnabled">原字幕遮挡</label>
+                <select id="maskEnabled">
+                  <option value="false">关闭</option>
+                  <option value="true">开启</option>
+                </select>
+                <div style="margin-top:10px">
+                  <label for="maskMode">遮挡方式</label>
+                  <select id="maskMode">
+                    <option value="blur">模糊原字幕区域</option>
+                    <option value="bar">黑底遮挡</option>
+                  </select>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="maskHeight">遮挡高度</label>
+                    <input id="maskHeight" type="number" min="12" max="360" value="120" />
+                  </div>
+                  <div>
+                    <label for="maskMarginV">离底距离</label>
+                    <input id="maskMarginV" type="number" min="0" max="360" value="0" />
+                  </div>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div>
+                    <label for="maskBlur">模糊强度</label>
+                    <input id="maskBlur" type="number" min="1" max="80" value="24" />
+                  </div>
+                  <div>
+                    <label for="maskOpacity">黑底透明度</label>
+                    <input id="maskOpacity" type="number" min="0" max="1" step="0.05" value="0.82" />
+                  </div>
+                </div>
+              </div>
+              <div class="group">
+                <button id="settingsSave" class="primary" type="button">保存修改</button>
+                <button id="rerun" class="ghost">重新转写</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+<script src="/static/app.js"></script>
+</body>
+</html>

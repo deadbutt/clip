@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import difflib
 import json
+import logging
 import queue
 import re
 import shutil
@@ -12,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from moss_transcribe_diarize.subtitle import (
+    SubtitleItem,
     SubtitleSegment,
     SubtitleStyle,
     clean_source_captions,
+    coerce_subtitle_items,
     coerce_subtitle_segments,
     drop_repeated_hallucinations,
     export_ass,
@@ -37,6 +41,79 @@ from .text_translator import apply_translations, collect_pretranslation_skips, v
 
 RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "proofreading", "rendering"}
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
+
+logger = logging.getLogger(__name__)
+
+# 词级 diff 对齐的最低匹配率:低于它说明文本被重写,插值时间戳没有意义。
+_MIN_ALIGN_MATCH_RATIO = 0.4
+
+
+def _normalize_words(text: str) -> list[str]:
+    return [word.strip(".,!?;:\"'()[]") for word in str(text or "").split() if word.strip(".,!?;:\"'()[]")]
+
+
+def _interpolate_item(text: str, start: float, end: float) -> SubtitleItem:
+    return SubtitleItem(text=text, start=start, end=max(end, start + 0.01))
+
+
+def align_items_to_text(
+    old_text: str,
+    old_items: list[SubtitleItem],
+    new_text: str,
+    *,
+    min_match_ratio: float = _MIN_ALIGN_MATCH_RATIO,
+) -> list[SubtitleItem] | None:
+    """把旧词级 items 演化成新文本的 items(text 被编辑后调用)。
+
+    规则: 相同词继承时间戳;替换区间均分被替换词的总时长;
+    插入词在前后邻居时间之间插值;删除词丢弃。匹配率过低(整句重写)返回 None,
+    让调用方诚实降级为无词级数据,而不是编造时间戳。
+    """
+    # items 词文本(带标点)归一化后与 items 建立索引映射。
+    old_words: list[str] = []
+    old_item_index: list[int] = []
+    for idx, item in enumerate(old_items):
+        for word in _normalize_words(item.text):
+            old_words.append(word)
+            old_item_index.append(idx)
+    new_words = _normalize_words(new_text)
+    if not old_words or not new_words:
+        return None
+
+    matcher = difflib.SequenceMatcher(a=old_words, b=new_words, autojunk=False)
+    matched = sum(size for _, _, size in matcher.get_matching_blocks())
+    if matched / max(len(old_words), len(new_words)) < min_match_ratio:
+        return None
+
+    def item_at(word_pos: int) -> SubtitleItem | None:
+        if 0 <= word_pos < len(old_item_index):
+            return old_items[old_item_index[word_pos]]
+        return None
+
+    out: list[SubtitleItem] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                item = item_at(i1 + k) or old_items[0]
+                out.append(SubtitleItem(text=new_words[j1 + k], start=item.start, end=item.end))
+        elif tag in ("replace", "insert"):
+            if tag == "replace" and i1 < len(old_item_index) and i2 - 1 < len(old_item_index):
+                seg_start = old_items[old_item_index[i1]].start
+                seg_end = old_items[old_item_index[i2 - 1]].end
+            else:
+                # 插入: 前驱末尾与后继开头之间插值。
+                prev_end = out[-1].end if out else (item_at(0).start if item_at(0) else 0.0)
+                nxt = item_at(i1) or (item_at(min(i1, len(old_item_index) - 1)) if old_item_index else None)
+                next_start = nxt.start if nxt else prev_end
+                seg_start, seg_end = prev_end, max(next_start, prev_end + 0.01)
+            span = max(seg_end - seg_start, 0.01)
+            count = j2 - j1
+            for k in range(count):
+                s = seg_start + span * k / count
+                e = seg_start + span * (k + 1) / count
+                out.append(_interpolate_item(new_words[j1 + k], s, e))
+        # delete: 丢弃旧词。
+    return out
 
 
 class JobCancelled(RuntimeError):
@@ -109,6 +186,9 @@ class JobRecord:
     force_transcribe: bool = False
     transcript_source: str | None = None
     source_subtitles: list[dict[str, Any]] = field(default_factory=list)
+    # 应用自己写出 srt/ass 时的 mtime 戳;用于区分"应用写的"与"外部编辑过的"文件,
+    # 防止 list_segments 把应用刚写好的字幕误判为外部编辑而反向覆盖(丢失 speaker/items)。
+    subtitle_file_stamps: dict[str, float] = field(default_factory=dict)
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -228,6 +308,7 @@ class JobRecord:
             source_url=data.get("source_url"),
             cookies_config=dict(data.get("cookies_config") or {}),
             download_info=dict(data.get("download_info") or {}),
+            subtitle_file_stamps=dict(data.get("subtitle_file_stamps") or {}),
         )
 
 
@@ -549,6 +630,7 @@ class JobManager:
     ) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         segments = coerce_subtitle_segments(payload)
+        self._backfill_items_from_disk(job, segments)
         style = SubtitleStyle.from_dict(style_payload) if style_payload is not None else None
         if style is not None:
             job.subtitle_style = style.to_dict()
@@ -557,6 +639,274 @@ class JobManager:
             self._set_status(job, "waiting_review", 0.95, error=None)
         else:
             self._touch(job, error=None)
+        return [segment.to_dict() for segment in segments]
+
+    def _backfill_items_from_disk(self, job: JobRecord, segments: list[SubtitleSegment]) -> None:
+        """整包保存的 payload 通常不带 items(前端只缓存 5 个字段)。
+        按 id 从现有 segments.json 回填词级数据并夹到新边界内,避免词级真源被静默清空。
+        text 被编辑过时,回填后立即用词级 diff 把旧 items 演化成新文本的 items。"""
+        if not job.segments_path.exists():
+            return
+        try:
+            existing = json.loads(job.segments_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        by_id = {str(item.get("id")): item for item in existing if isinstance(item, dict)}
+        for segment in segments:
+            if segment.items is not None:
+                continue
+            record = by_id.get(segment.id)
+            if not record:
+                continue
+            items = coerce_subtitle_items(record.get("items"))
+            if not items:
+                continue
+            items = [
+                SubtitleItem(
+                    text=item.text,
+                    start=min(max(item.start, segment.start), segment.end),
+                    end=min(max(item.end, segment.start), segment.end),
+                )
+                for item in items
+            ]
+            old_text = str(record.get("text") or "")
+            items_norm = _normalize_words(" ".join(i.text.strip() for i in items if i.text.strip()))
+            text_norm = _normalize_words(segment.text)
+            disk_norm = _normalize_words(old_text)
+            if items_norm == text_norm or items_norm != disk_norm:
+                # items 与当前文本一致(未编辑/已对齐),或 items 与文本本就错配
+                # (如已翻译任务: 中文 text + 英文 items): 原样保留,不做对齐。
+                segment.items = items
+            else:
+                # items 对应磁盘旧文本且 text 已被编辑: 词级 diff 演化(重写降级 None)。
+                segment.items = align_items_to_text(old_text, items, segment.text)
+
+    def _load_segments_records(self, job: JobRecord) -> list[SubtitleSegment]:
+        if not job.segments_path.exists():
+            raise RuntimeError("No subtitle segments are available for this job.")
+        return [SubtitleSegment.from_dict(item) for item in json.loads(job.segments_path.read_text(encoding="utf-8"))]
+
+    @staticmethod
+    def _unique_segment_id(segments: list[SubtitleSegment], base: str) -> str:
+        existing = {segment.id for segment in segments}
+        if base not in existing:
+            return base
+        n = 2
+        while f"{base}~{n}" in existing:
+            n += 1
+        return f"{base}~{n}"
+
+    @staticmethod
+    def _split_record_at(segments: list[SubtitleSegment], index: int, t: float, new_id: str) -> tuple[SubtitleSegment, SubtitleSegment]:
+        """在时间 t 处把 segments[index] 拆成两条;有词级 items 时吸附到最近词边界。
+        text 是内容真源: 编辑过的段落拆分时保留编辑文本(按前半段词时长占比映射字符切点),
+        绝不从旧 items 重建文本回退用户修改。"""
+        seg = segments[index]
+        duration = seg.end - seg.start
+        t = min(max(t, seg.start + 0.1), seg.end - 0.1)
+
+        if seg.items:
+            best_k = None
+            best_dist = None
+            for k in range(1, len(seg.items)):
+                dist = abs(seg.items[k].start - t)
+                if best_dist is None or dist < best_dist:
+                    best_k, best_dist = k, dist
+            if best_k is None:
+                raise ValueError("Segment has only one word; cannot split.")
+            left_items = seg.items[:best_k]
+            right_items = seg.items[best_k:]
+            items_text = " ".join(i.text.strip() for i in seg.items if i.text.strip())
+            if _normalize_words(items_text) == _normalize_words(seg.text):
+                # 未编辑过: 从 items 重建文本(最精确)。
+                left_text = " ".join(i.text.strip() for i in left_items if i.text.strip())
+                right_text = " ".join(i.text.strip() for i in right_items if i.text.strip())
+            else:
+                # 编辑过: 时间按词边界切,文本按前半段词时长占比映射切点,保留用户修改。
+                left_dur = sum(
+                    (min(i.end, seg.end) - max(i.start, seg.start)) for i in left_items
+                ) or 1.0
+                total_dur = max(
+                    sum((min(i.end, seg.end) - max(i.start, seg.start)) for i in seg.items), left_dur
+                )
+                ratio = min(1.0, max(0.0, left_dur / total_dur))
+                cut = max(1, min(len(seg.text) - 1, round(len(seg.text) * ratio)))
+                left_text = seg.text[:cut].rstrip()
+                right_text = seg.text[cut:].lstrip()
+            left = SubtitleSegment(
+                id=seg.id, start=seg.start, end=max(left_items[-1].end, seg.start),
+                speaker=seg.speaker, text=left_text or seg.text, items=left_items,
+            )
+            right = SubtitleSegment(
+                id=new_id,
+                start=min(right_items[0].start, seg.end), end=seg.end,
+                speaker=seg.speaker, text=right_text or seg.text, items=right_items,
+            )
+        else:
+            ratio = (t - seg.start) / duration
+            cut = max(1, min(len(seg.text) - 1, round(len(seg.text) * ratio)))
+            left = SubtitleSegment(
+                id=seg.id, start=seg.start, end=t, speaker=seg.speaker,
+                text=seg.text[:cut].rstrip(), items=None,
+            )
+            right = SubtitleSegment(
+                id=new_id, start=t, end=seg.end,
+                speaker=seg.speaker, text=seg.text[cut:].lstrip(), items=None,
+            )
+        return left, right
+
+    def _sync_source_split(self, job: JobRecord, segment_id: str, t: float, new_id: str) -> bool:
+        """翻译过的 job:对源稿备份做同样的拆分,保证重译时结构一致。"""
+        if not job.source_segments_path.exists():
+            return False
+        try:
+            source = [
+                SubtitleSegment.from_dict(item)
+                for item in json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+            ]
+            s_index = next((i for i, s in enumerate(source) if s.id == segment_id), None)
+            if s_index is None:
+                return False
+            left, right = self._split_record_at(source, s_index, t, new_id)
+            source[s_index : s_index + 1] = [left, right]
+            write_text(job.source_segments_path, export_json(source))
+            return True
+        except Exception:
+            return False
+
+    def _sync_source_merge(self, job: JobRecord, segment_ids: list[str]) -> bool:
+        """翻译过的 job:对源稿备份做同样的合并。"""
+        if not job.source_segments_path.exists():
+            return False
+        try:
+            source = [
+                SubtitleSegment.from_dict(item)
+                for item in json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+            ]
+            id_set = set(segment_ids)
+            indexes = sorted(i for i, s in enumerate(source) if s.id in id_set)
+            if len(indexes) != len(id_set) or indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+                return False
+            group = [source[i] for i in indexes]
+            first = group[0]
+            items = (
+                [item for s in group for item in (s.items or [])]
+                if all(s.items is not None for s in group)
+                else None
+            )
+            merged = SubtitleSegment(
+                id=first.id,
+                start=min(s.start for s in group),
+                end=max(s.end for s in group),
+                speaker=first.speaker,
+                text=" ".join(s.text.strip() for s in group if s.text.strip()),
+                items=items,
+            )
+            source[indexes[0] : indexes[0] + len(indexes)] = [merged]
+            write_text(job.source_segments_path, export_json(source))
+            return True
+        except Exception:
+            return False
+
+    def _mark_structure_changed(self, job: JobRecord) -> None:
+        info = dict(job.translation_info or {})
+        if info:
+            info["structure_changed"] = True
+            job.translation_info = info
+
+    def split_segment(
+        self,
+        job_id: str,
+        segment_id: str,
+        split_time: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """在指定时间点(缺省取中点)把一条字幕拆成两条。
+
+        有词级 items 时在最近的词边界下刀,文本按词分配;
+        没有时按时长比例切字符(fallback)。
+        翻译过的 job 会同步拆源稿备份,重译时保留新结构。"""
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot edit segments while the job is running.")
+        segments = self._load_segments_records(job)
+        index = next((i for i, s in enumerate(segments) if s.id == segment_id), None)
+        if index is None:
+            raise KeyError(f"Segment {segment_id} not found.")
+        seg = segments[index]
+        duration = seg.end - seg.start
+        if duration < 0.4:
+            raise ValueError("Segment is too short to split.")
+
+        t = seg.start + duration / 2 if split_time is None else float(split_time)
+        new_id = self._unique_segment_id(segments, seg.id)
+        left, right = self._split_record_at(segments, index, t, new_id)
+        segments[index : index + 1] = [left, right]
+
+        source_synced = self._sync_source_split(job, segment_id, t, new_id)
+        if source_synced:
+            self._mark_structure_changed(job)
+            # 已翻译任务: 拆出的两条退回源文文本(译文按旧结构已失真,structure_changed 会提示重译)。
+            try:
+                source_by_id = {
+                    str(item.get("id")): item
+                    for item in json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+                }
+                for pos in (index, index + 1):
+                    piece = segments[pos]
+                    record = source_by_id.get(piece.id)
+                    if record is not None and str(record.get("text") or "") != piece.text:
+                        segments[pos] = SubtitleSegment(
+                            id=piece.id, start=piece.start, end=piece.end,
+                            speaker=piece.speaker, text=str(record.get("text") or piece.text),
+                            items=piece.items,
+                        )
+            except Exception:
+                logger.debug("split: fallback to source text skipped", exc_info=True)
+        self._write_subtitle_files(job, segments)
+        self._touch(job, error=None)
+        return [segment.to_dict() for segment in segments]
+
+    def merge_segments(self, job_id: str, segment_ids: list[str]) -> list[dict[str, Any]]:
+        """把多条**相邻**字幕合并成一条;说话人取第一条,items 依序拼接。
+        翻译过的 job 会同步合并源稿备份,重译时保留新结构。"""
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot edit segments while the job is running.")
+        segments = self._load_segments_records(job)
+        wanted = [str(sid) for sid in segment_ids]
+        if not wanted:
+            raise ValueError("No segments to merge.")
+        id_set = set(wanted)
+        indexes = sorted(i for i, s in enumerate(segments) if s.id in id_set)
+        if len(indexes) != len(id_set):
+            missing = id_set - {segments[i].id for i in indexes}
+            raise KeyError(f"Segment(s) not found: {', '.join(sorted(missing))}")
+        if indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+            raise ValueError("Only adjacent segments can be merged.")
+
+        group = [segments[i] for i in indexes]
+        first = group[0]
+        text = " ".join(s.text.strip() for s in group if s.text.strip())
+        items = (
+            [item for s in group for item in (s.items or [])]
+            if all(s.items is not None for s in group)
+            else None
+        )
+        merged = SubtitleSegment(
+            id=first.id,
+            start=min(s.start for s in group),
+            end=max(s.end for s in group),
+            speaker=first.speaker,
+            text=text,
+            items=items,
+        )
+        segments[indexes[0] : indexes[0] + len(indexes)] = [merged]
+
+        source_synced = self._sync_source_merge(job, wanted)
+        if source_synced:
+            self._mark_structure_changed(job)
+        self._write_subtitle_files(job, segments)
+        self._touch(job, error=None)
         return [segment.to_dict() for segment in segments]
 
     def sync_segments_from_subtitle_files(self, job_id: str) -> dict[str, Any]:
@@ -917,12 +1267,23 @@ class JobManager:
                 continue
             for index, segment in enumerate(segments):
                 if segment.id == seg_id and segment.text == suggestion.get("original"):
+                    corrected = str(suggestion.get("corrected") or segment.text)
+                    new_items = segment.items
+                    if segment.items:
+                        items_norm = _normalize_words(
+                            " ".join(i.text.strip() for i in segment.items if i.text.strip())
+                        )
+                        if items_norm == _normalize_words(segment.text) and items_norm != _normalize_words(corrected):
+                            # items 对应当前文本且校对改了文本: 同步演化词级 items。
+                            # 错配场景(已翻译任务)原样保留,不强行对齐。
+                            new_items = align_items_to_text(segment.text, segment.items, corrected)
                     segments[index] = SubtitleSegment(
                         id=segment.id,
                         start=segment.start,
                         end=segment.end,
                         speaker=segment.speaker,
-                        text=str(suggestion.get("corrected") or segment.text),
+                        text=corrected,
+                        items=new_items,
                     )
                     applied_ids.add(seg_id)
                     break
@@ -941,7 +1302,8 @@ class JobManager:
             pattern = re.compile(re.escape(wrong), re.IGNORECASE)
             changed = 0
             for index, segment in enumerate(segments):
-                new_text, count = pattern.subn(right, segment.text)
+                # lambda 提供 replacement,避免 right 含 \ 时被当替换模板解析。
+                new_text, count = pattern.subn(lambda _match: right, segment.text)
                 if count and new_text != segment.text:
                     segments[index] = SubtitleSegment(
                         id=segment.id,
@@ -949,6 +1311,7 @@ class JobManager:
                         end=segment.end,
                         speaker=segment.speaker,
                         text=new_text,
+                        items=segment.items,
                     )
                     changed += count
             if changed:
@@ -1016,6 +1379,10 @@ class JobManager:
             job_id = self._queue.get()
             try:
                 self._process_job(self.get_job(job_id))
+            except Exception:
+                # 排队中被删除的任务(get_job 抛 KeyError)或任何内部意外
+                # 都不得杀死唯一的 worker 线程,否则后续任务永远停在 queued。
+                logger.exception("Job worker failed on job %s", job_id)
             finally:
                 self._queue.task_done()
 
@@ -1124,12 +1491,15 @@ class JobManager:
                     vocals_path = None
 
             self._set_status(job, "labeling_speakers", 0.88, error=None)
+            resolved_speakers = self._resolve_speaker_count(job.speaker_count)
             segments, speaker_info = label_speakers(
                 job.input_path,
                 segments,
                 work_dir=job.job_dir,
-                max_speakers=max(2, int(job.speaker_count or 0)),
-                target_speakers=job.speaker_count,
+                # 未指定说话人数时给 pyannote 自动检测留空间（原值 2 会把
+                # 三人及以上素材静默压进两个标签）；显式指定时按指定值钳定。
+                max_speakers=resolved_speakers or 4,
+                target_speakers=resolved_speakers,
                 backend=job.diarization_backend,
                 hf_token=self.hf_token,
                 pyannote_model=self.pyannote_model,
@@ -1182,15 +1552,25 @@ class JobManager:
             job.media_name = _sanitize_display_name(raw_title)
             self._save_job(job)
 
-        result = download_with_yt_dlp(
-            job.source_url,
-            job.job_dir,
-            cookies_browser=cookies_browser,
-            cookies_file=cookies_file,
-            progress_callback=on_progress,
-            cancel_check=cancel_check,
-            title_callback=on_title,
-        )
+        result = None
+        try:
+            result = download_with_yt_dlp(
+                job.source_url,
+                job.job_dir,
+                cookies_browser=cookies_browser,
+                cookies_file=cookies_file,
+                progress_callback=on_progress,
+                cancel_check=cancel_check,
+                title_callback=on_title,
+            )
+        finally:
+            # 上传的 cookies 临时文件(.cookies.txt)是浏览器登录凭据,下载结束立即删除;
+            # 用户自备路径不在此列,原样保留。
+            if cookies_file and str(cookies_file).endswith(".cookies.txt"):
+                try:
+                    Path(cookies_file).unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("cookies temp file cleanup failed: %s", cookies_file, exc_info=True)
         self._raise_if_cancelled(job.id)
         downloaded = result.path
         if result.title:
@@ -1300,14 +1680,25 @@ class JobManager:
             export_ass(segments, style=style, video_width=width, video_height=height),
             encoding="utf-8-sig",
         )
-        write_text(job.segments_path, export_json(segments))
+        # 记录应用写出时的 mtime,sync 时据此跳过应用自己写的文件。
+        job.subtitle_file_stamps = {
+            "srt": job.srt_path.stat().st_mtime,
+            "ass": job.ass_path.stat().st_mtime,
+        }
+        self._save_job(job)
 
     def _maybe_sync_segments_from_subtitle_files(self, job: JobRecord, *, force: bool = False) -> dict[str, Any] | None:
         source_path, source_kind = self._select_subtitle_source(job, force=force)
         if source_path is None:
             return None
-        if not force and job.segments_path.exists() and job.segments_path.stat().st_mtime >= source_path.stat().st_mtime:
-            return None
+        source_mtime = source_path.stat().st_mtime
+        if not force:
+            # 应用自己写出的文件(mtime 与记录的戳一致)不是外部编辑,跳过;
+            # 否则 srt 写在 segments.json 之后,每次 list_segments 都会误触发反向同步。
+            if job.subtitle_file_stamps.get(source_kind) == source_mtime:
+                return None
+            if job.segments_path.exists() and job.segments_path.stat().st_mtime >= source_mtime:
+                return None
         text = source_path.read_text(encoding="utf-8-sig" if source_kind == "srt" else "utf-8")
         segments = parse_srt(text) if source_kind == "srt" else parse_ass(text)
         if not segments and text.strip():

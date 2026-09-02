@@ -10,7 +10,7 @@ from typing import Iterable
 
 import numpy as np
 
-from moss_transcribe_diarize.subtitle import SubtitleSegment
+from moss_transcribe_diarize.subtitle import SubtitleItem, SubtitleSegment
 from moss_transcribe_diarize.subtitle.postprocess import _ends_sentence
 
 from .ffmpeg import detect_ffmpeg
@@ -674,8 +674,10 @@ def _merge_turn_clusters(
     if target <= 0 or len(labels) <= target:
         return turns
     durations = {label: 0.0 for label in labels}
-    for _, end, speaker in turns:
-        durations[speaker] += end
+    for start, end, speaker in turns:
+        # 累加说话时长(end-start)而非绝对 end:turn 在时间轴上的位置
+        # 不代表说话量,开场 100s 与 5s 处一句话的绝对 end 完全不同。
+        durations[speaker] += max(0.0, end - start)
 
     def _row(label: str) -> int:
         tail = label.rsplit("_", 1)[-1]
@@ -721,6 +723,22 @@ def _merge_turn_clusters(
     return [(start, end, mapping[speaker]) for start, end, speaker in turns]
 
 
+def _items_in_range(
+    words: list[tuple[float, float, str]] | None,
+    start: float,
+    end: float,
+) -> list[SubtitleItem] | None:
+    """取落在 [start, end) 内的词级时间戳；words 缺失时返回 None。"""
+    if words is None:
+        return None
+    items = [
+        SubtitleItem(text=str(text), start=float(ws), end=float(we))
+        for ws, we, text in words
+        if str(text).strip() and we > start and ws < end
+    ]
+    return items or None
+
+
 def _assign_turns_to_segments(
     segments: list[SubtitleSegment],
     turns: list[tuple[float, float, str]],
@@ -748,6 +766,7 @@ def _assign_turns_to_segments(
             end=end,
             speaker=_map(speaker_raw),
             text=text.strip(),
+            items=_items_in_range(words, start, end),
         ))
 
     for segment in segments:
@@ -946,6 +965,7 @@ def _apply_cluster_labels(
                 end=segment.end,
                 speaker=label_names[label],
                 text=segment.text,
+                items=segment.items,
             )
         )
     return output
@@ -980,6 +1000,7 @@ def _with_single_speaker(segments: list[SubtitleSegment]) -> list[SubtitleSegmen
             end=segment.end,
             speaker="S01",
             text=segment.text,
+            items=segment.items,
         )
         for segment in segments
     ]

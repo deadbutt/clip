@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
@@ -49,6 +50,10 @@ def main() -> None:
         raise SystemExit("Install uvicorn to run mtd-subtitle-web.") from exc
 
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     app = create_app(
         model_path=Path(args.model).expanduser(),
         runs_dir=Path(args.runs_dir).expanduser(),

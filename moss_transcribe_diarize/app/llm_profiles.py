@@ -66,14 +66,17 @@ class LlmProfileStore:
             "created_at": float(profile.get("created_at") or time.time()),
         }
 
-    def list_profiles(self) -> dict[str, Any]:
+    def list_profiles(self, *, include_secrets: bool = False) -> dict[str, Any]:
         with self._lock:
             data = self._load()
         masked = []
         for item in data["profiles"]:
-            item = self._clean(item)
-            item["api_key_masked"] = mask_api_key(item["api_key"])
-            masked.append(item)
+            cleaned = self._clean(item)
+            entry = {**cleaned, "api_key_masked": mask_api_key(cleaned["api_key"])}
+            # 明文 key 只服务后端内部流程(test connection 等),任何 HTTP 响应都不携带。
+            if not include_secrets:
+                entry.pop("api_key", None)
+            masked.append(entry)
         return {"active_id": data.get("active_id"), "profiles": masked}
 
     def add_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -84,7 +87,11 @@ class LlmProfileStore:
             if data.get("active_id") is None:
                 data["active_id"] = profile["id"]
             self._save(data)
-        return {**profile, "api_key_masked": mask_api_key(profile["api_key"])}
+        return {
+            **profile,
+            "api_key_masked": mask_api_key(profile["api_key"]),
+            "api_key": None,
+        }
 
     def update_profile(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -99,7 +106,11 @@ class LlmProfileStore:
                     profile["created_at"] = item.get("created_at") or profile["created_at"]
                     data["profiles"][index] = profile
                     self._save(data)
-                    return {**profile, "api_key_masked": mask_api_key(profile["api_key"])}
+                    return {
+                        **profile,
+                        "api_key_masked": mask_api_key(profile["api_key"]),
+                        "api_key": None,
+                    }
         raise KeyError(f"Profile not found: {profile_id}")
 
     def delete_profile(self, profile_id: str) -> None:

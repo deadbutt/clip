@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoding", choices=["greedy", "sample"], default="greedy")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--no-speaker-labeling", action="store_true", help="Skip lightweight post-transcription speaker labeling.")
-    parser.add_argument("--speaker-count", type=int, default=None, help="Optional target speaker count, clamped to 1-2.")
+    parser.add_argument("--speaker-count", type=int, default=None, help="Optional target speaker count, clamped to 1-10 (auto-detects up to 4 when omitted).")
     parser.add_argument("--diarization-backend", choices=["auto", "pyannote", "cluster", "none"], default="none")
     parser.add_argument("--hf-token", default=None, help="Hugging Face token for pyannote gated models. Defaults to HF_TOKEN env var.")
     parser.add_argument("--pyannote-model", default="pyannote/speaker-diarization-3.1")
@@ -113,7 +113,8 @@ def main() -> None:
             segments,
             work_dir=out_dir,
             enabled=not args.no_speaker_labeling,
-            max_speakers=max(2, int(_resolve_speaker_count(args.speaker_count) or 0)),
+            # 未指定时给 pyannote 自动检测留空间；显式指定时按指定值钳定。
+            max_speakers=_resolve_speaker_count(args.speaker_count) or 4,
             target_speakers=_resolve_speaker_count(args.speaker_count),
             backend="none" if args.no_speaker_labeling else args.diarization_backend,
             hf_token=args.hf_token,
@@ -247,7 +248,7 @@ def _resolve_speaker_count(value: int | None) -> int | None:
     value = int(value)
     if value <= 0:
         return None
-    return max(1, min(value, 2))
+    return max(1, min(value, 10))
 
 
 if __name__ == "__main__":

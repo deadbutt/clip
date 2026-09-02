@@ -539,9 +539,18 @@ class TextTranslator:
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Text model request failed with HTTP {exc.code}: {detail}") from exc
+            message = f"Text model request failed with HTTP {exc.code}: {detail}"
+            # 5xx/429(服务过载、批次过大、模型加载中)是瞬时故障,标记为可重试,
+            # 让二分重试用更小批次自救;4xx 属配置/权限问题,快速失败并保留详情。
+            if exc.code >= 500 or exc.code == 429:
+                raise _RetryableTranslationError(message) from exc
+            raise RuntimeError(message) from exc
         except urllib.error.URLError as exc:
+            # 连接被拒(服务未启动)对重试同样无意义:保持快速失败,
+            # 让任务带上明确原因结束,而不是二分 n 次后静默降级成全原文。
             raise RuntimeError(f"Failed to connect to translation API: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise _RetryableTranslationError(f"Text model request timed out after {self.timeout}s") from exc
 
 
 def apply_translations(
@@ -569,6 +578,7 @@ def apply_translations(
                 end=segment.end,
                 speaker=segment.speaker,
                 text=text,
+                items=segment.items,
             )
         )
     return output

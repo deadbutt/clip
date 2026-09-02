@@ -30,6 +30,9 @@ _NETSCAPE_COOKIE_RE = re.compile(r"^(?:#\s*(?:HTTP|Netscape)|\S+\t\S+\t\S+)", re
 # --print 输出自定义前缀模板，避免和 yt-dlp 的状态行/警告混淆。
 _TITLE_PRINT_PREFIX = "mtd_title:"
 
+# 兜底搜索下载产物时只认媒体后缀,防止把同目录的字幕文件误当视频 remux。
+_MEDIA_SUFFIXES = {".mkv", ".mp4", ".webm", ".mov", ".ts", ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"}
+
 
 @dataclass(slots=True)
 class DownloadResult:
@@ -302,6 +305,16 @@ def download_with_yt_dlp(
         if not line:
             continue
 
+        # 取消检查必须在任何 continue 分支之前:下载主阶段几乎全是
+        # [download] xx% 进度行,放后面会让取消在整个下载期间失效。
+        if cancel_check and cancel_check():
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise RuntimeError("下载已取消")
+
         if line.startswith(_TITLE_PRINT_PREFIX):
             raw_title = line[len(_TITLE_PRINT_PREFIX):].strip()
             if raw_title and not video_title:
@@ -334,14 +347,6 @@ def download_with_yt_dlp(
         if line.startswith("ERROR:") or line.startswith("WARNING:"):
             error_lines.append(line)
 
-        if cancel_check and cancel_check():
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            raise RuntimeError("下载已取消")
-
     ret = proc.wait()
 
     if ret != 0:
@@ -349,10 +354,8 @@ def download_with_yt_dlp(
         raise RuntimeError(error_msg)
 
     if not downloaded_file or not downloaded_file.is_file():
-        candidates = sorted(out_dir.glob("input.*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            downloaded_file = candidates[0]
-        else:
+        downloaded_file = _pick_media_file(out_dir)
+        if downloaded_file is None:
             raise FileNotFoundError(f"下载完成但未找到输出文件，请检查 {out_dir}")
 
     if downloaded_file.suffix.lower() != ".mkv":
@@ -360,6 +363,16 @@ def download_with_yt_dlp(
 
     subtitles = _collect_subtitle_files(out_dir)
     return DownloadResult(path=downloaded_file, title=video_title, subtitles=subtitles)
+
+
+def _pick_media_file(out_dir: Path) -> Path | None:
+    """按 mtime 挑最新的媒体文件作为下载产物;字幕文件永不入选。"""
+    candidates = sorted(
+        (p for p in out_dir.glob("input.*") if p.suffix.lower() in _MEDIA_SUFFIXES),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
 
 
 def _collect_subtitle_files(out_dir: Path) -> list[dict[str, str]]:

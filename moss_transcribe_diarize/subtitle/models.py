@@ -1,7 +1,44 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Iterable
+
+
+@dataclass(slots=True)
+class SubtitleItem:
+    """词级时间戳：转写引擎给出的最小对齐单元，拆分/切点估算的真源。"""
+
+    text: str
+    start: float
+    end: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SubtitleItem":
+        return cls(
+            text=str(data.get("text") or ""),
+            start=float(data.get("start") or 0.0),
+            end=float(data.get("end") or 0.0),
+        )
+
+    @classmethod
+    def coerce(cls, value: Any) -> "SubtitleItem | None":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            item = cls.from_dict(value)
+            return item if item.text else None
+        return None
+
+
+def coerce_subtitle_items(value: Any) -> list[SubtitleItem] | None:
+    """把任意 payload 规整成 items 列表；无法解析时返回 None（视为缺失）。"""
+    if not isinstance(value, list):
+        return None
+    items = [coerced for entry in value if (coerced := SubtitleItem.coerce(entry)) is not None]
+    return items or None
 
 
 @dataclass(slots=True)
@@ -11,6 +48,7 @@ class SubtitleSegment:
     end: float
     speaker: str
     text: str
+    items: list[SubtitleItem] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -23,6 +61,7 @@ class SubtitleSegment:
             end=float(data["end"]),
             speaker=str(data.get("speaker") or "S00"),
             text=str(data.get("text") or ""),
+            items=coerce_subtitle_items(data.get("items")),
         )
 
 

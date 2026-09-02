@@ -7,7 +7,7 @@ from .export import (
     parse_srt,
     write_text,
 )
-from .models import SubtitleSegment, SubtitleStyle
+from .models import SubtitleItem, SubtitleSegment, SubtitleStyle, coerce_subtitle_items
 from .postprocess import (
     coerce_subtitle_segments,
     drop_repeated_hallucinations,
@@ -19,6 +19,7 @@ from .postprocess import (
 )
 
 __all__ = [
+    "SubtitleItem",
     "SubtitleSegment",
     "SubtitleStyle",
     "export_ass",
@@ -27,6 +28,7 @@ __all__ = [
     "parse_ass",
     "parse_srt",
     "clean_source_captions",
+    "coerce_subtitle_items",
     "coerce_subtitle_segments",
     "drop_repeated_hallucinations",
     "normalize_segments",

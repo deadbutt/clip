@@ -71,7 +71,17 @@ def probe_media(path: str | Path) -> dict[str, Any]:
         "-show_format",
         str(path),
     ]
-    completed = subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # 探测正常毫秒级完成;硬超时防止挂死的 ffprobe 卡住调用方
+    # (save_segments 路由在 event loop 里同步等待它)。
+    completed = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
     return json.loads(completed.stdout or "{}")
 
 

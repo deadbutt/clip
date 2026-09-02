@@ -63,6 +63,60 @@ class BlockingRunner:
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class UploadWhitelistTest(unittest.TestCase):
+    def test_upload_rejects_non_media_suffix(self):
+        from fastapi.testclient import TestClient
+        from moss_transcribe_diarize.app.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            client = TestClient(app)
+            resp = client.post(
+                "/api/jobs",
+                files={"file": ("document.pdf", b"%PDF-1.4", "application/pdf")},
+            )
+            self.assertEqual(resp.status_code, 400)
+            self.assertIn("不支持的文件类型", resp.json()["detail"])
+
+    def test_upload_accepts_media_suffix(self):
+        from fastapi.testclient import TestClient
+        from moss_transcribe_diarize.app.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            client = TestClient(app)
+            resp = client.post(
+                "/api/jobs",
+                files={"file": ("video.MKV", b"video-bytes", "application/octet-stream")},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class CookiesTempFileTest(unittest.TestCase):
+    def test_check_cookies_deletes_uploaded_temp_file(self):
+        """cookies 检测接口用完临时文件必须删除,登录凭据不能残留在 runs 根目录。"""
+        from fastapi.testclient import TestClient
+        from moss_transcribe_diarize.app.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            client = TestClient(app)
+            cookies_content = (
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t0\tCONSENT\tYES\n"
+            )
+            resp = client.post(
+                "/api/cookies/check",
+                files={"file": ("cookies.txt", cookies_content.encode("utf-8"), "text/plain")},
+                data={"browser": "none"},
+            )
+            self.assertEqual(resp.status_code, 200)
+            leftovers = list(Path(tmpdir).glob("*.cookies.txt"))
+            self.assertEqual(leftovers, [], f"cookies 临时文件泄漏: {leftovers}")
+
+
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
 class AppApiTest(unittest.TestCase):
     def test_job_lifecycle_and_missing_ffmpeg_render_error(self):
         from fastapi.testclient import TestClient

@@ -58,7 +58,8 @@ def export_ass(
     segments = list(segments)
     speakers = sorted({segment.speaker for segment in segments})
     style_lines = [_ass_style_line("Default", style, font_size, style.primary_color)]
-    if style.speaker_colors:
+    # 只有一个说话人时按说话人配色没有意义,回落到统一颜色(primary_color)。
+    if style.speaker_colors and len(speakers) > 1:
         for index, speaker in enumerate(speakers):
             color = SPEAKER_COLORS[index % len(SPEAKER_COLORS)]
             style_lines.append(_ass_style_line(_speaker_style_name(speaker), style, font_size, color))
@@ -251,6 +252,7 @@ def _ass_dialogue_events(
         return []
 
     boundaries = sorted({time for segment in ordered for time in (segment.start, segment.end)})
+    speakers = {segment.speaker for segment in ordered}
     events: list[tuple[float, float, str, str]] = []
     for start, end in zip(boundaries, boundaries[1:]):
         if end <= start:
@@ -258,7 +260,7 @@ def _ass_dialogue_events(
         active = [segment for segment in ordered if segment.start < end and segment.end > start]
         if not active:
             continue
-        style_name = _event_style_name(active, style)
+        style_name = _event_style_name(active, style, speakers)
         text = r"\N".join(
             _ass_escape(_display_text(segment, show_speaker=style.show_speaker, speaker_names=style.speaker_names))
             for segment in active
@@ -270,8 +272,14 @@ def _ass_dialogue_events(
     return events
 
 
-def _event_style_name(active: list[SubtitleSegment], style: SubtitleStyle) -> str:
-    if len(active) == 1 and style.speaker_colors:
+def _event_style_name(
+    active: list[SubtitleSegment],
+    style: SubtitleStyle,
+    speakers: set[str],
+) -> str:
+    # 单说话人时没有 per-speaker 样式可用(export_ass 只在多说话人时生成),
+    # 直接走 Default(统一颜色)。
+    if style.speaker_colors and len(speakers) > 1 and len(active) == 1 and active[0].speaker:
         return _speaker_style_name(active[0].speaker)
     return "Default"
 
@@ -319,6 +327,8 @@ def clean_source_captions(segments: list[SubtitleSegment]) -> list[SubtitleSegme
                 if len(text) >= len(prev.text):
                     prev.text = text
                 prev.end = max(prev.end, seg.end)
+                if seg.items is not None:
+                    prev.items = (prev.items or []) + seg.items
                 continue
         cleaned.append(
             SubtitleSegment(
@@ -327,6 +337,7 @@ def clean_source_captions(segments: list[SubtitleSegment]) -> list[SubtitleSegme
                 end=max(seg.start, seg.end),
                 speaker=seg.speaker,
                 text=text,
+                items=seg.items,
             )
         )
     for index, seg in enumerate(cleaned, start=1):

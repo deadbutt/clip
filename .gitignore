@@ -23,8 +23,19 @@ models/
 *.log
 
 # Tooling workspace and transient eval artifacts.
-.zcode/tmp/
+.zcode/
 node_modules/
+
+# Local one-off scripts / tooling leftovers (kept on disk, not part of the project).
+_test_guide.js
+analyze_diar.py
+test_full_pipeline.py
+package.json
+package-lock.json
+
+# Packaging output.
+build/
+dist/
 
 # Runtime config (LLM profiles contain API keys).
 config/
