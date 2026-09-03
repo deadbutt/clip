@@ -472,7 +472,11 @@ def _extract_audio_file(media_path: str | Path, *, work_dir: str | Path, stem: s
         "wav",
         str(wav_path),
     ]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # 抽 16k 单声道 wav 是短有界操作;挂死的 ffmpeg 会卡住整条说话人
+    # 分离流水线,超时后按提取失败报错。
+    completed = subprocess.run(
+        command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600
+    )
     if completed.returncode != 0:
         tail = "\n".join((completed.stderr or completed.stdout or "").splitlines()[-8:])
         raise RuntimeError(f"audio extraction failed: {tail}")

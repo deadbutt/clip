@@ -20,6 +20,7 @@ dependencies = [
   "uvicorn>=0.30",
   "python-multipart>=0.0.9",
   "sentencepiece>=0.2.0",
+  "pypinyin>=0.53",
 ]
 
 [project.scripts]

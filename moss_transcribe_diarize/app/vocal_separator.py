@@ -60,10 +60,13 @@ def separate_vocals(
         tmp44k = out_dir / "vocals_src_44k.wav"
 
         ffmpeg = detect_ffmpeg().ffmpeg
+        # 音频抽取是短有界操作，超时说明 ffmpeg 挂死；TimeoutExpired
+        # 走外层 except 的降级路径（返回 None，任务继续用原音轨跑）。
         subprocess.run(
             [ffmpeg, "-v", "error", "-i", str(media_path), "-vn", "-ac", "2", "-ar", "44100", str(tmp44k), "-y"],
             check=True,
             capture_output=True,
+            timeout=600,
         )
         try:
             model = load_safetensors_model(str(DEMUCS_WEIGHTS)).eval().to(device)
@@ -122,6 +125,7 @@ def has_background_audio(
                 [ffmpeg, "-v", "error", "-i", str(media_path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path), "-y"],
                 check=True,
                 capture_output=True,
+                timeout=600,
             )
             waveform, sr = torchaudio.load(str(audio_path))
         except Exception:

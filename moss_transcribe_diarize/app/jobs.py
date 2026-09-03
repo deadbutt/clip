@@ -35,6 +35,7 @@ from moss_transcribe_diarize.subtitle import (
 from . import vocal_separator
 from .clips import generate_clip_candidates, rebase_segments_for_clip
 from .ffmpeg import (
+    FFmpegCancelled,
     burn_ass_subtitles,
     burn_ass_subtitles_clip,
     detect_ffmpeg,
@@ -42,6 +43,7 @@ from .ffmpeg import (
     probe_video_size,
 )
 from .speaker_labeler import label_speakers
+from .text_search import apply_replacements, search_segment_texts
 from .text_translator import (
     apply_translations,
     collect_pretranslation_skips,
@@ -50,11 +52,40 @@ from .text_translator import (
 
 RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "proofreading", "rendering"}
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
+# API 触发的用户后处理状态: {status: (进度信息字段, 中文名)}。重启中断时回
+# waiting_review 而非重新入队,避免 worker 重跑后处理覆盖用户编辑。
+_POSTPROCESS_STATES: dict[str, tuple[str | None, str]] = {
+    "translating": ("translation_info", "翻译"),
+    "proofreading": ("proofread_info", "校对"),
+    "rendering": (None, "烧录"),
+}
 
 logger = logging.getLogger(__name__)
 
 # 词级 diff 对齐的最低匹配率:低于它说明文本被重写,插值时间戳没有意义。
 _MIN_ALIGN_MATCH_RATIO = 0.4
+# segments 解析缓存条目上限:每条可达数 MB(词级时间戳),不设限的话
+# 长期运行的服务会随历史任务数无限增长;8 个活跃编辑任务已绰绰有余。
+_SEGMENTS_CACHE_MAX = 8
+
+
+class _AppendFileHandler(logging.Handler):
+    """每条日志即开即写即关。
+
+    常驻 FileHandler 会在 Windows 上一直锁住 job 目录（删除/清理时
+    PermissionError）；本任务日志频率很低（状态迁移、批次进度），
+    逐条开关文件的代价可以忽略。"""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.path = path
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(self.format(record) + "\n")
+        except Exception:
+            self.handleError(record)
 
 
 def _normalize_words(text: str) -> list[str]:
@@ -125,7 +156,12 @@ def align_items_to_text(
     return out
 
 
-class JobCancelled(RuntimeError):
+class JobCancelled(BaseException):
+    """任务被用户取消。
+
+    继承 BaseException 而非 RuntimeError：管线里大量 `except Exception` /
+    `except RuntimeError` 是刻意的容错/重试设计（如 LLM 批次重试），
+    取消必须穿透它们直达各阶段入口的 `except JobCancelled`。"""
     pass
 
 # Audio consumes ~12.5 prompt tokens/sec (Whisper 30s -> 375 tokens after 4x merge).
@@ -362,6 +398,20 @@ class JobManager:
         self._proofread_lock = threading.Lock()
         self._progress_save_times: dict[str, float] = {}
         self._cancelled_jobs: set[str] = set()
+        # 正在渲染的片段(job_id/clip_id):两个 ffmpeg 写同一输出文件会互相损坏。
+        self._rendering_clips: set[str] = set()
+        self._rendering_clips_lock = threading.Lock()
+        # worker 正在处理的任务 id：delete_job 据此有界等待 worker 停下,
+        # 避免 rmtree 与 worker 写文件竞态(Windows 上文件被占用删不干净)。
+        self._active_jobs: set[str] = set()
+        self._event_hub: Any = None
+        self._event_loop: Any = None
+        self._emit_times: dict[str, float] = {}
+        self._emit_status: dict[str, str] = {}
+        self._job_loggers: dict[str, logging.Logger] = {}
+        # segments.json 的解析缓存: job_id -> (stat 指纹, 解析结果)。
+        # 指纹 = (mtime_ns, size),任何写入(应用保存/外部 srt 反向同步)都会改变它,缓存自动失效。
+        self._segments_cache: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
         self._load_existing_jobs()
         self._worker = threading.Thread(target=self._worker_loop, name="mtd-job-worker", daemon=True)
         self._worker.start()
@@ -462,6 +512,11 @@ class JobManager:
         )
         self._jobs[job.id] = job
         self._save_job(job)
+        self.job_log(
+            job,
+            f"任务创建(上传): media={job.media_name}, model={job.model}, speaker_count={job.speaker_count}, "
+            f"diarization={job.diarization_backend}, max_new_tokens={job.max_new_tokens}, decoding={job.decoding}",
+        )
         return job, input_path
 
     def create_job_for_url(
@@ -515,11 +570,83 @@ class JobManager:
         )
         self._jobs[job.id] = job
         self._save_job(job)
+        self.job_log(
+            job,
+            f"任务创建(链接): url={job.source_url}, model={job.model}, speaker_count={job.speaker_count}, "
+            f"diarization={job.diarization_backend}, force_transcribe={job.force_transcribe}",
+        )
         self._queue.put(job.id)
         return job
 
     def enqueue(self, job_id: str) -> None:
         self._queue.put(job_id)
+
+    # ------------------------------------------------------------ 事件与日志
+
+    def bind_events(self, loop: Any, hub: Any) -> None:
+        """server 启动时注入事件循环与 SSE hub；worker 线程经 call_soon_threadsafe 桥接。"""
+        self._event_loop = loop
+        self._event_hub = hub
+
+    def _emit_job_event(self, job: JobRecord, *, force: bool = False) -> None:
+        hub = self._event_hub
+        loop = self._event_loop
+        if hub is None or loop is None:
+            return
+        now = time.time()
+        if not force and now - self._emit_times.get(job.id, 0.0) < 0.4:
+            return
+        self._emit_times[job.id] = now
+        try:
+            loop.call_soon_threadsafe(hub.publish, f"job:{job.id}", "job", job.to_dict())
+        except RuntimeError:
+            pass  # 关机时事件循环已关闭
+
+    def _logger_for(self, job: JobRecord) -> logging.Logger:
+        """每任务一个独立 logger，写 job_dir/pipeline.log，互不串扰。"""
+        log = self._job_loggers.get(job.id)
+        if log is not None:
+            return log
+        log = logging.getLogger(f"mtd.job.{job.id}")
+        log.setLevel(logging.INFO)
+        log.propagate = False
+        log.handlers.clear()
+        try:
+            handler = _AppendFileHandler(Path(job.job_dir) / "pipeline.log")
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            log.addHandler(handler)
+        except OSError:
+            pass  # 目录不可写时退化为只走控制台
+        self._job_loggers[job.id] = log
+        return log
+
+    def job_log(self, job: JobRecord, message: str, *, level: int = logging.INFO, exc_info: bool = False) -> None:
+        try:
+            self._logger_for(job).log(level, message, exc_info=exc_info)
+        except Exception:
+            pass
+
+    def _close_job_logger(self, job_id: str) -> None:
+        log = self._job_loggers.pop(job_id, None)
+        if log is None:
+            return
+        for handler in log.handlers:
+            try:
+                handler.close()
+            except Exception:
+                pass
+        log.handlers.clear()
+
+    # ------------------------------------------------------------ 取消
+
+    def cancel_job(self, job_id: str) -> JobRecord:
+        job = self.get_job(job_id)
+        if job.status not in RUNNING_STATES:
+            raise RuntimeError("任务当前不在运行中。")
+        self._cancelled_jobs.add(job_id)
+        self.job_log(job, "用户请求取消任务")
+        self._emit_job_event(job, force=True)
+        return job
 
     # ------------------------------------------------------------ 热词词表
 
@@ -625,15 +752,59 @@ class JobManager:
         job = self.get_job(job_id)
         if job.status in RUNNING_STATES:
             self._cancelled_jobs.add(job_id)
+            self._jobs.pop(job_id, None)
+            # 有界等待 worker 真正停下再删目录，避免 rmtree 与文件写入竞态；
+            # 超时（worker 卡在不可中断的子进程里）则退回旧行为：尽力删。
+            deadline = time.time() + 15.0
+            while time.time() < deadline and job_id in self._active_jobs:
+                time.sleep(0.1)
+        self._close_job_logger(job_id)
         self._jobs.pop(job_id, None)
+        self._emit_times.pop(job_id, None)
+        self._emit_status.pop(job_id, None)
+        self._segments_cache.pop(job_id, None)
+        self._progress_save_times.pop(job_id, None)
+        self._cancelled_jobs.discard(job_id)
         shutil.rmtree(job.job_dir, ignore_errors=True)
 
     def list_segments(self, job_id: str) -> list[dict[str, Any]]:
+        """读取任务字幕段落(带词级 items)。
+
+        命中缓存时返回的是共享对象——调用方不得就地修改返回值或其嵌套结构
+        (现有调用点均为只读或 from_dict/{**seg} 拷贝,新增调用点必须遵守)。
+        """
+        return self._load_segments(job_id)[0]
+
+    def list_segments_with_version(self, job_id: str) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
+        """同 list_segments,并附带 segments.json 的 stat 指纹(供 ETag/304 判断)。
+
+        指纹与缓存 key 来自同一次调用,保证"数据与指纹"一致,不会出现
+        ETag 比数据新导致客户端 304 卡在旧稿的情况。
+        """
+        return self._load_segments(job_id)
+
+    def _load_segments(self, job_id: str) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
         job = self.get_job(job_id)
         self._maybe_sync_segments_from_subtitle_files(job)
-        if not job.segments_path.exists():
-            return []
-        return json.loads(job.segments_path.read_text(encoding="utf-8"))
+        path = job.segments_path
+        if not path.exists():
+            self._segments_cache.pop(job_id, None)
+            return [], None
+        stat = path.stat()
+        key = (stat.st_mtime_ns, stat.st_size)
+        cached = self._segments_cache.get(job_id)
+        if cached is not None and cached[0] == key:
+            # 命中即移到末尾:配合上限弹出最早条目,行为等价 LRU。
+            self._segments_cache[job_id] = self._segments_cache.pop(job_id)
+            return cached[1], key
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self._segments_cache[job_id] = (key, data)
+        while len(self._segments_cache) > _SEGMENTS_CACHE_MAX:
+            oldest = next(iter(self._segments_cache))
+            if oldest == job_id:
+                break
+            self._segments_cache.pop(oldest, None)
+        return data, key
 
     def update_segments(
         self,
@@ -653,6 +824,77 @@ class JobManager:
         else:
             self._touch(job, error=None)
         return [segment.to_dict() for segment in segments]
+
+    # ------------------------------------------------------------ 查找与替换
+
+    def search_segments(
+        self,
+        job_id: str,
+        query: str,
+        *,
+        mode: str = "literal",
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        if mode not in {"literal", "pinyin"}:
+            raise ValueError("mode must be 'literal' or 'pinyin'.")
+        segments = self.list_segments(job_id)
+        matches = search_segment_texts(segments, query, mode=mode, limit=limit)
+        return {
+            "query": query,
+            "mode": mode,
+            "total": len(matches),
+            "matches": [
+                {
+                    "segment_id": match.segment_id,
+                    "index": match.index,
+                    "char_start": match.char_start,
+                    "char_end": match.char_end,
+                    "snippet": match.snippet,
+                }
+                for match in matches
+            ],
+        }
+
+    def replace_segments(
+        self,
+        job_id: str,
+        query: str,
+        replacement: str,
+        *,
+        mode: str = "literal",
+        segment_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot edit segments while the job is running.")
+        if mode not in {"literal", "pinyin"}:
+            raise ValueError("mode must be 'literal' or 'pinyin'.")
+        if not str(query):
+            raise ValueError("query must not be empty.")
+        segments = self.list_segments(job_id)
+        allowed = set(segment_ids) if segment_ids is not None else None
+        payload: list[dict[str, Any]] = []
+        hits = 0
+        touched_ids: list[str] = []
+        for segment in segments:
+            if allowed is not None and str(segment.get("id")) not in allowed:
+                payload.append(segment)
+                continue
+            text = str(segment.get("text") or "")
+            matches = search_segment_texts([segment], query, mode=mode)
+            if not matches:
+                payload.append(segment)
+                continue
+            ranges = [(match.char_start, match.char_end) for match in matches]
+            payload.append({**segment, "text": apply_replacements(text, ranges, str(replacement))})
+            hits += len(ranges)
+            touched_ids.append(str(segment.get("id")))
+        if not hits:
+            return {"replacements": 0, "segments": segments, "segment_ids": []}
+        # 走 update_segments：词级 items 演化 + srt/ass 同步重写。
+        segments_out = self.update_segments(job_id, payload)
+        self.job_log(job, f"批量替换 mode={mode}: {query!r} -> {replacement!r}，共 {hits} 处 / {len(touched_ids)} 段")
+        return {"replacements": hits, "segments": segments_out, "segment_ids": touched_ids}
 
     def _backfill_items_from_disk(self, job: JobRecord, segments: list[SubtitleSegment]) -> None:
         """整包保存的 payload 通常不带 items(前端只缓存 5 个字段)。
@@ -997,43 +1239,61 @@ class JobManager:
         end = max(start + 0.25, float(end))
         style = SubtitleStyle.from_dict(style_payload)
         clip_id = _safe_clip_name(name or f"clip_{start:.2f}_{end:.2f}")
-        job.clips_dir.mkdir(parents=True, exist_ok=True)
-        ass_path = job.clips_dir / f"{clip_id}.ass"
-        srt_path = job.clips_dir / f"{clip_id}.srt"
-        metadata_path = job.clips_dir / f"{clip_id}.json"
-        output_path = job.clips_dir / f"{clip_id}.mp4"
-        segments = self._clip_segments(job, start=start, end=end)
-        if not segments:
-            raise RuntimeError("The selected range does not contain any subtitle segments.")
-        width, height = probe_video_size(job.input_path)
-        write_text(
-            ass_path,
-            export_ass(segments, style=style, video_width=width, video_height=height),
-            encoding="utf-8-sig",
-        )
-        write_text(
-            srt_path,
-            export_srt(segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
-            encoding="utf-8-sig",
-        )
-        write_text(
-            metadata_path,
-            json.dumps(
-                {
-                    "source_media": job.media_name,
-                    "source_start": start,
-                    "source_end": end,
-                    "duration": end - start,
-                    "clip_timeline_start": 0.0,
-                    "clip_timeline_end": end - start,
-                    "segments": [segment.to_dict() for segment in segments],
-                },
-                ensure_ascii=False,
-                indent=2,
+        clip_key = f"{job.id}/{clip_id}"
+        with self._rendering_clips_lock:
+            if clip_key in self._rendering_clips:
+                raise RuntimeError("该片段正在渲染中,请等当前渲染完成后再试。")
+            self._rendering_clips.add(clip_key)
+        try:
+            job.clips_dir.mkdir(parents=True, exist_ok=True)
+            ass_path = job.clips_dir / f"{clip_id}.ass"
+            srt_path = job.clips_dir / f"{clip_id}.srt"
+            metadata_path = job.clips_dir / f"{clip_id}.json"
+            output_path = job.clips_dir / f"{clip_id}.mp4"
+            segments = self._clip_segments(job, start=start, end=end)
+            if not segments:
+                raise RuntimeError("The selected range does not contain any subtitle segments.")
+            width, height = probe_video_size(job.input_path)
+            write_text(
+                ass_path,
+                export_ass(segments, style=style, video_width=width, video_height=height),
+                encoding="utf-8-sig",
             )
-            + "\n",
-        )
-        burn_ass_subtitles_clip(job.input_path, ass_path, output_path, start=start, end=end, style=style)
+            write_text(
+                srt_path,
+                export_srt(segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
+                encoding="utf-8-sig",
+            )
+            write_text(
+                metadata_path,
+                json.dumps(
+                    {
+                        "source_media": job.media_name,
+                        "source_start": start,
+                        "source_end": end,
+                        "duration": end - start,
+                        "clip_timeline_start": 0.0,
+                        "clip_timeline_end": end - start,
+                        "segments": [segment.to_dict() for segment in segments],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+            burn_ass_subtitles_clip(
+                job.input_path,
+                ass_path,
+                output_path,
+                start=start,
+                end=end,
+                style=style,
+                # 切片烧录不进任务状态机（不占 RUNNING_STATES），取消检查主要
+                # 兜住任务被删除的情况，避免给已删除目录继续写产物。
+                cancel_check=lambda: job.id not in self._jobs,
+            )
+        finally:
+            self._rendering_clips.discard(clip_key)
         return {
             "filename": output_path.name,
             "path": str(output_path),
@@ -1076,6 +1336,7 @@ class JobManager:
 
                 def update_translation_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
                     ratio = 1.0 if total <= 0 else max(0.0, min(1.0, done / total))
+                    self.job_log(job, f"翻译进度 {done}/{total}（批 {batch_start + 1}/{batch_count}）")
                     job.translation_info = {
                         "applied": False,
                         "in_progress": True,
@@ -1145,6 +1406,14 @@ class JobManager:
                     "validation_issue_count": len(validation_issues),
                     "validation_issues": validation_issues[:20],
                 }
+            except JobCancelled:
+                self._cancelled_jobs.discard(job.id)
+                job.translation_info = {**job.translation_info, "in_progress": False, "cancelled": True}
+                job.status = "waiting_review"
+                job.progress = max(job.progress, 0.95)
+                self._touch(job, error=None)
+                self.job_log(job, "翻译已取消，回到待校对")
+                return {"cancelled": True}
             except Exception as exc:
                 job.translation_info = {
                     **job.translation_info,
@@ -1200,6 +1469,7 @@ class JobManager:
                     ratio = 0.7 * (done / total) if phase == "pass1" and total else 0.7
                     if phase == "pass2" and done:
                         ratio = 1.0
+                    self.job_log(job, f"校对进度 phase={phase} {done}/{total}")
                     job.proofread_info = {
                         **job.proofread_info,
                         "in_progress": True,
@@ -1242,6 +1512,14 @@ class JobManager:
                 job.progress = 0.95
                 self._touch(job, error=None)
                 return result
+            except JobCancelled:
+                self._cancelled_jobs.discard(job.id)
+                job.proofread_info = {**job.proofread_info, "in_progress": False, "cancelled": True}
+                job.status = "waiting_review"
+                job.progress = max(job.progress, 0.95)
+                self._touch(job, error=None)
+                self.job_log(job, "AI 校对已取消，回到待校对")
+                return {"cancelled": True}
             except Exception as exc:
                 job.proofread_info = {
                     **job.proofread_info,
@@ -1390,6 +1668,7 @@ class JobManager:
     def _worker_loop(self) -> None:
         while True:
             job_id = self._queue.get()
+            self._active_jobs.add(job_id)
             try:
                 self._process_job(self.get_job(job_id))
             except Exception:
@@ -1397,6 +1676,7 @@ class JobManager:
                 # 都不得杀死唯一的 worker 线程,否则后续任务永远停在 queued。
                 logger.exception("Job worker failed on job %s", job_id)
             finally:
+                self._active_jobs.discard(job_id)
                 self._queue.task_done()
 
     def _load_existing_jobs(self) -> None:
@@ -1406,6 +1686,22 @@ class JobManager:
                 job = JobRecord.from_dict(data)
                 if not job.job_dir:
                     job.job_dir = str(path.parent)
+                if job.status in _POSTPROCESS_STATES:
+                    # 烧录/翻译/校对由 API 触发,不走 worker 队列;中断时转录与
+                    # 用户编辑早已落盘,重新入队会重跑后处理并覆盖 segments.json,
+                    # 回 waiting_review 让用户点一下重试即可。
+                    info_key, label = _POSTPROCESS_STATES[job.status]
+                    if info_key:
+                        info = dict(getattr(job, info_key) or {})
+                        info["in_progress"] = False
+                        setattr(job, info_key, info)
+                    job.status = "waiting_review"
+                    job.progress = max(job.progress, 0.95)
+                    job.error = f"服务重启导致{label}中断，请重试"
+                    job.updated_at = time.time()
+                    self._save_job(job)
+                    self._jobs[job.id] = job
+                    continue
                 if job.status in RUNNING_STATES:
                     # 断点续传：中断的任务自动重新入队，而不是标 failed
                     job.status = "queued"
@@ -1421,6 +1717,10 @@ class JobManager:
                 continue
 
     def _process_job(self, job: JobRecord) -> None:
+        # 提前绑定：except 分支里要引用（下载阶段取消时 try 内还没执行到赋值）
+        vocals_path = None
+        vocals_future = None
+        vocals_executor = None
         try:
             if job.source == "url" and job.source_url and not Path(job.input_path).exists():
                 self._download_phase(job)
@@ -1439,18 +1739,19 @@ class JobManager:
             caption_segments = self._load_source_captions(job)
             if caption_segments is None:
                 self._apply_auto_max_new_tokens(job)
+            else:
+                self.job_log(job, f"使用人工字幕作为文稿，跳过转录（{len(caption_segments)} 段）")
             self._raise_if_cancelled(job.id)
 
             # 人声分离与 whisper 并行：demucs(~2GB) + whisper(~3GB) 显存
             # 可同卡共存，转录期间顺手把 BGM 剥掉，总耗时几乎不变。
             # pyannote 改吃人声轨（BGM 会把说话人嵌入拉偏导致人物融合），
             # whisper 仍跑原始音频（分离伪影会重伤 ASR 召回率）。
-            vocals_path = None
-            vocals_future = None
             diarization_enabled = self._resolve_diarization_backend(job.diarization_backend) not in {"none", "off", "disabled"}
             if diarization_enabled and job.speaker_count != 0 and vocal_separator.vocal_separation_available():
                 from concurrent.futures import ThreadPoolExecutor
 
+                self.job_log(job, "后台启动 demucs 人声分离（与转录并行）")
                 vocals_executor = ThreadPoolExecutor(max_workers=1)
                 vocals_future = vocals_executor.submit(
                     vocal_separator.separate_vocals, job.input_path, job.job_dir
@@ -1493,6 +1794,11 @@ class JobManager:
                 )
                 self._raise_if_cancelled(job.id)
                 job.generated_tokens = result.generated_tokens
+                self.job_log(
+                    job,
+                    f"转录完成: {len(result.text)} 字符, generated_tokens={result.generated_tokens}, "
+                    f"elapsed={result.elapsed_sec:.1f}s",
+                )
                 self._set_status(job, "postprocessing", 0.85, error=None)
                 job.raw_transcript_path.write_text(result.text, encoding="utf-8")
                 # 保存 words checkpoint（断点续传用）
@@ -1511,8 +1817,10 @@ class JobManager:
             if vocals_future is not None:
                 try:
                     vocals_path = vocals_future.result()
-                except Exception:
+                    self.job_log(job, "demucs 人声分离完成")
+                except Exception as exc:
                     vocals_path = None
+                    self.job_log(job, f"demucs 人声分离失败，回退原始音频: {exc}", level=logging.WARNING, exc_info=True)
                 finally:
                     vocals_executor.shutdown(wait=False)
                 # 背景音门控：纯对白音轨（无 BGM）不值得喂分离人声，
@@ -1520,6 +1828,7 @@ class JobManager:
                 if vocals_path is not None and not vocal_separator.has_background_audio(
                     result.words if result else None, job.input_path, job.job_dir
                 ):
+                    self.job_log(job, "背景音门控判定无 BGM，丢弃人声轨，pyannote 改用原始音频")
                     try:
                         Path(vocals_path).unlink(missing_ok=True)
                     except OSError:
@@ -1549,6 +1858,7 @@ class JobManager:
                 except OSError:
                     pass
             job.speaker_labeling = speaker_info.to_dict()
+            self.job_log(job, "说话人标记完成")
             self._write_subtitle_files(job, segments)
             if result is not None:
                 job.prompt_len = result.prompt_len
@@ -1556,13 +1866,29 @@ class JobManager:
             self._set_status(job, "waiting_review", 0.95, error=None)
             self._progress_save_times.pop(job.id, None)
         except JobCancelled:
+            if vocals_executor is not None:
+                # 取消路径同样要关 demucs 线程池，否则孤儿线程占着 ~2GB 显存
+                # 直到推理自然跑完。正在跑的推理无法中断（demucs 无取消钩子），
+                # shutdown(wait=False) 只保证不阻塞取消流程。
+                vocals_future.cancel()
+                vocals_executor.shutdown(wait=False)
             self._cancelled_jobs.discard(job.id)
             self._progress_save_times.pop(job.id, None)
+            self._emit_times.pop(job.id, None)
+            if job.id in self._jobs:
+                # 用户主动取消：任务与产物保留，落 cancelled 终态。
+                # 删除触发的取消 job 已移出 _jobs，不能回写 job.json 复活目录。
+                job.status = "cancelled"
+                self._touch(job, error=None)
         except Exception as exc:
+            if vocals_executor is not None:
+                vocals_future.cancel()
+                vocals_executor.shutdown(wait=False)
             if job.id in self._cancelled_jobs:
                 self._cancelled_jobs.discard(job.id)
                 self._progress_save_times.pop(job.id, None)
                 return
+            self.job_log(job, f"任务失败: {exc}", level=logging.ERROR, exc_info=True)
             self._set_status(job, "failed", 1.0, error=str(exc))
             self._progress_save_times.pop(job.id, None)
 
@@ -1686,8 +2012,21 @@ class JobManager:
                     job.output_path,
                     style=style,
                     progress_callback=on_render_progress,
+                    cancel_check=lambda: job.id in self._cancelled_jobs or job.id not in self._jobs,
                 )
                 self._set_status(job, "done", 1.0, error=None)
+            except FFmpegCancelled:
+                self._cancelled_jobs.discard(job.id)
+                job.status = "waiting_review"
+                job.progress = 0.95
+                self._touch(job, error=None)
+                self.job_log(job, "烧录已取消，回到待校对")
+            except JobCancelled:
+                self._cancelled_jobs.discard(job.id)
+                job.status = "waiting_review"
+                job.progress = 0.95
+                self._touch(job, error=None)
+                self.job_log(job, "烧录已取消，回到待校对")
             except Exception as exc:
                 self._set_status(job, "waiting_review", 0.95, error=f"Render failed: {exc}")
 
@@ -1764,8 +2103,12 @@ class JobManager:
         save: bool = True,
     ) -> None:
         self._raise_if_cancelled(job.id)
+        previous = job.status
         job.status = status
         job.progress = max(0.0, min(1.0, progress))
+        if status != previous:
+            detail = f" -> {status} ({job.progress:.0%})" + (f" error={error}" if error else "")
+            self.job_log(job, previous + detail, level=logging.ERROR if error else logging.INFO)
         self._touch(job, error=error, save=save)
 
     def _resolve_inference_options(
@@ -1825,6 +2168,8 @@ class JobManager:
         job.updated_at = time.time()
         if save:
             self._save_job(job)
+        self._emit_job_event(job, force=self._emit_status.get(job.id) != job.status)
+        self._emit_status[job.id] = job.status
 
     def _save_job(self, job: JobRecord) -> None:
         job.job_path.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")

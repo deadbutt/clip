@@ -78,6 +78,14 @@ const renderProgressBarEl = document.querySelector('#renderProgressBar');
 const modelInfoEl = document.querySelector('#modelinfo');
 const tbody = document.querySelector('#segments');
 const tableWrap = document.querySelector('.table-column .table-wrap');
+const cancelCurrentBtn = document.querySelector('#cancelCurrent');
+const searchQueryInput = document.querySelector('#searchQuery');
+const searchModeSelect = document.querySelector('#searchMode');
+const searchCountEl = document.querySelector('#searchCount');
+const searchPrevBtn = document.querySelector('#searchPrev');
+const searchNextBtn = document.querySelector('#searchNext');
+const replaceTextInput = document.querySelector('#replaceText');
+const replaceAllBtn = document.querySelector('#replaceAll');
 // 用户手动滚动字幕表格后的一段时间内，禁止视频播放进度自动跟随滚动
 let tableUserScrollUntil = 0;
 const TABLE_USER_SCROLL_HOLD_MS = 3000;
@@ -206,9 +214,14 @@ let segmentDragState = null;
 let clipDragState = null;
 let subtitleSyncTimer = 0;
 let subtitleSyncInFlight = false;
+// segments 接口的 ETag({jobId, etag}):文件没变时服务器回 304,跳过整段解析/深比较/重渲染。
+// 切换任务或本地写操作(保存/拆分/合并/替换等走 renderSegments)时置空,下次轮询全量拉一次再续上。
+let segmentsEtag = null;
 let cachedSegments = null;
 let undoStack = [];
 let redoStack = [];
+// 撤销栈所属的任务 id：切换任务时据此清空，防止 A 任务的历史快照被撤销进 B 任务
+let undoJobId = null;
 const MAX_UNDO = 50;
 let cachedTimelineSegments = [];
 let cachedTimelineLayout = { lanes: new Map(), count: 1 };
@@ -388,12 +401,28 @@ function markEditorDirty() {
 
 function pushUndoSnapshot() {
   if (!cachedSegments) return;
+  undoJobId = currentJob ? currentJob.id : undoJobId;
   const snapshot = JSON.stringify(cachedSegments);
   if (undoStack.length > 0 && undoStack[undoStack.length - 1] === snapshot) return;
   undoStack.push(snapshot);
   if (undoStack.length > MAX_UNDO) undoStack.shift();
   redoStack = [];
   updateUndoRedoButtons();
+}
+
+function resetUndoHistory() {
+  undoStack = [];
+  redoStack = [];
+  undoJobId = null;
+  updateUndoRedoButtons();
+}
+
+function markEditorDirtyWithUndo() {
+  // 每轮修改（从已保存状态出发的第一次变更）前推一次基线快照。
+  // 不能只依赖各调用点自觉 pushUndoSnapshot：样式/说话人名这类不进快照的修改
+  // 也会置脏 editorDirty，若它们先发生，后续文本编辑的基线就永远推不进去。
+  if (!editorDirty) pushUndoSnapshot();
+  markEditorDirty();
 }
 
 async function undoEdit() {
@@ -577,11 +606,16 @@ checkCookiesBtn.addEventListener('click', async () => {
   }
 });
 
-newTaskBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
-openNewBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
-backFromProcessingBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
+function confirmLeaveUnsavedChanges() {
+  if (!editorDirty) return true;
+  return window.confirm('有未保存的字幕修改，离开后将丢失。确定离开吗？');
+}
+
+newTaskBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
+openNewBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
+backFromProcessingBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
-backToTasksBtn.addEventListener('click', () => showImportView({ clearDraft: true }));
+backToTasksBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
 openSettingsBtn.addEventListener('click', () => { openSettings(); loadHotwordsGlossary(); });
 closeSettingsBtn.addEventListener('click', closeSettings);
 openTranslateBtn.addEventListener('click', openTranslate);
@@ -651,6 +685,12 @@ deleteCurrentBtn.addEventListener('click', async () => {
   if (currentJob) await deleteJob(currentJob.id);
 });
 
+cancelCurrentBtn.addEventListener('click', async () => {
+  if (currentJob && window.confirm('确定取消当前任务？已完成的转录/翻译产物会保留。')) {
+    await cancelJobById(currentJob.id);
+  }
+});
+
 jobListEl.addEventListener('click', async (event) => {
   if (event.target.closest('a')) {
     event.stopPropagation();
@@ -660,6 +700,14 @@ jobListEl.addEventListener('click', async (event) => {
   if (deleteButton) {
     event.stopPropagation();
     await deleteJob(deleteButton.dataset.deleteId);
+    return;
+  }
+  const cancelButton = event.target.closest('[data-cancel-id]');
+  if (cancelButton) {
+    event.stopPropagation();
+    if (window.confirm('确定取消该任务？已完成的转录/翻译产物会保留。')) {
+      await cancelJobById(cancelButton.dataset.cancelId);
+    }
     return;
   }
   const item = event.target.closest('[data-job-id]');
@@ -999,6 +1047,8 @@ tbody.addEventListener('input', (event) => {
   }
 });
 tbody.addEventListener('change', (event) => {
+  // change 可能不经过 input（自动填充等）：先把变更前状态推入撤销栈再更新缓存
+  if (!editorDirty) pushUndoSnapshot();
   updateCachedSegmentFromRow(event.target.closest('tr[data-index]'));
   markEditorDirty();
 });
@@ -1030,17 +1080,17 @@ tbody.addEventListener('keydown', (event) => {
 speakerMapEl.addEventListener('input', (event) => {
   if (event.target.classList.contains('speaker-color')) {
     // 调色盘:记录该说话人的自定义颜色,联动行内圆点/预览/烧录。
+    markEditorDirtyWithUndo();
     const speaker = event.target.dataset.speaker || '';
     if (speaker) speakerColorOverrides[speaker] = event.target.value;
     refreshSpeakerDots();
     const dot = event.target.closest('.speaker-map-row')?.querySelector('.speaker-dot');
     if (dot) dot.style.background = event.target.value;
-    markEditorDirty();
     updateSubtitlePreview();
     return;
   }
+  markEditorDirtyWithUndo();
   syncSpeakerNameInputs();
-  markEditorDirty();
   updateSubtitlePreview();
 });
 tbody.addEventListener('focusin', (event) => {
@@ -1055,7 +1105,7 @@ tbody.addEventListener('focusin', (event) => {
 });
 for (const id of ['fontName', 'primaryColor', 'outlineColor', 'fontSize', 'marginV', 'showSpeaker', 'speakerColors', 'maskEnabled', 'maskMode', 'maskHeight', 'maskMarginV', 'maskBlur', 'maskOpacity']) {
   document.querySelector('#' + id).addEventListener('input', () => {
-    markEditorDirty();
+    markEditorDirtyWithUndo();
     updateSubtitlePreview();
     if (id === 'speakerColors') {
       renderSpeakerMap(collectSegments());
@@ -1063,7 +1113,7 @@ for (const id of ['fontName', 'primaryColor', 'outlineColor', 'fontSize', 'margi
     }
   });
   document.querySelector('#' + id).addEventListener('change', () => {
-    markEditorDirty();
+    markEditorDirtyWithUndo();
     updateSubtitlePreview();
     if (id === 'speakerColors') {
       renderSpeakerMap(collectSegments());
@@ -1133,6 +1183,7 @@ function renderJobList() {
         ${warning ? `<div class="warning">${escapeHtml(warning)}</div>` : ''}
         <div class="task-foot">
           <div class="progress task-progress"><div class="bar" style="width:${percent}%"></div></div>
+          ${RUNNING_STATES.has(job.status) ? `<button class="small ghost" data-cancel-id="${escapeHtml(job.id)}">取消</button>` : ''}
           ${canDelete ? `<button class="small ghost" data-delete-id="${escapeHtml(job.id)}">${RUNNING_STATES.has(job.status) ? '取消并删除' : '删除'}</button>` : ''}
         </div>
         ${outputLinks}
@@ -1150,6 +1201,7 @@ async function selectJob(jobId) {
     return;
   }
   currentJob = await res.json();
+  openJobEvents(currentJob.id);
   renderCurrentJob(currentJob);
 }
 
@@ -1168,8 +1220,10 @@ function showImportView(options = {}) {
   if (options.clearDraft !== false) resetImportMode();
   currentJob = null;
   stopSubtitleSyncPolling();
+  closeJobEvents();
   cachedSegments = null;
   cachedTimelineSegments = [];
+  resetUndoHistory();
   ensureClipQueueForJob();
   closeSettings();
   closeTranslate();
@@ -1240,6 +1294,7 @@ function showProcessing(job) {
   processErrorEl.textContent = job.error || truncationWarning(job);
   updateTranslateProgress(job);
   deleteCurrentBtn.disabled = false;
+  cancelCurrentBtn.classList.toggle('is-hidden', !RUNNING_STATES.has(job.status));
   setVisible(processingView);
 }
 
@@ -1479,7 +1534,29 @@ function setVisible(view) {
   workbench.classList.toggle('is-hidden', view !== workbench);
 }
 
+async function cancelJobById(jobId) {
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${jobId}/cancel`), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      setTaskNotice(data.detail || '取消失败', 'error');
+      return;
+    }
+    applyJobUpdate(data);
+    setTaskNotice('已请求取消，正在等任务停下…', '');
+  } catch (err) {
+    setTaskNotice('取消失败：' + (err.message || err), 'error');
+  }
+}
+
 async function deleteJob(jobId) {
+  // 删除不可恢复（整个 job 目录含媒体/字幕/剪辑），必须确认；
+  // 删的是当前打开的任务且带未保存修改时给出更重的警告。
+  const deletingCurrent = currentJob && currentJob.id === jobId;
+  const message = deletingCurrent && editorDirty
+    ? '确定删除该任务？任务产物与未保存的字幕修改都会一并丢失。'
+    : '确定删除该任务？媒体、字幕与剪辑产物会一并删除，不可恢复。';
+  if (!window.confirm(message)) return;
   const res = await fetch(apiUrl(`api/jobs/${jobId}`), { method: 'DELETE' });
   if (!res.ok) return;
   if (currentJob && currentJob.id === jobId) {
@@ -1538,12 +1615,24 @@ async function saveSegments(force = false) {
 
 async function loadSegments(jobId, options = {}) {
   if (!jobId || subtitleSyncInFlight) return false;
+  // 兜底：撤销栈还属于另一个任务（未经过任务列表直接切换的路径）时清空，
+  // 防止 A 任务的历史快照被撤销进 B 任务的数据
+  if (undoJobId && jobId !== undoJobId) resetUndoHistory();
   if (editorDirty && !options.force) return false;
   subtitleSyncInFlight = true;
   try {
-    const res = await fetch(apiUrl(`api/jobs/${jobId}/segments`), { cache: 'no-store' });
+    const headers = {};
+    if (segmentsEtag && segmentsEtag.jobId === jobId) headers['If-None-Match'] = segmentsEtag.etag;
+    const res = await fetch(apiUrl(`api/jobs/${jobId}/segments`), { cache: 'no-store', headers });
+    if (res.status === 304) {
+      // 服务器侧 segments.json 没变：不解析、不深比较、不重渲染。
+      // 不动 editorDirty——force 同步时若带本地编辑，说明服务器没有新东西，脏状态如实保留。
+      return true;
+    }
     const data = await res.json();
     const segments = data.segments || [];
+    const etag = res.headers.get('etag');
+    segmentsEtag = etag ? { jobId, etag } : null;
     // 轮询拉到的数据如果和当前缓存一致（条目数+各条起止/文本/speaker 没变），
     // 就跳过 renderSegments 的整体重建，避免播放/编辑期间每 2 秒整表清空重建造成卡顿
     if (options.preserveSelection && cachedSegments && segments.length === cachedSegments.length && segmentsEveryEqual(segments, cachedSegments)) {
@@ -1574,10 +1663,60 @@ function segmentsEveryEqual(incoming, cached) {
 
 function ensurePolling() {
   const shouldPoll = jobs.some((job) => RUNNING_STATES.has(job.status));
-  if (shouldPoll && !pollTimer) pollTimer = setInterval(() => refreshJobs({ keepSelection: true, background: true }), 1500);
+  // SSE 已连上时当前任务的状态是实时推的，轮询降频兜底其他任务与断线。
+  const interval = jobEventSource ? 4000 : 1500;
+  if (shouldPoll && !pollTimer) pollTimer = setInterval(() => refreshJobs({ keepSelection: true, background: true }), interval);
   if (!shouldPoll && pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+}
+
+// -------------------------------------------------------------- SSE 实时状态
+
+let jobEventSource = null;
+
+function closeJobEvents() {
+  if (jobEventSource) {
+    jobEventSource.close();
+    jobEventSource = null;
+    ensurePolling();
+  }
+}
+
+function openJobEvents(jobId) {
+  closeJobEvents();
+  if (!jobId || typeof EventSource === 'undefined') return;
+  const source = new EventSource(apiUrl(`api/jobs/${jobId}/events`));
+  source.addEventListener('job', (event) => {
+    let job;
+    try {
+      job = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+    applyJobUpdate(job);
+  });
+  // 断线时 EventSource 会自动重连；重连成功后服务器会先推一份快照。
+  source.onerror = () => {};
+  jobEventSource = source;
+}
+
+function applyJobUpdate(job) {
+  if (!job || !job.id) return;
+  const index = jobs.findIndex((item) => item.id === job.id);
+  if (index >= 0) jobs[index] = job;
+  else jobs.unshift(job);
+  renderJobList();
+  ensurePolling();
+  if (currentJob && currentJob.id === job.id) {
+    const wasEditable = EDIT_STATES.has(currentJob.status);
+    currentJob = job;
+    if (wasEditable && EDIT_STATES.has(job.status)) {
+      updateEditorChrome(job);
+    } else {
+      renderCurrentJob(job, { skipSegments: editorDirty });
+    }
   }
 }
 
@@ -2059,11 +2198,22 @@ function onSegmentPointerDown(event, index, segment) {
   const moveHandler = (ev) => onSegmentPointerMove(ev, segmentDragState);
   const upHandler = (ev) => {
     onSegmentPointerUp(ev, segmentDragState);
+    detach();
+  };
+  const cancelHandler = (ev) => {
+    // 系统打断指针（Alt+Tab 切窗/触摸手势）：按拖拽结束处理，
+    // 否则监听器与 segmentDragState 永久残留
+    onSegmentPointerUp(ev, segmentDragState);
+    detach();
+  };
+  const detach = () => {
     window.removeEventListener('pointermove', moveHandler);
     window.removeEventListener('pointerup', upHandler);
+    window.removeEventListener('pointercancel', cancelHandler);
   };
   window.addEventListener('pointermove', moveHandler);
   window.addEventListener('pointerup', upHandler);
+  window.addEventListener('pointercancel', cancelHandler);
 }
 
 function onSegmentPointerMove(event, state, options = {}) {
@@ -2163,6 +2313,7 @@ function onSegmentPointerUp(event, state) {
   hideTimelineGuide();
   try { state.segment.releasePointerCapture(event.pointerId); } catch (err) {}
   if (state.moved && state.newStart != null && state.newEnd != null) {
+    if (!editorDirty) pushUndoSnapshot();
     const tr = tbody.querySelector('tr[data-index="' + state.index + '"]');
     if (tr) {
       tr.querySelector('.start').value = roundTime(state.newStart);
@@ -2348,6 +2499,8 @@ function nudgeActiveSegment(kind, delta) {
 
 function applySegmentTiming(index, start, end, options = {}) {
   if (!cachedSegments || !cachedSegments[index]) return;
+  // 微调/拖拽会连续触发：只在每轮修改的第一次推基线快照，避免快照刷屏
+  if (!editorDirty) pushUndoSnapshot();
   cachedSegments[index] = {
     ...cachedSegments[index],
     start,
@@ -2407,6 +2560,7 @@ function scrollTimelineTimeIntoView(time, options = {}) {
 
 function addSegmentAtPlayhead() {
   if (!currentJob) return;
+  pushUndoSnapshot();
   const segments = collectSegments();
   const start = roundTime(Math.max(0, Number(preview.currentTime || 0)));
   const next = segments.find((segment) => Number(segment.start) > start);
@@ -2439,6 +2593,7 @@ function addSegmentAroundIndex(index, placement) {
     return;
   }
   const isAbove = placement === 'above';
+  pushUndoSnapshot();
   const previous = segments[index - 1];
   const next = segments[index + 1];
   const anchorStart = Math.max(0, Number(source.start) || 0);
@@ -2597,6 +2752,106 @@ async function mergeSegmentWithNext(index) {
     setTaskNotice('合并失败：' + err.message, 'error');
   }
 }
+
+// -------------------------------------------------------------- 查找与替换
+
+let searchMatches = [];
+let searchCursor = -1;
+let searchDebounceTimer = 0;
+
+async function runSearch({ keepCursor = false } = {}) {
+  if (!currentJob) return;
+  const query = searchQueryInput.value.trim();
+  if (!query) {
+    searchMatches = [];
+    searchCursor = -1;
+    searchCountEl.textContent = '';
+    return;
+  }
+  // 搜索作用于服务器已保存的内容；有未保存修改先落盘，避免搜到旧稿。
+  if (editorDirty && !(await saveSegments())) return;
+  try {
+    const res = await fetch(
+      apiUrl(`api/jobs/${currentJob.id}/search?q=${encodeURIComponent(query)}&mode=${encodeURIComponent(searchModeSelect.value)}`),
+      { cache: 'no-store' }
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '搜索失败');
+    searchMatches = data.matches || [];
+    if (!searchMatches.length) {
+      searchCursor = -1;
+      searchCountEl.textContent = '无匹配';
+      return;
+    }
+    if (!keepCursor || searchCursor < 0 || searchCursor >= searchMatches.length) searchCursor = 0;
+    jumpToSearchMatch(searchCursor);
+  } catch (err) {
+    searchCountEl.textContent = '搜索失败';
+  }
+}
+
+function jumpToSearchMatch(index) {
+  const match = searchMatches[index];
+  if (!match) return;
+  searchCursor = index;
+  searchCountEl.textContent = `${searchMatches.length} 处 · 第 ${index + 1} 个`;
+  setActiveSegment(match.index, true, { align: 'center' });
+  seekPreviewToSegment(match.index);
+  updateTimelinePlayhead();
+}
+
+function stepSearchMatch(delta) {
+  if (!searchMatches.length) return;
+  const next = (searchCursor + delta + searchMatches.length) % searchMatches.length;
+  jumpToSearchMatch(next);
+}
+
+searchQueryInput.addEventListener('input', () => {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => runSearch(), 400);
+});
+searchQueryInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (searchMatches.length) stepSearchMatch(1);
+    else runSearch();
+  }
+});
+searchModeSelect.addEventListener('change', () => runSearch());
+searchPrevBtn.addEventListener('click', () => stepSearchMatch(-1));
+searchNextBtn.addEventListener('click', () => stepSearchMatch(1));
+
+replaceAllBtn.addEventListener('click', async () => {
+  if (!currentJob) return;
+  const query = searchQueryInput.value.trim();
+  if (!query) return;
+  if (editorDirty && !(await saveSegments())) return;
+  if (!searchMatches.length) await runSearch();
+  if (!searchMatches.length) {
+    setTaskNotice('没有可替换的匹配', 'error');
+    return;
+  }
+  const replacement = replaceTextInput.value;
+  const label = replacement ? `「${replacement}」` : '空字符串（删除）';
+  if (!window.confirm(`确定将 ${searchMatches.length} 处「${query}」替换为 ${label}？`)) return;
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/replace`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, replacement, mode: searchModeSelect.value })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '替换失败');
+    pushUndoSnapshot();
+    renderSegments(data.segments);
+    setEditorDirty(false);
+    updateSubtitlePreview(data.segments);
+    setTaskNotice(`已替换 ${data.replacements} 处`);
+    await runSearch();
+  } catch (err) {
+    setTaskNotice('替换失败：' + (err.message || err), 'error');
+  }
+});
 
 function focusSegmentText(index) {
   scrollSegmentIndexIntoView(index);
@@ -4049,7 +4304,7 @@ function formatDuration(seconds) {
 }
 
 function statusClass(status) {
-  return 'pill ' + (status === 'failed' ? 'bad' : status === 'done' ? 'ok' : '');
+  return 'pill ' + (status === 'failed' ? 'bad' : status === 'done' ? 'ok' : status === 'cancelled' ? 'muted' : '');
 }
 
 function statusLabel(status) {

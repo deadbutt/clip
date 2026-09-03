@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 ProgressCallback = Callable[[float], None]
+
+
+class FFmpegCancelled(RuntimeError):
+    """调用方通过 cancel_check 请求中止渲染时抛出，由 jobs 层转成任务取消。"""
 
 
 @dataclass(slots=True)
@@ -105,6 +112,7 @@ def burn_ass_subtitles(
     style: Any | None = None,
     progress_callback: ProgressCallback | None = None,
     overwrite: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> Path:
     tools = detect_ffmpeg()
     if not tools.available:
@@ -139,7 +147,13 @@ def burn_ass_subtitles(
         "-nostats",
         str(output_path),
     ]
-    _run_ffmpeg_with_progress(command, cwd=ass_path.parent, duration=duration, progress_callback=progress_callback)
+    _run_ffmpeg_with_progress(
+        command,
+        cwd=ass_path.parent,
+        duration=duration,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
     return output_path
 
 
@@ -153,6 +167,7 @@ def burn_ass_subtitles_clip(
     style: Any | None = None,
     progress_callback: ProgressCallback | None = None,
     overwrite: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> Path:
     tools = detect_ffmpeg()
     if not tools.available:
@@ -194,7 +209,13 @@ def burn_ass_subtitles_clip(
         "-nostats",
         str(output_path),
     ]
-    _run_ffmpeg_with_progress(command, cwd=ass_path.parent, duration=duration, progress_callback=progress_callback)
+    _run_ffmpeg_with_progress(
+        command,
+        cwd=ass_path.parent,
+        duration=duration,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
     return output_path
 
 
@@ -204,6 +225,7 @@ def _run_ffmpeg_with_progress(
     cwd: Path,
     duration: float | None,
     progress_callback: ProgressCallback | None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> None:
     process = subprocess.Popen(
         command,
@@ -214,10 +236,49 @@ def _run_ffmpeg_with_progress(
         encoding="utf-8",
         errors="replace",
     )
+
+    def _stop_process() -> None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    # -progress pipe:1 正常时每秒出进度行；阻塞读在 ffmpeg 静默挂死
+    # （解码死循环/磁盘满写阻塞）时永远醒不来。读线程 + 队列轮询：
+    # 取消检查每秒执行，并检测"长时间零输出"的真挂死（慢编码不算，
+    # 进度行还在流）。启动探测与结尾 faststart 重写大文件可能长时间
+    # 无输出，上限取宽松的 10 分钟。
+    line_queue: "queue.Queue[str | None]" = queue.Queue()
+
+    def _pump_stdout() -> None:
+        try:
+            for raw in process.stdout:
+                line_queue.put(raw)
+        finally:
+            line_queue.put(None)  # EOF 哨兵
+
+    reader = threading.Thread(target=_pump_stdout, daemon=True)
+    reader.start()
+    IDLE_TIMEOUT_SEC = 600.0
+    last_output = time.monotonic()
+
     tail: list[str] = []
     last_ratio = 0.0
-    assert process.stdout is not None
-    for line in process.stdout:
+    while True:
+        try:
+            line = line_queue.get(timeout=1.0)
+        except queue.Empty:
+            if cancel_check and cancel_check():
+                _stop_process()
+                raise FFmpegCancelled("渲染已取消")
+            if time.monotonic() - last_output > IDLE_TIMEOUT_SEC:
+                _stop_process()
+                raise RuntimeError(f"ffmpeg 已 {int(IDLE_TIMEOUT_SEC / 60)} 分钟无任何输出，判定挂死")
+            continue
+        if line is None:
+            break
+        last_output = time.monotonic()
         line = line.strip()
         if line:
             tail.append(line)

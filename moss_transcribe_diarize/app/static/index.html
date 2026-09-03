@@ -210,6 +210,7 @@
           <div class="progress"><div id="processBar" class="bar"></div></div>
           <div id="processError" class="error"></div>
           <div class="actions" style="margin-top:14px">
+            <button id="cancelCurrent" class="ghost is-hidden">取消任务</button>
             <button id="deleteCurrent">取消并删除</button>
             <button id="openNew">新建任务</button>
           </div>
@@ -278,6 +279,19 @@
           <div class="table-column">
             <div class="table-head">
               <span class="table-title">字幕</span>
+              <div class="table-search">
+                <input id="searchQuery" class="search-input" type="text" placeholder="查找" title="Enter 跳到下一个匹配">
+                <select id="searchMode" class="search-mode" title="字面：按原文匹配；同音：按拼音匹配，可搜错别字">
+                  <option value="literal">字面</option>
+                  <option value="pinyin">同音</option>
+                </select>
+                <span id="searchCount" class="meta"></span>
+                <button id="searchPrev" class="ghost small" type="button" title="上一个匹配">‹</button>
+                <button id="searchNext" class="ghost small" type="button" title="下一个匹配">›</button>
+                <span class="search-divider"></span>
+                <input id="replaceText" class="search-input" type="text" placeholder="替换为" title="留空 = 删除匹配内容">
+                <button id="replaceAll" class="ghost small" type="button" title="替换全部匹配（留空 = 删除）">全部替换</button>
+              </div>
             </div>
             <div class="table-wrap">
               <table class="subtitle-table">

@@ -83,6 +83,109 @@ class WorkerThreadTest(unittest.TestCase):
             self.assertTrue(manager._worker.is_alive())
 
 
+class RestartRecoveryTest(unittest.TestCase):
+    def _write_job(self, runs: Path, job_id: str, status: str, extra: dict | None = None) -> None:
+        job_dir = runs / job_id
+        job_dir.mkdir(parents=True)
+        payload = {
+            "id": job_id,
+            "status": status,
+            "media_name": "video.mp4",
+            "input_path": str(job_dir / "input.mp4"),
+            "job_dir": str(job_dir),
+            "inference_prompt": "",
+            "max_length": 1024,
+            "max_new_tokens": 8,
+            "decoding": "greedy",
+            "temperature": None,
+            "progress": 0.96,
+        }
+        if extra:
+            payload.update(extra)
+        (job_dir / "job.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def test_interrupted_translation_returns_to_review_without_requeue(self):
+        """翻译中服务重启:回 waiting_review 提示重试,不重新入队重跑管线覆盖编辑。"""
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            self._write_job(
+                runs,
+                "translating-job",
+                "translating",
+                {"translation_info": {"in_progress": True, "done": 5, "total": 10}},
+            )
+            with patch.object(JobManager, "_process_job"):
+                manager = JobManager(runs, _StubRunner(), prompt="p", max_length=1024, max_new_tokens=8)
+            job = manager.get_job("translating-job")
+            self.assertEqual(job.status, "waiting_review")
+            self.assertFalse(job.translation_info.get("in_progress"))
+            self.assertIn("翻译", job.error)
+            self.assertTrue(manager._queue.empty())
+
+    def test_interrupted_proofread_returns_to_review(self):
+        """校对中服务重启:回 waiting_review 提示重试,清 in_progress。"""
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            self._write_job(
+                runs,
+                "proofread-job",
+                "proofreading",
+                {"proofread_info": {"in_progress": True, "phase": "pass1", "done": 3, "total": 9}},
+            )
+            with patch.object(JobManager, "_process_job"):
+                manager = JobManager(runs, _StubRunner(), prompt="p", max_length=1024, max_new_tokens=8)
+            job = manager.get_job("proofread-job")
+            self.assertEqual(job.status, "waiting_review")
+            self.assertFalse(job.proofread_info.get("in_progress"))
+            self.assertIn("校对", job.error)
+
+    def test_interrupted_transcription_requeues(self):
+        """转录中服务重启:保持断点续传,重新入队。"""
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            self._write_job(runs, "transcribing-job", "transcribing")
+            with patch.object(JobManager, "_process_job"):
+                manager = JobManager(runs, _StubRunner(), prompt="p", max_length=1024, max_new_tokens=8)
+            self.assertEqual(manager.get_job("transcribing-job").status, "queued")
+
+
+class SegmentsCacheBoundTest(unittest.TestCase):
+    def test_segments_cache_bounded_and_cleared_on_delete(self):
+        """segments 解析缓存必须有上限,任务删除后缓存条目必须清掉。"""
+        from moss_transcribe_diarize.app.jobs import _SEGMENTS_CACHE_MAX, JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(JobManager, "_process_job"):
+                manager = JobManager(
+                    Path(tmpdir),
+                    _StubRunner(),
+                    prompt="p",
+                    max_length=1024,
+                    max_new_tokens=8,
+                )
+                job_ids = []
+                for i in range(_SEGMENTS_CACHE_MAX + 3):
+                    media = Path(tmpdir) / f"v{i}.mp4"
+                    media.write_bytes(b"video")
+                    created = manager.create_job_from_file(str(media), f"v{i}.mp4")
+                    job = created[0] if isinstance(created, tuple) else created
+                    job_ids.append(job.id)
+                    job.segments_path.write_text("[]", encoding="utf-8")
+                    manager.list_segments(job.id)
+                self.assertLessEqual(len(manager._segments_cache), _SEGMENTS_CACHE_MAX)
+                # 再访问最早的条目后,缓存仍不超限(LRU 淘汰而非无界增长)
+                manager.list_segments(job_ids[0])
+                self.assertLessEqual(len(manager._segments_cache), _SEGMENTS_CACHE_MAX)
+                manager.delete_job(job_ids[0])
+                self.assertNotIn(job_ids[0], manager._segments_cache)
+
+
 class DownloaderFallbackTest(unittest.TestCase):
     def test_pick_media_file_skips_subtitles(self):
         from moss_transcribe_diarize.app.downloader import _pick_media_file

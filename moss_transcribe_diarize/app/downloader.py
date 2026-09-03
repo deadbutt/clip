@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -231,6 +234,10 @@ def download_with_yt_dlp(
         "10",
         "--fragment-retries",
         "10",
+        # TCP 层挂死（连接不 RST、DNS 卡住）让 yt-dlp 自己报错重试，
+        # 否则子进程会永久静默卡死在管道 read 上
+        "--socket-timeout",
+        "60",
         "-f",
         format_selector,
         "-o",
@@ -299,7 +306,45 @@ def download_with_yt_dlp(
     video_title: str | None = None
 
     assert proc.stdout is not None
-    for line in proc.stdout:
+
+    def _stop_proc() -> None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    # 阻塞的 for-line 读在子进程静默时永远醒不来（取消检查随之失效）。
+    # 用读线程 + 队列轮询：取消检查每秒执行，且能检测"长时间零输出"的挂死。
+    line_queue: queue.Queue[str | None] = queue.Queue()
+
+    def _pump_stdout() -> None:
+        try:
+            for raw in proc.stdout:
+                line_queue.put(raw)
+        finally:
+            line_queue.put(None)  # EOF 哨兵
+
+    reader = threading.Thread(target=_pump_stdout, daemon=True)
+    reader.start()
+    # 看门狗上限:合并/转码阶段 yt-dlp 可能长时间无输出,取宽松值只杀真挂死
+    IDLE_TIMEOUT_SEC = 900.0
+    last_output = time.monotonic()
+
+    while True:
+        try:
+            line = line_queue.get(timeout=1.0)
+        except queue.Empty:
+            if cancel_check and cancel_check():
+                _stop_proc()
+                raise RuntimeError("下载已取消")
+            if time.monotonic() - last_output > IDLE_TIMEOUT_SEC:
+                _stop_proc()
+                raise RuntimeError(f"yt-dlp 已 {int(IDLE_TIMEOUT_SEC / 60)} 分钟无任何输出，判定挂死")
+            continue
+        if line is None:
+            break
+        last_output = time.monotonic()
         line = line.rstrip("\r\n")
         if not line:
             continue
@@ -307,11 +352,7 @@ def download_with_yt_dlp(
         # 取消检查必须在任何 continue 分支之前:下载主阶段几乎全是
         # [download] xx% 进度行,放后面会让取消在整个下载期间失效。
         if cancel_check and cancel_check():
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            _stop_proc()
             raise RuntimeError("下载已取消")
 
         if line.startswith(_TITLE_PRINT_PREFIX):
@@ -407,6 +448,10 @@ def _remux_to_mkv(src: Path) -> Path:
             encoding="utf-8",
             errors="replace",
             creationflags=creationflags,
+            # -c copy 转封装不做重编码,几分钟已远超正常耗时;挂死会卡住
+            # 整个下载收尾。TimeoutExpired 由外层 FileNotFoundError 之外
+            # 的调用方兜底(下载阶段的 RuntimeError 处理)。
+            timeout=600,
         )
     except FileNotFoundError as e:
         raise RuntimeError(

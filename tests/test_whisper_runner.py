@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from moss_transcribe_diarize.app.whisper_runner import (
     WhisperRunner,
-    _RepeatedPhraseGuard,
     _is_likely_hallucination,
+    _RepeatedPhraseGuard,
 )
 
 
