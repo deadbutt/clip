@@ -183,6 +183,13 @@ class RenderClipConcurrencyTest(unittest.TestCase):
         """同一片段并发渲染必须互斥:两个 ffmpeg 写同一输出文件会互相损坏。"""
         from moss_transcribe_diarize.app.server import create_app
 
+        class Available:
+            # CI runner 不带 ffmpeg(镜像 Tools 清单里没有),互斥检查在 ffmpeg
+            # 探测之后,必须 stub 成可用才能测到互斥分支本身。
+            available = True
+            ffmpeg = "ffmpeg"
+            ffprobe = "ffprobe"
+
         with tempfile.TemporaryDirectory() as tmpdir:
             app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
             mgr = app.state.manager
@@ -190,7 +197,10 @@ class RenderClipConcurrencyTest(unittest.TestCase):
             job.segments_path.write_text("[]", encoding="utf-8")
             # clip 名经 _safe_clip_name 安全化后点号变下划线: clip_1.00_5.00 → clip_1_00_5_00
             mgr._rendering_clips.add(f"{job.id}/clip_1_00_5_00")
-            with self.assertRaises(RuntimeError) as ctx:
+            with (
+                patch("moss_transcribe_diarize.app.jobs.detect_ffmpeg", return_value=Available()),
+                self.assertRaises(RuntimeError) as ctx,
+            ):
                 mgr.render_clip(job.id, start=1.0, end=5.0)
             self.assertIn("正在渲染", str(ctx.exception))
 
