@@ -167,6 +167,7 @@ const proofreadTyposListEl = document.querySelector('#proofreadTyposList');
 const proofreadAlignmentSectionEl = document.querySelector('#proofreadAlignmentSection');
 const proofreadAlignmentListEl = document.querySelector('#proofreadAlignmentList');
 const proofreadAlignmentMetaEl = document.querySelector('#proofreadAlignmentMeta');
+const proofreadAlignmentAllEl = document.querySelector('#proofreadAlignmentAll');
 const llmProfileListEl = document.querySelector('#llmProfileList');
 const llmProfileAddBtn = document.querySelector('#llmProfileAdd');
 const llmProfileEditorEl = document.querySelector('#llmProfileEditor');
@@ -3512,14 +3513,20 @@ function toggleProofreadGroup(group) {
 function updateProofreadSelection() {
   const typoBoxes = Array.from(document.querySelectorAll('[data-typo-check]'));
   const termBoxes = Array.from(document.querySelectorAll('[data-term-check]'));
+  const alignmentBoxes = Array.from(document.querySelectorAll('[data-alignment-check]'));
   const typoCount = typoBoxes.filter((b) => b.checked).length;
   const termCount = termBoxes.filter((b) => b.checked).length;
-  const total = typoCount + termCount;
-  proofreadSelectionMetaEl.textContent = total ? `已选 ${typoCount} 处修正 + ${termCount} 条术语` : '未选择任何修改';
+  const alignmentCount = alignmentBoxes.filter((b) => b.checked).length;
+  const total = typoCount + termCount + alignmentCount;
+  const parts = [];
+  if (typoCount) parts.push(`${typoCount} 处修正`);
+  if (termCount) parts.push(`${termCount} 条术语`);
+  if (alignmentCount) parts.push(`${alignmentCount} 处译文`);
+  proofreadSelectionMetaEl.textContent = total ? `已选 ${parts.join(' + ')}` : '未选择任何修改';
   proofreadApplyBtn.disabled = !currentJob || total === 0;
 }
 
-[proofreadTermsListEl, proofreadTyposListEl].forEach((listEl) => {
+[proofreadTermsListEl, proofreadTyposListEl, proofreadAlignmentListEl].forEach((listEl) => {
   listEl.addEventListener('change', (event) => {
     const box = event.target;
     if (!box || box.type !== 'checkbox') return;
@@ -3527,6 +3534,14 @@ function updateProofreadSelection() {
     if (item) item.classList.toggle('unchecked', !box.checked);
     updateProofreadSelection();
   });
+});
+
+proofreadAlignmentAllEl.addEventListener('change', () => {
+  document.querySelectorAll('[data-alignment-check]').forEach((box) => { box.checked = proofreadAlignmentAllEl.checked; });
+  document.querySelectorAll('[data-alignment-id]').forEach((item) => {
+    item.classList.toggle('unchecked', !proofreadAlignmentAllEl.checked);
+  });
+  updateProofreadSelection();
 });
 
 async function applyProofread() {
@@ -3540,7 +3555,11 @@ async function applyProofread() {
       const t = proofreadResult.term_corrections[Number(b.dataset.termCheck)];
       return { wrong: t.wrong, right: t.right };
     });
-  if (!ids.length && !terms.length) return;
+  const alignmentIds = Array.from(document.querySelectorAll('[data-alignment-check]'))
+    .filter((b) => b.checked)
+    .map((b) => b.dataset.alignmentCheck)
+    .filter(Boolean);
+  if (!ids.length && !terms.length && !alignmentIds.length) return;
   proofreadApplyBtn.disabled = true;
   proofreadStatusEl.textContent = '正在应用修改...';
   try {
@@ -3551,16 +3570,40 @@ async function applyProofread() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '应用失败');
-    if (Array.isArray(data.segments) && data.segments.length) {
-      renderSegments(data.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
-      setEditorDirty(false);
-    }
     let message = `已应用 ${data.applied_count || 0} 处修正`;
     if (data.term_hits) message += `、术语替换 ${data.term_hits} 处`;
+    if (alignmentIds.length) {
+      try {
+        const alignmentRes = await fetch(apiUrl(`api/jobs/${currentJob.id}/alignment/apply`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: alignmentIds })
+        });
+        const alignmentData = await alignmentRes.json();
+        if (!alignmentRes.ok) throw new Error(alignmentData.detail || '译文修正应用失败');
+        if (alignmentData.applied_count) {
+          message += `、译文修正 ${alignmentData.applied_count} 处`;
+        }
+        if (Array.isArray(alignmentData.segments) && alignmentData.segments.length) {
+          renderSegments(alignmentData.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
+          setEditorDirty(false);
+        }
+        // 应用成功的条目从结果中移除,重渲染弹窗
+        if (proofreadResult.alignment && Array.isArray(proofreadResult.alignment.issues)) {
+          const appliedSet = new Set(alignmentData.applied_ids || []);
+          proofreadResult.alignment.issues = proofreadResult.alignment.issues
+            .filter((item) => !appliedSet.has(item.id));
+          proofreadResult.alignment.issue_count = proofreadResult.alignment.issues.length;
+        }
+      } catch (alignmentErr) {
+        message += `；译文修正应用失败：${alignmentErr.message || alignmentErr}`;
+      }
+    }
     message += '。';
     if (data.needs_retranslate) message += '本次修改写入了英文源稿，请重新翻译以同步译文。';
     proofreadStatusEl.textContent = message;
     proofreadResult = { ...proofreadResult, applied: true };
+    renderProofreadResult(proofreadResult);
     await refreshJobs({ keepSelection: true, skipSegments: false });
   } catch (err) {
     proofreadStatusEl.textContent = '应用失败：' + (err.message || err);
@@ -3882,20 +3925,29 @@ function renderAlignmentIssues(alignment) {
     proofreadAlignmentListEl.innerHTML = '';
     return;
   }
-  proofreadAlignmentMetaEl.textContent = `已检查 ${alignment.pair_count || 0} 对 · ${alignment.issue_count || items.length} 处疑似`;
+  const selectable = items.filter((item) => item.suggested && item.suggested !== item.translated_text);
+  proofreadAlignmentMetaEl.textContent = `已检查 ${alignment.pair_count || 0} 对 · ${items.length} 处疑似`;
   proofreadAlignmentListEl.innerHTML = items.map((item) => {
     const index = Number(item.index);
     const start = Number(item.start || 0);
     const key = alignmentItemKey(item);
     const severity = item.type === 'addition' || item.type === 'terminology' ? 'info' : 'warning';
+    const canApply = item.suggested && item.suggested !== item.translated_text;
+    const checkRow = canApply
+      ? `<label class="proofread-check"><input type="checkbox" data-alignment-check="${escapeHtml(item.id || '')}" checked /></label>`
+      : '';
+    const suggestionRow = canApply
+      ? `<div class="proofread-diff"><span class="before">${escapeHtml(item.translated_text || '')}</span><br />→ <span class="after">${escapeHtml(item.suggested || '')}</span></div>`
+      : `<div class="proofread-diff"><span class="before">${escapeHtml(item.translated_text || '')}</span></div>`;
     return `
-      <div class="translation-review-item ${severity}" data-index="${Number.isFinite(index) ? index : -1}" data-start="${Number.isFinite(start) ? start : 0}" data-key="${escapeHtml(key)}">
-        <div class="translation-review-item-head">
-          <span>${escapeHtml(alignmentTypeLabel(item.type))} · #${Number.isFinite(index) ? index + 1 : '?'} · ${formatTimelineTime(start)}</span>
+      <div class="proofread-item ${severity}" data-index="${Number.isFinite(index) ? index : -1}" data-start="${Number.isFinite(start) ? start : 0}" data-key="${escapeHtml(key)}" data-alignment-id="${escapeHtml(item.id || '')}">
+        <div class="proofread-item-head">
+          ${checkRow}
+          <span class="id">${escapeHtml(alignmentTypeLabel(item.type))} · ${Number.isFinite(index) ? '#' + (index + 1) : '?'} · ${formatTimelineTime(start)}</span>
           <strong>${escapeHtml(item.note || '')}</strong>
         </div>
         <div class="translation-review-text">SRC ${escapeHtml(item.source_text || '')}</div>
-        <div class="translation-review-text">ZH ${escapeHtml(item.translated_text || '')}</div>
+        ${suggestionRow}
         <div class="translation-review-actions">
           <button class="ghost small" type="button" data-alignment-action="jump">跳到字幕</button>
           <button class="ghost small" type="button" data-alignment-action="play">回看原片</button>
@@ -3903,6 +3955,7 @@ function renderAlignmentIssues(alignment) {
         </div>
       </div>`;
   }).join('');
+  updateProofreadSelection();
 }
 
 function useActiveSegmentAsClipRange() {

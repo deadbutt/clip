@@ -62,6 +62,156 @@ class BlockingRunner:
         )
 
 
+class ProgressLoopRunner:
+    """模拟缺口恢复：小片段把进度重置回低值再爬升，进度条不能跟着倒退。"""
+
+    model_path = "fake-model"
+
+    def __init__(self, manager):
+        self.manager = manager
+        self.observed_progress: list[float] = []
+
+    def transcribe(self, audio_path, **kwargs):
+        callback = kwargs.get("status_callback")
+        job_id = next(iter(self.manager._jobs))
+        for progress in (0.8, 0.15, 0.3, 0.12):
+            if callback:
+                callback("transcribing", progress)
+            self.observed_progress.append(self.manager.get_job(job_id).progress)
+        return TranscriptionResult(
+            text="[0][S01]hello[1.5]",
+            prompt_len=10,
+            generated_tokens=5,
+            elapsed_sec=0.01,
+            model="fake-model",
+            audio=str(audio_path),
+            decoding="greedy",
+            temperature=None,
+        )
+
+
+@unittest.skipUnless(importlib.util.find_spec("torch") is not None, "torch is not installed")
+class ParallelDemucsVramGateTest(unittest.TestCase):
+    def test_vram_gate_threshold(self):
+        from moss_transcribe_diarize.app import jobs
+
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.mem_get_info", return_value=(6e9, 8e9), create=True),
+        ):
+            self.assertTrue(jobs._vram_allows_parallel_demucs())
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.mem_get_info", return_value=(3e9, 8e9), create=True),
+        ):
+            self.assertFalse(jobs._vram_allows_parallel_demucs())
+        with patch("torch.cuda.is_available", return_value=False):
+            self.assertFalse(jobs._vram_allows_parallel_demucs())
+
+
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class SerialDemucsTest(unittest.TestCase):
+    def test_demucs_runs_after_transcribe_when_vram_tight(self):
+        """显存不足时 demucs 必须等转录完成后再串行启动，不得与 whisper 并行。"""
+        from fastapi.testclient import TestClient
+
+        from moss_transcribe_diarize.app.server import create_app
+        from moss_transcribe_diarize.app.speaker_labeler import SpeakerLabelingInfo
+
+        order: list[str] = []
+
+        class OrderedRunner:
+            model_path = "fake-model"
+
+            def transcribe(self, audio_path, **kwargs):
+                order.append("transcribe")
+                return TranscriptionResult(
+                    text="[0][S01]hello[1.5]",
+                    prompt_len=10,
+                    generated_tokens=5,
+                    elapsed_sec=0.01,
+                    model="fake-model",
+                    audio=str(audio_path),
+                    decoding="greedy",
+                    temperature=None,
+                )
+
+        def fake_separate_vocals(src, work_dir):
+            order.append("demucs")
+            return Path(work_dir) / "vocals_16k.wav"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app.state.manager.model_runner = OrderedRunner()
+            client = TestClient(app)
+            with (
+                patch(
+                    "moss_transcribe_diarize.app.vocal_separator.vocal_separation_available",
+                    return_value=True,
+                ),
+                patch(
+                    "moss_transcribe_diarize.app.vocal_separator.separate_vocals",
+                    side_effect=fake_separate_vocals,
+                ),
+                patch(
+                    "moss_transcribe_diarize.app.vocal_separator.has_background_audio",
+                    return_value=False,
+                ),
+                patch("moss_transcribe_diarize.app.jobs._vram_allows_parallel_demucs", return_value=False),
+                patch(
+                    "moss_transcribe_diarize.app.jobs.label_speakers",
+                    side_effect=lambda media, segs, **kw: (
+                        segs,
+                        SpeakerLabelingInfo(True, False, "stub", 1, len(segs), "stub"),
+                    ),
+                ),
+            ):
+                created = client.post(
+                    "/api/jobs", files={"file": ("sample.wav", b"audio", "audio/wav")}
+                )
+                self.assertEqual(created.status_code, 200)
+                job_id = created.json()["id"]
+                job = {}
+                for _ in range(60):
+                    job = client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"waiting_review", "failed"}:
+                        break
+                    time.sleep(0.05)
+            self.assertEqual(job["status"], "waiting_review")
+            self.assertEqual(order, ["transcribe", "demucs"])
+
+
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class TranscribeProgressTest(unittest.TestCase):
+    def test_transcribe_progress_never_goes_backward(self):
+        """缺口恢复小片段从 0.1 重新计进度，任务进度必须单调只升不降。"""
+        from fastapi.testclient import TestClient
+
+        from moss_transcribe_diarize.app.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            runner = ProgressLoopRunner(app.state.manager)
+            app.state.manager.model_runner = runner
+            client = TestClient(app)
+            created = client.post(
+                "/api/jobs", files={"file": ("sample.wav", b"audio", "audio/wav")}
+            )
+            self.assertEqual(created.status_code, 200)
+            job_id = created.json()["id"]
+            for _ in range(40):
+                job = client.get(f"/api/jobs/{job_id}").json()
+                if job["status"] == "waiting_review":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(job["status"], "waiting_review")
+            # 第一笔 0.8 生效后，后续 0.15/0.3/0.12 都不得把进度拉回去
+            self.assertEqual(len(runner.observed_progress), 4)
+            for earlier, later in zip(runner.observed_progress, runner.observed_progress[1:]):
+                self.assertGreaterEqual(later, earlier)
+            self.assertAlmostEqual(max(runner.observed_progress), 0.8, places=6)
+
+
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
 class UploadWhitelistTest(unittest.TestCase):
     def test_upload_rejects_non_media_suffix(self):

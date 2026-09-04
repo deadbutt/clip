@@ -810,6 +810,24 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/api/jobs/{job_id}/alignment/apply")
+    async def apply_alignment(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+        ids = payload.get("ids") if isinstance(payload, dict) else None
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise HTTPException(status_code=400, detail="ids must be a list of segment ids.")
+        try:
+            return await asyncio.to_thread(manager.apply_alignment, job_id, ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+
     @app.get("/api/jobs/{job_id}/clips")
     def list_clips(
         job_id: str,

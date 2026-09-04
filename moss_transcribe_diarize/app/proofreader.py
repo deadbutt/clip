@@ -58,7 +58,9 @@ Flag ONLY clear problems:
 - terminology: a recurring name/term is translated inconsistently with the rest
 Do NOT flag style, tone, naturalness, or acceptable paraphrases. Do NOT flag untranslated
 noise or bracketed effects like [Music]. When unsure, do not flag.
-Return JSON only: {"issues":[{"n":<pair number>,"type":"omission|addition|mistranslation|terminology","note":"<Chinese, under 20 words>"}]}
+For each flagged pair also provide "suggested": a corrected full Chinese translation of that
+pair, fixing the flagged problem, in the same subtitle style as the original Chinese.
+Return JSON only: {"issues":[{"n":<pair number>,"type":"omission|addition|mistranslation|terminology","note":"<Chinese, under 20 words>","suggested":"<corrected Chinese translation>"}]}
 If everything is fine return {"issues":[]}."""
 
 CLIP_RANK_SYSTEM = """You select highlights from a long-form transcript for short video clips.
@@ -335,6 +337,8 @@ class Proofreader:
         count = end - start
         seen: set[int] = set()
         output: list[dict[str, Any]] = []
+        # suggested 若与原译文完全一致说明模型没给出可用修正,跳过该条。
+        current_by_offset = {offset: pairs[start + offset - 1]["translated_text"] for offset in range(1, count + 1)}
         for item in issues_raw:
             if not isinstance(item, dict):
                 continue
@@ -348,8 +352,12 @@ class Proofreader:
             if issue_type not in {"omission", "addition", "mistranslation", "terminology"}:
                 continue
             note = str(item.get("note") or "").strip()[:120]
+            suggested = str(item.get("suggested") or "").strip()
+            current_text = current_by_offset.get(n, "")
+            if not suggested or suggested == current_text:
+                continue
             seen.add(n)
-            output.append({"index": start + n - 1, "type": issue_type, "note": note})
+            output.append({"index": start + n - 1, "type": issue_type, "note": note, "suggested": suggested})
         return output
 
     def check_alignment(
@@ -392,6 +400,7 @@ class Proofreader:
                             "end": pair.get("end"),
                             "type": issue["type"],
                             "note": issue["note"],
+                            "suggested": issue["suggested"],
                             "source_text": pair.get("source_text"),
                             "translated_text": pair.get("translated_text"),
                         }

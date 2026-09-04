@@ -33,6 +33,12 @@ from moss_transcribe_diarize.subtitle import (
 )
 
 from . import vocal_separator
+from .audio_timeline import (
+    HOLE_FIX_THRESHOLD,
+    analyze_audio_timeline,
+    extract_timeline_fixed_audio,
+    total_hole_seconds,
+)
 from .clips import generate_clip_candidates, rebase_segments_for_clip
 from .ffmpeg import (
     FFmpegCancelled,
@@ -172,6 +178,23 @@ _OUTPUT_TOKENS_PER_SECOND = 14.0
 _MIN_MAX_NEW_TOKENS = 2048
 _MAX_MAX_NEW_TOKENS = 65536
 _TOKEN_ROUNDING = 512
+
+# demucs(~2GB) + whisper(~3GB) 同卡并行所需的最小空闲显存。
+# 低于它强行并行会触发驱动 sysmem fallback，两负载超线性互拖。
+_PARALLEL_DEMUCS_MIN_FREE_VRAM = 5_000_000_000
+
+
+def _vram_allows_parallel_demucs() -> bool:
+    """空闲显存是否够 demucs 与 whisper 安全并行。无法判断时保守串行。"""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        free, _total = torch.cuda.mem_get_info()
+        return free >= _PARALLEL_DEMUCS_MIN_FREE_VRAM
+    except Exception:
+        return False
 
 
 def recommend_max_new_tokens(
@@ -613,13 +636,17 @@ class JobManager:
             pass  # 关机时事件循环已关闭
 
     def _logger_for(self, job: JobRecord) -> logging.Logger:
-        """每任务一个独立 logger，写 job_dir/pipeline.log，互不串扰。"""
+        """每任务一个独立 logger，写 job_dir/pipeline.log，互不串扰。
+
+        propagate=True 让消息同时走 root logger 上控制台：长静默阶段
+        （pyannote 全程无进度输出）终端不再"假死"，用户不至于误删任务。
+        """
         log = self._job_loggers.get(job.id)
         if log is not None:
             return log
         log = logging.getLogger(f"mtd.job.{job.id}")
         log.setLevel(logging.INFO)
-        log.propagate = False
+        log.propagate = True
         log.handlers.clear()
         try:
             handler = _AppendFileHandler(Path(job.job_dir) / "pipeline.log")
@@ -1811,6 +1838,71 @@ class JobManager:
             raise FileNotFoundError("No alignment check result is available for this job.")
         return json.loads(job.alignment_path.read_text(encoding="utf-8"))
 
+    def apply_alignment(self, job_id: str, ids: list[str]) -> dict[str, Any]:
+        """把对照检查的建议译文应用到当前稿(双语模式保留源文行)。"""
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot apply alignment fixes while the job is running.")
+        if not job.alignment_path.exists():
+            raise FileNotFoundError("No alignment check result is available for this job.")
+        result = json.loads(job.alignment_path.read_text(encoding="utf-8"))
+        issues = [item for item in result.get("issues") or [] if isinstance(item, dict)]
+        by_id = {str(item.get("id") or ""): item for item in issues if item.get("suggested")}
+        wanted = {str(item) for item in ids or []}
+        if not wanted:
+            return {"applied_count": 0, "applied_ids": [], "segments": None}
+
+        segments = [
+            SubtitleSegment.from_dict(item)
+            for item in json.loads(job.segments_path.read_text(encoding="utf-8"))
+        ]
+        applied_ids: list[str] = []
+        for index, segment in enumerate(segments):
+            issue = by_id.get(segment.id)
+            if issue is None or segment.id not in wanted:
+                continue
+            suggested = str(issue["suggested"]).strip()
+            if not suggested:
+                continue
+            # 双语模式当前稿是 "译文\n源文":建议只替换译文行,源文行原样保留。
+            if "\n" in segment.text:
+                parts = segment.text.split("\n", 1)
+                parts[0] = suggested
+                new_text = "\n".join(parts)
+            else:
+                new_text = suggested
+            if new_text == segment.text:
+                continue
+            segments[index] = SubtitleSegment(
+                id=segment.id,
+                start=segment.start,
+                end=segment.end,
+                speaker=segment.speaker,
+                text=new_text,
+                items=segment.items,
+            )
+            applied_ids.append(segment.id)
+
+        if applied_ids:
+            self._write_subtitle_files(job, segments)
+            result["issues"] = [
+                item for item in issues if str(item.get("id")) not in set(applied_ids)
+            ]
+            result["issue_count"] = len(result["issues"])
+            result["applied_ids"] = sorted({*result.get("applied_ids", []), *applied_ids})
+            write_text(job.alignment_path, json.dumps(result, ensure_ascii=False, indent=2))
+            job.alignment_info = {
+                **job.alignment_info,
+                "issue_count": result["issue_count"],
+                "applied_count": len(result["applied_ids"]),
+            }
+            self._touch(job, error=None)
+        return {
+            "applied_count": len(applied_ids),
+            "applied_ids": sorted(applied_ids),
+            "segments": [segment.to_dict() for segment in segments] if applied_ids else None,
+        }
+
     def clip_download_path(self, job_id: str, filename: str) -> Path:
         job = self.get_job(job_id)
         path = (job.clips_dir / Path(filename).name).resolve()
@@ -1889,6 +1981,33 @@ class JobManager:
             except Exception:
                 continue
 
+    def _prepare_audio_timeline(self, job: JobRecord) -> str:
+        """检测音频轨时间戳窟窿（录屏丢帧），必要时重抽修复时间轴。
+
+        返回实际供转录/分离使用的音频路径；修复后的时间轴与原视频
+        播放时间轴对齐，烧录出的字幕不会漂移。
+        """
+        try:
+            holes = analyze_audio_timeline(job.input_path)
+        except Exception:
+            holes = None
+        if not holes or total_hole_seconds(holes) < HOLE_FIX_THRESHOLD:
+            return str(job.input_path)
+        fixed_path = Path(job.job_dir) / "audio_fixed.wav"
+        if extract_timeline_fixed_audio(job.input_path, fixed_path):
+            self.job_log(
+                job,
+                f"检测到音频时间轴窟窿 {total_hole_seconds(holes):.2f}s"
+                f"（{len(holes)} 处，疑似录制丢帧），已补静音修复时间轴",
+            )
+            return str(fixed_path)
+        self.job_log(
+            job,
+            "音频时间轴窟窿修复失败，按原始音频继续转录",
+            level=logging.WARNING,
+        )
+        return str(job.input_path)
+
     def _process_job(self, job: JobRecord) -> None:
         # 提前绑定：except 分支里要引用（下载阶段取消时 try 内还没执行到赋值）
         vocals_path = None
@@ -1898,12 +2017,24 @@ class JobManager:
             if job.source == "url" and job.source_url and not Path(job.input_path).exists():
                 self._download_phase(job)
 
+            # 录屏文件音频轨可能有 PTS 窟窿（丢帧），会让整条字幕时间轴前移。
+            # 转录/人声分离/说话人标记统一改吃修复后的音频，保证时间轴一致。
+            audio_path = self._prepare_audio_timeline(job)
+
+            # 缺口恢复/无 VAD 重试会对小片段从 0.1 重新计进度，导致进度条
+            # 反复跳回开头；转录阶段进度单调只升不降。
+            last_transcribe_progress = 0.0
+
             def update(status: str, progress: float | None, generated_tokens: int | None = None) -> None:
+                nonlocal last_transcribe_progress
                 self._raise_if_cancelled(job.id)
                 if status == "transcribing" and job.generated_tokens is None:
                     job.generated_tokens = 0
                 if generated_tokens is not None:
                     job.generated_tokens = generated_tokens
+                if status == "transcribing" and progress is not None:
+                    progress = max(progress, last_transcribe_progress)
+                    last_transcribe_progress = progress
                 save = generated_tokens is None or self._should_save_live_progress(job.id)
                 self._set_status(job, status, progress if progress is not None else job.progress, save=save)
 
@@ -1917,18 +2048,29 @@ class JobManager:
             self._raise_if_cancelled(job.id)
 
             # 人声分离与 whisper 并行：demucs(~2GB) + whisper(~3GB) 显存
-            # 可同卡共存，转录期间顺手把 BGM 剥掉，总耗时几乎不变。
+            # 可同卡共存时，转录期间顺手把 BGM 剥掉，总耗时几乎不变。
             # pyannote 改吃人声轨（BGM 会把说话人嵌入拉偏导致人物融合），
             # whisper 仍跑原始音频（分离伪影会重伤 ASR 召回率）。
+            # 显存不宽松时（后台 ollama/浏览器等常驻吃卡）强行并行会触发
+            # 驱动 sysmem fallback，两个负载超线性互拖（实测 demucs 单独
+            # 63s / 并行 281s）——改走转录后串行，反而更快更稳。
             diarization_enabled = self._resolve_diarization_backend(job.diarization_backend) not in {"none", "off", "disabled"}
-            if diarization_enabled and job.speaker_count != 0 and vocal_separator.vocal_separation_available():
+            demucs_needed = (
+                diarization_enabled
+                and job.speaker_count != 0
+                and vocal_separator.vocal_separation_available()
+            )
+            parallel_demucs = demucs_needed and _vram_allows_parallel_demucs()
+            if parallel_demucs:
                 from concurrent.futures import ThreadPoolExecutor
 
                 self.job_log(job, "后台启动 demucs 人声分离（与转录并行）")
                 vocals_executor = ThreadPoolExecutor(max_workers=1)
                 vocals_future = vocals_executor.submit(
-                    vocal_separator.separate_vocals, job.input_path, job.job_dir
+                    vocal_separator.separate_vocals, audio_path, job.job_dir
                 )
+            elif demucs_needed:
+                self.job_log(job, "空闲显存不足，demucs 人声分离改为转录完成后串行执行")
 
             # 断点续传：检查转录是否已完成（raw_words.json 存在则跳过 whisper）
             checkpoint_words = None
@@ -1956,7 +2098,7 @@ class JobManager:
                 self._set_status(job, "postprocessing", 0.85, error=None)
             else:
                 result = self.model_runner.transcribe(
-                    job.input_path,
+                    audio_path,
                     prompt=job.inference_prompt,
                     max_length=job.max_length,
                     max_new_tokens=job.max_new_tokens,
@@ -1987,6 +2129,16 @@ class JobManager:
                 segments = drop_repeated_hallucinations(segments)
             self._raise_if_cancelled(job.id)
 
+            # 串行路径：转录已完成、whisper 显存已让出，现在才启动 demucs
+            if demucs_needed and not parallel_demucs and vocals_future is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                self.job_log(job, "开始 demucs 人声分离（串行）")
+                vocals_executor = ThreadPoolExecutor(max_workers=1)
+                vocals_future = vocals_executor.submit(
+                    vocal_separator.separate_vocals, audio_path, job.job_dir
+                )
+
             if vocals_future is not None:
                 try:
                     vocals_path = vocals_future.result()
@@ -1999,7 +2151,7 @@ class JobManager:
                 # 背景音门控：纯对白音轨（无 BGM）不值得喂分离人声，
                 # 丢弃结果直接用原始音频。
                 if vocals_path is not None and not vocal_separator.has_background_audio(
-                    result.words if result else None, job.input_path, job.job_dir
+                    result.words if result else None, audio_path, job.job_dir
                 ):
                     self.job_log(job, "背景音门控判定无 BGM，丢弃人声轨，pyannote 改用原始音频")
                     try:
@@ -2009,9 +2161,13 @@ class JobManager:
                     vocals_path = None
 
             self._set_status(job, "labeling_speakers", 0.88, error=None)
+            self.job_log(
+                job,
+                "开始说话人标记（diarization 对全音频扫描，期间约 1-2 分钟无进度输出，属正常）",
+            )
             resolved_speakers = self._resolve_speaker_count(job.speaker_count)
             segments, speaker_info = label_speakers(
-                job.input_path,
+                audio_path,
                 segments,
                 work_dir=job.job_dir,
                 # 未指定说话人数时给 pyannote 自动检测留空间（原值 2 会把
@@ -2028,6 +2184,13 @@ class JobManager:
             if vocals_path is not None:
                 try:
                     Path(vocals_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            # 时间轴修复音频的使命结束：后续剪辑/烧录用原视频（修复后的
+            # 时间轴与视频播放轴对齐，字幕直接可用）。删掉省磁盘。
+            if audio_path != str(job.input_path):
+                try:
+                    Path(audio_path).unlink(missing_ok=True)
                 except OSError:
                     pass
             job.speaker_labeling = speaker_info.to_dict()

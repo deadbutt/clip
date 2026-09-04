@@ -48,27 +48,32 @@ class AlignmentCheckerTest(unittest.TestCase):
         reply = json.dumps(
             {
                 "issues": [
-                    {"n": 1, "type": "mistranslation", "note": "把拒绝翻成了同意"},
-                    {"n": 99, "type": "omission", "note": "越界序号应丢弃"},
-                    {"n": 2, "type": "weird-type", "note": "未知类型应丢弃"},
-                    {"n": 2, "type": "addition", "note": "多出了字幕里没有的内容"},
+                    {"n": 1, "type": "mistranslation", "note": "把拒绝翻成了同意", "suggested": "我拒绝去。"},
+                    {"n": 99, "type": "omission", "note": "越界序号应丢弃", "suggested": "x"},
+                    {"n": 2, "type": "weird-type", "note": "未知类型应丢弃", "suggested": "x"},
+                    {"n": 2, "type": "addition", "note": "多出了字幕里没有的内容", "suggested": "你好。"},
                     {"n": 3, "type": "omission"},
+                    {"n": 4, "type": "terminology", "note": "建议等于原文应丢弃", "suggested": "原样"},
                 ]
             },
             ensure_ascii=False,
         )
         calls, fake_chat = self._patched_chat([reply])
         proofreader = Proofreader(base_url="http://localhost:1", model="m")
+        pairs = [
+            _pair(0, "I refuse to go.", "我同意去。"),
+            _pair(1, "Hello.", "你好，欢迎各位来到直播间。原样"),
+        ]
         with patch.object(Proofreader, "_chat", new=fake_chat):
-            issues = proofreader.check_alignment(
-                [_pair(0, "I refuse to go.", "我同意去。"), _pair(1, "Hello.", "你好，欢迎各位来到直播间。")]
-            )
+            issues = proofreader.check_alignment(pairs)
         self.assertEqual([issue["index"] for issue in issues], [0, 1])
         self.assertEqual(issues[0]["type"], "mistranslation")
         self.assertEqual(issues[1]["type"], "addition")
         self.assertEqual(issues[0]["id"], "seg_0000")
         self.assertEqual(issues[0]["source_text"], "I refuse to go.")
         self.assertEqual(issues[0]["translated_text"], "我同意去。")
+        self.assertEqual(issues[0]["suggested"], "我拒绝去。")
+        self.assertEqual(issues[1]["suggested"], "你好。")
 
     def test_check_alignment_batches_windows(self):
         calls, fake_chat = self._patched_chat([json.dumps({"issues": []})])
@@ -164,6 +169,7 @@ class AlignmentManagerTest(unittest.TestCase):
                         "end": pairs[0]["end"],
                         "type": "omission",
                         "note": "漏掉了后半句",
+                        "suggested": "你好，世界，很高兴见到大家。",
                         "source_text": pairs[0]["source_text"],
                         "translated_text": pairs[0]["translated_text"],
                     }
@@ -262,6 +268,63 @@ class AlignmentManagerTest(unittest.TestCase):
             result = manager.proofread("plain-job", _FakeProofreader())
             self.assertNotIn("alignment", result)
             self.assertEqual(manager.get_job("plain-job").proofread_info.get("alignment_count"), 0)
+
+    def test_apply_alignment_replaces_translation_line_only(self):
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            job_dir = self._write_job(runs, "apply-job")
+            self._write_segments(
+                job_dir,
+                "segments.json",
+                [
+                    {"id": "seg_0001", "start": 0.0, "end": 2.0, "text": "旧译文\nHello world.", "speaker": "S01"},
+                    {"id": "seg_0002", "start": 2.0, "end": 4.0, "text": "不受影响的段落", "speaker": "S01"},
+                ],
+            )
+            (job_dir / "alignment.json").write_text(
+                json.dumps(
+                    {
+                        "issues": [
+                            {"id": "seg_0001", "type": "mistranslation", "note": "n", "suggested": "新译文"},
+                        ],
+                        "issue_count": 1,
+                        "pair_count": 2,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            manager = self._manager(runs)
+            result = manager.apply_alignment("apply-job", ["seg_0001"])
+            self.assertEqual(result["applied_count"], 1)
+            segments = json.loads((job_dir / "segments.json").read_text(encoding="utf-8"))
+            self.assertEqual(segments[0]["text"], "新译文\nHello world.")
+            self.assertEqual(segments[1]["text"], "不受影响的段落")
+            remaining = json.loads((job_dir / "alignment.json").read_text(encoding="utf-8"))
+            self.assertEqual(remaining["issue_count"], 0)
+            self.assertEqual(remaining["issues"], [])
+            self.assertEqual(remaining["applied_ids"], ["seg_0001"])
+
+    def test_apply_alignment_skips_unknown_ids(self):
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            job_dir = self._write_job(runs, "apply-job2")
+            self._write_segments(
+                job_dir,
+                "segments.json",
+                [{"id": "seg_0001", "start": 0.0, "end": 2.0, "text": "旧译文", "speaker": "S01"}],
+            )
+            (job_dir / "alignment.json").write_text(
+                json.dumps({"issues": [], "issue_count": 0, "pair_count": 1}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            manager = self._manager(runs)
+            result = manager.apply_alignment("apply-job2", ["seg_9999"])
+            self.assertEqual(result["applied_count"], 0)
 
     def test_alignment_check_requires_translation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
