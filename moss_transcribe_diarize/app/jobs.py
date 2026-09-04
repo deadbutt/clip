@@ -223,6 +223,7 @@ class JobRecord:
     diarization_backend: str = "none"
     translation_info: dict[str, Any] = field(default_factory=dict)
     proofread_info: dict[str, Any] = field(default_factory=dict)
+    alignment_info: dict[str, Any] = field(default_factory=dict)
     hotwords: str = ""
     source: str = "upload"
     source_url: str | None = None
@@ -254,6 +255,10 @@ class JobRecord:
     @property
     def proofread_path(self) -> Path:
         return Path(self.job_dir) / "proofread.json"
+
+    @property
+    def alignment_path(self) -> Path:
+        return Path(self.job_dir) / "alignment.json"
 
     @property
     def srt_path(self) -> Path:
@@ -313,6 +318,10 @@ class JobRecord:
             **self.proofread_info,
             "result_available": self.proofread_path.exists(),
         }
+        data["alignment"] = {
+            **self.alignment_info,
+            "result_available": self.alignment_path.exists(),
+        }
         data["source"] = self.source
         if self.source_url:
             data["source_url"] = self.source_url
@@ -352,6 +361,7 @@ class JobRecord:
             diarization_backend=str(data.get("diarization_backend") or "auto"),
             translation_info=dict(data.get("translation_info") or data.get("translation") or {}),
             proofread_info=dict(data.get("proofread_info") or data.get("proofread") or {}),
+            alignment_info=dict(data.get("alignment_info") or data.get("alignment") or {}),
             hotwords=str(data.get("hotwords") or ""),
             source=str(data.get("source") or "upload"),
             source_url=data.get("source_url"),
@@ -1464,11 +1474,16 @@ class JobManager:
                     for item in json.loads(target_path.read_text(encoding="utf-8"))
                 ]
                 started = time.time()
+                translated = target_kind == "source"
 
                 def update_proofread_progress(phase: str, done: int, total: int) -> None:
-                    ratio = 0.7 * (done / total) if phase == "pass1" and total else 0.7
-                    if phase == "pass2" and done:
-                        ratio = 1.0
+                    if phase == "pass1":
+                        if translated:
+                            ratio = 0.5 * (done / total) if total else 0.5
+                        else:
+                            ratio = 0.7 * (done / total) if total else 0.7
+                    else:
+                        ratio = 0.6 if translated else 1.0
                     self.job_log(job, f"校对进度 phase={phase} {done}/{total}")
                     job.proofread_info = {
                         **job.proofread_info,
@@ -1494,9 +1509,51 @@ class JobManager:
                 }
                 self._touch(job, error=None)
                 result = proofreader.proofread(segments, progress_callback=update_proofread_progress)
+                # 一键校对: 已翻译任务在校对源稿之后追加译文对照检查(只读标注)。
+                alignment_payload: dict[str, Any] | None = None
+                if translated:
+                    try:
+                        pairs = self._alignment_pairs(job)
+                        if pairs:
+                            def update_alignment_progress(done: int, total: int) -> None:
+                                if job.id in self._cancelled_jobs:
+                                    raise JobCancelled()
+                                ratio = (done / total) if total else 1.0
+                                self.job_log(job, f"对照检查进度 {done}/{total}")
+                                job.proofread_info = {
+                                    **job.proofread_info,
+                                    "phase": "alignment",
+                                    "done": done,
+                                    "total": total,
+                                    "percent": round((0.6 + 0.39 * ratio) * 100, 1),
+                                }
+                                self._set_status(job, "proofreading", 0.95 + 0.04 * (0.6 + 0.39 * ratio), error=None)
+
+                            issues = proofreader.check_alignment(pairs, progress_callback=update_alignment_progress)
+                            alignment_payload = {
+                                "issues": issues,
+                                "issue_count": len(issues),
+                                "pair_count": len(pairs),
+                            }
+                    except JobCancelled:
+                        raise
+                    except Exception:
+                        # 对照检查是附加质检,失败不作废主校对已产出的修正。
+                        logger.exception("Alignment check after proofread failed")
                 result["target"] = target_kind
                 result["created_at"] = time.time()
                 result["elapsed_sec"] = round(time.time() - started, 1)
+                if alignment_payload is not None:
+                    result["alignment"] = alignment_payload
+                    write_text(
+                        job.alignment_path,
+                        json.dumps({**alignment_payload, "created_at": time.time()}, ensure_ascii=False, indent=2),
+                    )
+                    job.alignment_info = {
+                        "in_progress": False,
+                        "issue_count": alignment_payload["issue_count"],
+                        "pair_count": alignment_payload["pair_count"],
+                    }
                 write_text(job.proofread_path, json.dumps(result, ensure_ascii=False, indent=2))
                 job.proofread_info = {
                     "in_progress": False,
@@ -1504,8 +1561,7 @@ class JobManager:
                     "target": target_kind,
                     "typo_count": len(result.get("suggestions") or []),
                     "term_count": len(result.get("term_corrections") or []),
-                    "merge_count": len((result.get("reference") or {}).get("merge_suggestions") or []),
-                    "speaker_question_count": len((result.get("reference") or {}).get("speaker_questions") or []),
+                    "alignment_count": (result.get("alignment") or {}).get("issue_count", 0),
                     "elapsed_sec": result["elapsed_sec"],
                 }
                 job.status = "waiting_review"
@@ -1637,6 +1693,123 @@ class JobManager:
             "glossary_terms": glossary_terms,
             "segments": [segment.to_dict() for segment in segments] if target_kind == "segments" else None,
         }
+
+    # ------------------------------------------------------------ 对照检查
+
+    def _alignment_pairs(self, job: JobRecord) -> list[dict[str, Any]]:
+        """当前稿与源稿按 id 配对,产出送 LLM 的对照对。
+
+        双语模式的当前稿是"译文\\n源文",取首行作译文;
+        译文与源文相同(预翻译跳过保留原文)或任一侧为空的对不送检。"""
+        current = [
+            SubtitleSegment.from_dict(item)
+            for item in json.loads(job.segments_path.read_text(encoding="utf-8"))
+        ]
+        source_by_id = {
+            str(item.get("id")): str(item.get("text") or "")
+            for item in json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+        }
+        pairs: list[dict[str, Any]] = []
+        for index, segment in enumerate(current):
+            source_text = source_by_id.get(segment.id)
+            if source_text is None or not source_text.strip():
+                continue
+            text = segment.text
+            translated_text = text.split("\n", 1)[0].strip() if "\n" in text else text.strip()
+            if not translated_text or translated_text == source_text.strip():
+                continue
+            pairs.append(
+                {
+                    "id": segment.id,
+                    "index": index,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "source_text": source_text.strip(),
+                    "translated_text": translated_text,
+                }
+            )
+        return pairs
+
+    def alignment_check(self, job_id: str, proofreader: Any) -> dict[str, Any]:
+        """翻译后的源文-译文对照检查:LLM 只产只读标注,不改任何文本。"""
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot run the check while the job is running.")
+        if not job.source_segments_path.exists():
+            raise RuntimeError("Only translated jobs can run the alignment check.")
+        if not job.segments_path.exists():
+            raise RuntimeError("No subtitle segments are available for this job.")
+
+        with self._proofread_lock:
+            self._set_status(job, "proofreading", max(job.progress, 0.95), error=None)
+            try:
+                pairs = self._alignment_pairs(job)
+                started = time.time()
+
+                def update_progress(done: int, total: int) -> None:
+                    if job.id in self._cancelled_jobs:
+                        raise JobCancelled()
+                    ratio = 1.0 if total <= 0 else done / total
+                    self.job_log(job, f"对照检查进度 {done}/{total}")
+                    job.alignment_info = {
+                        **job.alignment_info,
+                        "in_progress": True,
+                        "done": done,
+                        "total": total,
+                        "percent": round(ratio * 100, 1),
+                    }
+                    self._set_status(job, "proofreading", 0.95 + 0.04 * ratio, error=None)
+
+                job.alignment_info = {
+                    **job.alignment_info,
+                    "in_progress": True,
+                    "done": 0,
+                    "total": 0,
+                    "percent": 0.0,
+                }
+                self._touch(job, error=None)
+                issues = proofreader.check_alignment(pairs, progress_callback=update_progress)
+                result = {
+                    "issues": issues,
+                    "issue_count": len(issues),
+                    "pair_count": len(pairs),
+                    "segment_count": len(json.loads(job.segments_path.read_text(encoding="utf-8"))),
+                    "elapsed_sec": round(time.time() - started, 1),
+                    "created_at": time.time(),
+                }
+                write_text(job.alignment_path, json.dumps(result, ensure_ascii=False, indent=2))
+                job.alignment_info = {
+                    "in_progress": False,
+                    "issue_count": len(issues),
+                    "pair_count": len(pairs),
+                    "elapsed_sec": result["elapsed_sec"],
+                }
+                job.status = "waiting_review"
+                job.progress = 0.95
+                self._touch(job, error=None)
+                return result
+            except JobCancelled:
+                self._cancelled_jobs.discard(job.id)
+                job.alignment_info = {**job.alignment_info, "in_progress": False, "cancelled": True}
+                job.status = "waiting_review"
+                job.progress = max(job.progress, 0.95)
+                self._touch(job, error=None)
+                self.job_log(job, "对照检查已取消，回到待校对")
+                return {"cancelled": True}
+            except Exception as exc:
+                job.alignment_info = {
+                    **job.alignment_info,
+                    "in_progress": False,
+                    "error": str(exc),
+                }
+                self._set_status(job, "waiting_review", max(job.progress, 0.95), error=f"Alignment check failed: {exc}")
+                raise
+
+    def get_alignment_result(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if not job.alignment_path.exists():
+            raise FileNotFoundError("No alignment check result is available for this job.")
+        return json.loads(job.alignment_path.read_text(encoding="utf-8"))
 
     def clip_download_path(self, job_id: str, filename: str) -> Path:
         job = self.get_job(job_id)

@@ -801,6 +801,15 @@ def create_app(
         except RuntimeError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=409)
 
+    @app.get("/api/jobs/{job_id}/alignment")
+    def get_alignment(job_id: str):
+        try:
+            return manager.get_alignment_result(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/jobs/{job_id}/clips")
     def list_clips(
         job_id: str,

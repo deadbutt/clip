@@ -40,18 +40,26 @@ Return ONLY a JSON array, one object per TARGET segment, in order:
 [{"id":"seg_0001","text":"..."}]
 The output array must contain exactly the same ids as the TARGET segments."""
 
-PASS2_SYSTEM = """You analyze a full ASR transcript of a video for structural issues.
+PASS2_SYSTEM = """You analyze a full ASR transcript of a video for recurring terminology errors.
 This is a READ-ONLY analysis: you never rewrite the transcript.
 Return JSON only, in this shape:
-{"term_corrections":[{"wrong":"...","right":"..."}],
- "merge_suggestions":[{"id":"seg_0001","with_next":true,"reason":"..."}],
- "speaker_questions":[{"id":"seg_0001","current":"S01","suspect":"S02","reason":"..."}]}
+{"term_corrections":[{"wrong":"...","right":"..."}]}
 Rules:
 - term_corrections: consistent mis-transcriptions of names/terms that appear MULTIPLE times and are clearly wrong. Do NOT list terms you are unsure about, and NEVER list a correction where wrong == right.
-- merge_suggestions: ONLY the most obvious cases where one sentence was split across two adjacent same-speaker segments mid-clause. Maximum 15 suggestions, ranked by confidence. If the transcript is mostly fine, return fewer or none.
-- speaker_questions: only if conversational evidence strongly suggests wrong speaker label.
-- Be very conservative: empty lists are fine. Keep each reason under 15 words.
+- Be very conservative: an empty list is fine.
 - Output ONLY the JSON object, nothing else. No markdown fences."""
+
+ALIGNMENT_SYSTEM = """You compare numbered subtitle segments in the source language with their Chinese translations.
+For each pair decide whether the Chinese faithfully conveys the source meaning.
+Flag ONLY clear problems:
+- omission: a meaningful part of the source text is missing in the Chinese
+- addition: the Chinese states content that is not in the source text
+- mistranslation: wrong meaning, wrong name/number/negation, or opposite meaning
+- terminology: a recurring name/term is translated inconsistently with the rest
+Do NOT flag style, tone, naturalness, or acceptable paraphrases. Do NOT flag untranslated
+noise or bracketed effects like [Music]. When unsure, do not flag.
+Return JSON only: {"issues":[{"n":<pair number>,"type":"omission|addition|mistranslation|terminology","note":"<Chinese, under 20 words>"}]}
+If everything is fine return {"issues":[]}."""
 
 CLIP_RANK_SYSTEM = """You select highlights from a long-form transcript for short video clips.
 Judge semantic quality, not keyword count. Prefer self-contained excerpts with a strong opening,
@@ -278,13 +286,7 @@ class Proofreader:
         content = self._chat(PASS2_SYSTEM, "\n".join(lines), temperature=0.1)
         data = _parse_json_object(content)
         terms = data.get("term_corrections") or []
-        merges = data.get("merge_suggestions") or []
-        speakers = data.get("speaker_questions") or []
-        return {
-            "term_corrections": [t for t in terms if isinstance(t, dict)],
-            "merge_suggestions": [m for m in merges if isinstance(m, dict)][:15],
-            "speaker_questions": [q for q in speakers if isinstance(q, dict)][:15],
-        }
+        return {"term_corrections": [t for t in terms if isinstance(t, dict)]}
 
     @staticmethod
     def _apply_terms(items: list[SubtitleSegment], terms: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -315,6 +317,91 @@ class Proofreader:
                 })
         return results
 
+    # ------------------------------------------------------------- alignment
+
+    def _alignment_window(
+        self, pairs: list[dict[str, Any]], start: int, end: int
+    ) -> list[dict[str, Any]]:
+        """Run one comparison window. Returns raw issue dicts from the model."""
+        lines = []
+        for offset, pair in enumerate(pairs[start:end], start=1):
+            lines.append(f"{offset}. SRC: {pair['source_text']}")
+            lines.append(f"   ZH: {pair['translated_text']}")
+        content = self._chat(ALIGNMENT_SYSTEM, "\n".join(lines), temperature=0.0)
+        data = _parse_json_object(content)
+        issues_raw = data.get("issues")
+        if not isinstance(issues_raw, list):
+            return []
+        count = end - start
+        seen: set[int] = set()
+        output: list[dict[str, Any]] = []
+        for item in issues_raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                n = int(item.get("n"))
+            except (TypeError, ValueError):
+                continue
+            if not 1 <= n <= count or n in seen:
+                continue
+            issue_type = str(item.get("type") or "").strip().lower()
+            if issue_type not in {"omission", "addition", "mistranslation", "terminology"}:
+                continue
+            note = str(item.get("note") or "").strip()[:120]
+            seen.add(n)
+            output.append({"index": start + n - 1, "type": issue_type, "note": note})
+        return output
+
+    def check_alignment(
+        self,
+        pairs: Iterable[dict[str, Any]],
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """成对比对源文与译文,返回带原始 pair 信息的标注(只读,不改文本)。"""
+        items = [pair for pair in pairs if str(pair.get("source_text") or "").strip()]
+        if not items:
+            return []
+        windows: list[tuple[int, int]] = []
+        start = 0
+        while start < len(items):
+            end = min(len(items), start + WINDOW_TARGETS)
+            windows.append((start, end))
+            start = end
+        issues: list[dict[str, Any]] = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(self._alignment_window, items, w_start, w_end): (w_start, w_end)
+                for w_start, w_end in windows
+            }
+            for future in as_completed(futures):
+                w_start, w_end = futures[future]
+                try:
+                    window_issues = future.result()
+                except Exception:
+                    logger.exception("Alignment window [%s:%s] failed", w_start, w_end)
+                    window_issues = []
+                for issue in window_issues:
+                    pair = items[issue["index"]]
+                    issues.append(
+                        {
+                            "id": pair.get("id"),
+                            "index": pair.get("index"),
+                            "start": pair.get("start"),
+                            "end": pair.get("end"),
+                            "type": issue["type"],
+                            "note": issue["note"],
+                            "source_text": pair.get("source_text"),
+                            "translated_text": pair.get("translated_text"),
+                        }
+                    )
+                done += 1
+                if progress_callback:
+                    progress_callback(done, len(windows))
+        issues.sort(key=lambda item: (item.get("index") is None, item.get("index") or 0))
+        return issues
+
     # ----------------------------------------------------------------- main
 
     def proofread(
@@ -338,10 +425,10 @@ class Proofreader:
         try:
             pass2 = self._run_pass2(items)
         except Exception:
-            # Pass 2 是长视频单请求,最容易超时/爆上下文;它只产结构建议
-            # (术语/合并/质疑),失败不应作废 Pass 1 已完成的全部修正。
+            # Pass 2 是长视频单请求,最容易超时/爆上下文;它只产术语修正,
+            # 失败不应作废 Pass 1 已完成的全部修正。
             logger.exception("Proofread pass 2 failed; keeping pass 1 results only")
-            pass2 = {"term_corrections": [], "merge_suggestions": [], "speaker_questions": []}
+            pass2 = {"term_corrections": []}
         term_results = self._apply_terms(items, pass2["term_corrections"])
         if progress_callback:
             progress_callback("pass2", 1, 1)
@@ -355,10 +442,6 @@ class Proofreader:
         return {
             "suggestions": suggestions,
             "term_corrections": term_results,
-            "reference": {
-                "merge_suggestions": pass2["merge_suggestions"],
-                "speaker_questions": pass2["speaker_questions"],
-            },
             "usage": {
                 "typo_changes": len(fixed),
                 "rejected_windows": rejected,

@@ -574,8 +574,7 @@ class ProofreaderResilienceTest(unittest.TestCase):
 
         self.assertEqual(result["suggestions"][0]["corrected"], "hello!")
         self.assertEqual(result["term_corrections"], [])
-        self.assertEqual(result["reference"]["merge_suggestions"], [])
-        self.assertEqual(result["reference"]["speaker_questions"], [])
+        self.assertNotIn("reference", result)
 
     def test_apply_terms_escapes_replacement_string(self):
         reader = Proofreader(base_url="http://127.0.0.1:1", model="m")

@@ -164,8 +164,9 @@ const proofreadTypoSectionEl = document.querySelector('#proofreadTypoSection');
 const proofreadTyposAllEl = document.querySelector('#proofreadTyposAll');
 const proofreadTyposMetaEl = document.querySelector('#proofreadTyposMeta');
 const proofreadTyposListEl = document.querySelector('#proofreadTyposList');
-const proofreadReferenceSectionEl = document.querySelector('#proofreadReferenceSection');
-const proofreadReferenceListEl = document.querySelector('#proofreadReferenceList');
+const proofreadAlignmentSectionEl = document.querySelector('#proofreadAlignmentSection');
+const proofreadAlignmentListEl = document.querySelector('#proofreadAlignmentList');
+const proofreadAlignmentMetaEl = document.querySelector('#proofreadAlignmentMeta');
 const llmProfileListEl = document.querySelector('#llmProfileList');
 const llmProfileAddBtn = document.querySelector('#llmProfileAdd');
 const llmProfileEditorEl = document.querySelector('#llmProfileEditor');
@@ -235,6 +236,7 @@ let timelineAutoScrollMode = '';
 let timelineFollowHoldUntil = 0;
 let dismissedTranslationReviewItems = new Set();
 let translationReviewJobId = '';
+let dismissedAlignmentItems = new Set();
 let clipQueueJobId = '';
 let selectedClips = [];
 let activeClipId = '';
@@ -348,7 +350,10 @@ function scheduleLayoutFit() {
 
 function openSettings() { settingsModal.classList.remove('is-hidden'); }
 function closeSettings() { settingsModal.classList.add('is-hidden'); }
-function openTranslate() { updateTranslateAction(); translateModal.classList.remove('is-hidden'); }
+function openTranslate() {
+  updateTranslateAction();
+  translateModal.classList.remove('is-hidden');
+}
 function closeTranslate() { translateModal.classList.add('is-hidden'); }
 function openClips() { ensureClipQueueForJob(); updateClipActions(); updateTimelineClipRange(); clipsModal.classList.remove('is-hidden'); }
 function closeClips() { clipsModal.classList.add('is-hidden'); }
@@ -901,6 +906,25 @@ translationReviewListEl.addEventListener('click', (event) => {
   if (action === 'jump') closeTranslate();
   updateSubtitlePreview();
 });
+proofreadAlignmentListEl.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-alignment-action]');
+  if (!button) return;
+  const item = button.closest('.translation-review-item');
+  if (!item) return;
+  const index = Number(item.dataset.index);
+  const start = Number(item.dataset.start || 0);
+  const key = item.dataset.key || '';
+  if (button.dataset.alignmentAction === 'dismiss') {
+    if (key) dismissedAlignmentItems.add(key);
+    renderProofreadResult(proofreadResult);
+    return;
+  }
+  if (Number.isFinite(index) && index >= 0) setActiveSegment(index, true);
+  if (Number.isFinite(start)) preview.currentTime = Math.max(0, start);
+  if (button.dataset.alignmentAction === 'play') preview.play().catch(() => {});
+  proofreadModal.classList.add('is-hidden');
+  updateSubtitlePreview();
+});
 clipTitleInput.addEventListener('input', () => {
   const clip = activeClip();
   if (!clip) return;
@@ -1209,6 +1233,7 @@ function renderCurrentJob(job, options = {}) {
   if (job.id !== translationReviewJobId) {
     translationReviewJobId = job.id;
     dismissedTranslationReviewItems = new Set();
+    dismissedAlignmentItems = new Set();
   }
   ensureClipQueueForJob();
   renderJobList();
@@ -3394,11 +3419,15 @@ async function runProofread() {
   const saved = await saveSegments();
   if (!saved) return;
   proofreadRunBtn.disabled = true;
-  proofreadStatusEl.textContent = '校对中...（错字修正 + 全片术语分析）';
+  const translated = !!(currentJob.translation && currentJob.translation.source_available);
+  proofreadStatusEl.textContent = translated
+    ? '校对中...（源稿错字修正 + 术语分析 + 译文对照检查）'
+    : '校对中...（错字修正 + 全片术语分析）';
   proofreadProgressMetaEl.classList.remove('is-hidden');
   proofreadProgressEl.classList.remove('is-hidden');
   proofreadProgressTextEl.textContent = '0%';
   proofreadProgressBarEl.style.width = '2%';
+  dismissedAlignmentItems = new Set();
   currentJob = { ...currentJob, status: 'proofreading' };
   jobs = jobs.map((job) => job.id === currentJob.id ? currentJob : job);
   renderCurrentJob(currentJob, { skipSegments: true });
@@ -3426,14 +3455,15 @@ function renderProofreadResult(data) {
   if (!data) return;
   const suggestions = data.suggestions || [];
   const terms = data.term_corrections || [];
-  const reference = data.reference || {};
-  const merges = reference.merge_suggestions || [];
-  const speakerQuestions = reference.speaker_questions || [];
+  const alignment = data.alignment || null;
   const applied = !!data.applied;
 
+  const alignmentCount = alignment ? (alignment.issue_count || (alignment.issues || []).length) : 0;
+  const parts = [`${suggestions.length} 处错字修正`, `${terms.length} 条术语`];
+  if (alignment) parts.push(`译文对照 ${alignmentCount} 处疑似`);
   proofreadStatusEl.textContent = applied
     ? '以下为最近一次校对结果（已应用过一次，可重新勾选应用其余项）。'
-    : `校对完成，耗时 ${data.elapsed_sec || 0}s：${suggestions.length} 处错字修正、${terms.length} 条术语、参考建议 ${merges.length + speakerQuestions.length} 条。`;
+    : `校对完成，耗时 ${data.elapsed_sec || 0}s：${parts.join('、')}。`;
 
   // ---- terms
   proofreadTermSectionEl.classList.toggle('is-hidden', !terms.length);
@@ -3460,19 +3490,10 @@ function renderProofreadResult(data) {
       <div class="proofread-diff"><span class="before">${escapeHtml(s.original || '')}</span><br />→ <span class="after">${escapeHtml(s.corrected || '')}</span></div>
     </div>`).join('');
 
-  // ---- reference (read-only)
-  const referenceItems = [
-    ...merges.map((m) => ({ kind: '合并建议', id: m.id, text: `${m.id} 与下一段疑似同一句被拆开${m.reason ? '：' + m.reason : ''}` })),
-    ...speakerQuestions.map((q) => ({ kind: '说话人质疑', id: q.id, text: `${q.id} 当前 ${q.current}，疑似应为 ${q.suspect}${q.reason ? '：' + q.reason : ''}` })),
-  ];
-  proofreadReferenceSectionEl.classList.toggle('is-hidden', !referenceItems.length);
-  proofreadReferenceListEl.innerHTML = referenceItems.map((item) => `
-    <div class="proofread-reference-item">
-      <span class="meta">${escapeHtml(item.kind)} · ${escapeHtml(item.id || '')}</span>
-      ${escapeHtml(item.text || '')}
-    </div>`).join('');
+  // ---- alignment（只读标注，仅已翻译任务有）
+  renderAlignmentIssues(alignment);
 
-  if (!terms.length && !suggestions.length && !referenceItems.length) {
+  if (!terms.length && !suggestions.length && !alignmentCount) {
     proofreadStatusEl.textContent = '校对完成：没有发现需要修改的地方。';
   }
   updateProofreadSelection();
@@ -3834,6 +3855,54 @@ async function restoreSourceSubtitles() {
   } finally {
     updateTranslateAction();
   }
+}
+
+// ------------------------------------------------------------ 对照检查
+
+function alignmentTypeLabel(type) {
+  const labels = {
+    omission: '疑似漏译',
+    addition: '疑似加译',
+    mistranslation: '疑似误译',
+    terminology: '术语不一致',
+  };
+  return labels[type] || '待检查';
+}
+
+function alignmentItemKey(item) {
+  return [item.type || 'alignment', item.id || '', item.index == null ? '' : item.index].join(':');
+}
+
+function renderAlignmentIssues(alignment) {
+  const items = (alignment && Array.isArray(alignment.issues) ? alignment.issues : [])
+    .filter((item) => !dismissedAlignmentItems.has(alignmentItemKey(item)));
+  proofreadAlignmentSectionEl.classList.toggle('is-hidden', !items.length);
+  if (!items.length) {
+    proofreadAlignmentMetaEl.textContent = '';
+    proofreadAlignmentListEl.innerHTML = '';
+    return;
+  }
+  proofreadAlignmentMetaEl.textContent = `已检查 ${alignment.pair_count || 0} 对 · ${alignment.issue_count || items.length} 处疑似`;
+  proofreadAlignmentListEl.innerHTML = items.map((item) => {
+    const index = Number(item.index);
+    const start = Number(item.start || 0);
+    const key = alignmentItemKey(item);
+    const severity = item.type === 'addition' || item.type === 'terminology' ? 'info' : 'warning';
+    return `
+      <div class="translation-review-item ${severity}" data-index="${Number.isFinite(index) ? index : -1}" data-start="${Number.isFinite(start) ? start : 0}" data-key="${escapeHtml(key)}">
+        <div class="translation-review-item-head">
+          <span>${escapeHtml(alignmentTypeLabel(item.type))} · #${Number.isFinite(index) ? index + 1 : '?'} · ${formatTimelineTime(start)}</span>
+          <strong>${escapeHtml(item.note || '')}</strong>
+        </div>
+        <div class="translation-review-text">SRC ${escapeHtml(item.source_text || '')}</div>
+        <div class="translation-review-text">ZH ${escapeHtml(item.translated_text || '')}</div>
+        <div class="translation-review-actions">
+          <button class="ghost small" type="button" data-alignment-action="jump">跳到字幕</button>
+          <button class="ghost small" type="button" data-alignment-action="play">回看原片</button>
+          <button class="primary small" type="button" data-alignment-action="dismiss">标为已处理</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 function useActiveSegmentAsClipRange() {
