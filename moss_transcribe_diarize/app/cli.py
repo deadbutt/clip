@@ -26,6 +26,7 @@ from .ffmpeg import (
     detect_ffmpeg,
     probe_video_size,
 )
+from .jobs import _apply_transcription_quality
 from .local_mt_translator import LocalMtTranslator
 from .speaker_labeler import SpeakerLabelingInfo, label_speakers
 from .text_translator import (
@@ -125,7 +126,9 @@ def main() -> None:
             pyannote_model=args.pyannote_model,
             device=args.diarization_device,
         )
+        _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
         transcription_summary = {k: v for k, v in result.to_dict().items() if k != "text"}
+        _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
 
     translated = False
     translation_elapsed_sec = None

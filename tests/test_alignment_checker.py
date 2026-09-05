@@ -123,8 +123,6 @@ class AlignmentManagerTest(unittest.TestCase):
             return JobManager(runs, _StubRunner(), prompt="p", max_length=1024, max_new_tokens=8)
 
     def test_alignment_pairs_builds_from_bilingual_and_skips_untranslated(self):
-        from moss_transcribe_diarize.app.jobs import JobManager
-
         with tempfile.TemporaryDirectory() as tmpdir:
             runs = Path(tmpdir)
             job_dir = self._write_job(runs, "pair-job")
@@ -155,8 +153,6 @@ class AlignmentManagerTest(unittest.TestCase):
             self.assertEqual(pairs[0]["index"], 0)
 
     def test_alignment_check_writes_result_and_restores_status(self):
-        from moss_transcribe_diarize.app.jobs import JobManager
-
         class _FakeChecker:
             def check_alignment(self, pairs, *, progress_callback=None):
                 if progress_callback:
@@ -270,8 +266,6 @@ class AlignmentManagerTest(unittest.TestCase):
             self.assertEqual(manager.get_job("plain-job").proofread_info.get("alignment_count"), 0)
 
     def test_apply_alignment_replaces_translation_line_only(self):
-        from moss_transcribe_diarize.app.jobs import JobManager
-
         with tempfile.TemporaryDirectory() as tmpdir:
             runs = Path(tmpdir)
             job_dir = self._write_job(runs, "apply-job")
@@ -308,8 +302,6 @@ class AlignmentManagerTest(unittest.TestCase):
             self.assertEqual(remaining["applied_ids"], ["seg_0001"])
 
     def test_apply_alignment_skips_unknown_ids(self):
-        from moss_transcribe_diarize.app.jobs import JobManager
-
         with tempfile.TemporaryDirectory() as tmpdir:
             runs = Path(tmpdir)
             job_dir = self._write_job(runs, "apply-job2")

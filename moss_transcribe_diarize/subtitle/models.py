@@ -49,6 +49,9 @@ class SubtitleSegment:
     speaker: str
     text: str
     items: list[SubtitleItem] | None = None
+    confidence: float | None = None
+    quality_flags: list[str] | None = None
+    quality_reasons: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +65,9 @@ class SubtitleSegment:
             speaker=str(data.get("speaker") or "S00"),
             text=str(data.get("text") or ""),
             items=coerce_subtitle_items(data.get("items")),
+            confidence=(None if data.get("confidence") in (None, "") else float(data.get("confidence"))),
+            quality_flags=([str(v) for v in data.get("quality_flags", [])] if isinstance(data.get("quality_flags"), list) else None),
+            quality_reasons=([str(v) for v in data.get("quality_reasons", [])] if isinstance(data.get("quality_reasons"), list) else None),
         )
 
 

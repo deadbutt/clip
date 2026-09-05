@@ -141,7 +141,12 @@ class SerialDemucsTest(unittest.TestCase):
             return Path(work_dir) / "vocals_16k.wav"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(
+                model_path="fake-model",
+                runs_dir=tmpdir,
+                max_new_tokens=8,
+                diarization_backend="pyannote",
+            )
             app.state.manager.model_runner = OrderedRunner()
             client = TestClient(app)
             with (

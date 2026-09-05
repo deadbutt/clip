@@ -47,6 +47,7 @@ class TranscriptionResult:
     # 词级时间戳 [(start, end, token), ...]，仅在转录内部使用、不序列化；
     # 供词级断句重组取精确时间。引擎不支持时为 None，走 segment 级降级。
     words: list[tuple[float, float, str]] | None = None
+    segment_metrics: list[dict[str, float]] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -60,6 +61,7 @@ class TranscriptionResult:
             "temperature": self.temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
+            "segment_metrics": self.segment_metrics,
         }
 
 
@@ -153,13 +155,13 @@ class WhisperRunner:
 
             started = time.time()
             if self._engine == "faster-whisper":
-                parts, segment_count, words = self._transcribe_faster_whisper(
+                parts, segment_count, words, metrics = self._transcribe_faster_whisper(
                     audio_path, prompt, status_callback, hotwords=hotwords
                 )
                 # 即使 vad_filter=False，no_speech_threshold 也可能把段落判为无声而提前结束，
                 # 所以这里不再以 vad_filter 为前提，只看 _looks_sparse 的判定结果（含覆盖率检查）
                 if self._looks_sparse(parts, segment_count, audio_path):
-                    fallback_parts, fallback_segment_count, fallback_words = self._transcribe_faster_whisper(
+                    fallback_parts, fallback_segment_count, fallback_words, fallback_metrics = self._transcribe_faster_whisper(
                         audio_path,
                         prompt,
                         status_callback,
@@ -170,6 +172,7 @@ class WhisperRunner:
                         parts = fallback_parts
                         segment_count = fallback_segment_count
                         words = fallback_words
+                        metrics = fallback_metrics
                 # 定向缺口恢复：VAD 可能局部误杀语音（如短句被判无声而跳过），
                 # 在词时间轴上找出 >3s 的无词缺口，检测该区段音频能量，
                 # 若有语音特征则单独重转录（vad_filter=False）并补回词表。
@@ -182,6 +185,7 @@ class WhisperRunner:
                     parts.sort(key=lambda p: float(p[1:p.find("]")]))
             else:
                 parts, segment_count, words = self._transcribe_openai_whisper(audio_path, prompt, status_callback)
+                metrics = []
 
             if status_callback is not None:
                 status_callback("transcribing", 0.85, segment_count)
@@ -195,6 +199,7 @@ class WhisperRunner:
                 decoding="beam_search",
                 temperature=None,
                 words=words,
+                segment_metrics=metrics,
             )
 
     def _ensure_loaded(self) -> None:
@@ -309,6 +314,7 @@ class WhisperRunner:
         parts: list[str] = []
         words: list[tuple[float, float, str]] = []
         segment_count = 0
+        segment_metrics: list[dict[str, float]] = []
         for segment in segments_iter:
             segment_count += 1
             start = max(0.0, float(segment.start))
@@ -316,6 +322,7 @@ class WhisperRunner:
             text = str(segment.text or "").strip()
             if not text:
                 continue
+            segment_metrics.append({"start": start, "end": end, "avg_logprob": float(getattr(segment, "avg_logprob", 0.0) or 0.0), "no_speech_prob": float(getattr(segment, "no_speech_prob", 0.0) or 0.0), "compression_ratio": float(getattr(segment, "compression_ratio", 0.0) or 0.0)})
             if repeat_guard.should_skip(text):
                 if status_callback is not None:
                     progress = _duration_progress(end, duration)
@@ -341,7 +348,7 @@ class WhisperRunner:
             if status_callback is not None:
                 progress = _duration_progress(end, duration)
                 status_callback("transcribing", progress, segment_count)
-        return parts, segment_count, words
+        return parts, segment_count, words, segment_metrics
 
     def _looks_sparse(self, parts: list[str], segment_count: int, audio_path: str | Path) -> bool:
         text = "".join(parts).strip()
@@ -446,7 +453,7 @@ class WhisperRunner:
                 tmp_path = tmp.name
             try:
                 sf.write(tmp_path, chunk, sr)
-                gap_parts, _, gap_words = self._transcribe_faster_whisper(
+                gap_parts, _, gap_words, _ = self._transcribe_faster_whisper(
                     tmp_path, prompt, status_callback, vad_filter=False,
                 )
                 if gap_words:

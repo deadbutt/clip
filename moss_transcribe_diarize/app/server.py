@@ -204,7 +204,19 @@ def create_app(
 
     @app.get("/api/jobs")
     def list_jobs():
-        return {"jobs": [job.to_dict() for job in manager.list_jobs()]}
+        return {"jobs": [job.to_dict() for job in manager.list_jobs()], "queue": manager.queue_info()}
+
+    @app.get("/api/queue")
+    def queue_info():
+        return manager.queue_info()
+
+    @app.post("/api/queue/pause")
+    def pause_queue():
+        return manager.pause_queue()
+
+    @app.post("/api/queue/resume")
+    def resume_queue():
+        return manager.resume_queue()
 
     @app.post("/api/jobs")
     async def create_job(

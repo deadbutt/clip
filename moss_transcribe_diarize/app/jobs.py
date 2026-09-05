@@ -6,10 +6,12 @@ import logging
 import queue
 import re
 import shutil
+import struct
+import subprocess
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,12 @@ _MIN_ALIGN_MATCH_RATIO = 0.4
 # segments 解析缓存条目上限:每条可达数 MB(词级时间戳),不设限的话
 # 长期运行的服务会随历史任务数无限增长;8 个活跃编辑任务已绰绰有余。
 _SEGMENTS_CACHE_MAX = 8
+
+# 字幕展示/导出只修正 Whisper 词级时间戳偏早的问题，工程 JSON 仍保留原始边界。
+_TAIL_FRAME_SECONDS = 0.02
+_TAIL_ANALYSIS_RATE = 8000
+_TAIL_MAX_EXTENSION = 0.80
+_TAIL_FALLBACK_PADDING = 0.50
 
 
 class _AppendFileHandler(logging.Handler):
@@ -179,6 +187,159 @@ _MIN_MAX_NEW_TOKENS = 2048
 _MAX_MAX_NEW_TOKENS = 65536
 _TOKEN_ROUNDING = 512
 
+
+def _apply_transcription_quality(segments: list[SubtitleSegment], metrics: list[dict[str, float]] | None) -> None:
+    """Attach explainable, segment-level ASR quality metadata without extra inference."""
+    if not metrics:
+        return
+    for segment in segments:
+        overlaps = [m for m in metrics if float(m.get("end", 0)) > segment.start and float(m.get("start", 0)) < segment.end]
+        if not overlaps:
+            continue
+        avg_logprob = sum(float(m.get("avg_logprob", 0)) for m in overlaps) / len(overlaps)
+        no_speech = max(float(m.get("no_speech_prob", 0)) for m in overlaps)
+        compression = max(float(m.get("compression_ratio", 0)) for m in overlaps)
+        score = max(0.0, min(1.0, (avg_logprob + 1.5) / 1.5))
+        score *= max(0.0, 1.0 - no_speech)
+        flags: list[str] = []
+        reasons: list[str] = []
+        if avg_logprob < -0.8:
+            flags.append("low_confidence")
+            reasons.append("ASR 平均对数概率较低")
+        if no_speech >= 0.6:
+            flags.append("possible_hallucination")
+            reasons.append("无语音概率较高")
+        if compression >= 2.4:
+            flags.append("possible_repetition")
+            reasons.append("文本压缩比异常")
+        segment.confidence = round(score, 4)
+        segment.quality_flags = flags or None
+        segment.quality_reasons = reasons or None
+
+
+def _padded_export_segments(
+    segments: list[SubtitleSegment],
+    padding: float = _TAIL_FALLBACK_PADDING,
+    end_overrides: dict[str, float] | None = None,
+) -> list[SubtitleSegment]:
+    """Apply sentence-tail buffers while keeping segment source times untouched."""
+    out: list[SubtitleSegment] = []
+    for index, segment in enumerate(segments):
+        next_start = segments[index + 1].start if index + 1 < len(segments) else segment.end + padding
+        requested_end = (end_overrides or {}).get(segment.id, segment.end + padding)
+        end = min(next_start, max(segment.end, requested_end))
+        out.append(replace(segment, end=max(segment.start + 0.01, end)))
+    return out
+
+
+def _rms_frames_from_audio(path: str | Path) -> list[float] | None:
+    """Decode a small mono PCM stream and return 20 ms RMS values.
+
+    The stream is intentionally low rate and short-lived: a 1 hour file is only
+    about 58 MB of raw PCM, and normal runs are much smaller. Failures simply
+    disable adaptive padding and leave the fixed fallback in place.
+    """
+    tools = detect_ffmpeg()
+    if not tools.ffmpeg or not Path(path).is_file():
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                tools.ffmpeg,
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(_TAIL_ANALYSIS_RATE),
+                "-f",
+                "s16le",
+                "-",
+            ],
+            capture_output=True,
+            timeout=90,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = completed.stdout
+    samples_per_frame = max(1, round(_TAIL_ANALYSIS_RATE * _TAIL_FRAME_SECONDS))
+    bytes_per_frame = samples_per_frame * 2
+    frames: list[float] = []
+    for offset in range(0, len(raw) - 1, bytes_per_frame):
+        chunk = raw[offset : offset + bytes_per_frame]
+        count = len(chunk) // 2
+        if not count:
+            continue
+        values = struct.unpack(f"<{count}h", chunk[: count * 2])
+        frames.append((sum(value * value for value in values) / count) ** 0.5 / 32768.0)
+    return frames or None
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * fraction)))
+    return ordered[index]
+
+
+def _adaptive_tail_endings(
+    path: str | Path,
+    segments: list[SubtitleSegment],
+    *,
+    max_extension: float = _TAIL_MAX_EXTENSION,
+) -> dict[str, float] | None:
+    """Find safe sentence-tail extensions from low-rate audio energy.
+
+    A tail must contain consecutive energy above both the local noise floor and
+    a fraction of the segment's preceding energy. This rejects long quiet gaps
+    and most music/game-only tails while preserving a conservative fallback.
+    """
+    frames = _rms_frames_from_audio(path)
+    if not frames:
+        return None
+    frame_seconds = _TAIL_FRAME_SECONDS
+    noise = _percentile(frames, 0.20)
+    result: dict[str, float] = {}
+    ordered = sorted(segments, key=lambda item: (item.start, item.end))
+    for index, segment in enumerate(ordered):
+        start = max(0.0, float(segment.start))
+        end = max(start, float(segment.end))
+        next_start = ordered[index + 1].start if index + 1 < len(ordered) else end + max_extension
+        limit = min(end + max_extension, float(next_start))
+        if limit <= end + frame_seconds * 0.5:
+            result[segment.id] = min(limit, end + _TAIL_FALLBACK_PADDING)
+            continue
+        before_start = max(start, end - 0.40)
+        before = frames[round(before_start / frame_seconds) : round(end / frame_seconds)]
+        reference = _percentile(before, 0.75)
+        threshold = max(0.008, noise * 1.8, reference * 0.22)
+        first_frame = max(0, int(end / frame_seconds))
+        last_frame = min(len(frames), int(limit / frame_seconds + 0.999))
+        last_active = -1
+        quiet_run = 0
+        for frame_index in range(first_frame, last_frame):
+            if frames[frame_index] >= threshold:
+                last_active = frame_index
+                quiet_run = 0
+            else:
+                quiet_run += 1
+                if last_active >= 0 and quiet_run >= 2:
+                    break
+        if last_active < first_frame:
+            extension = _TAIL_FALLBACK_PADDING
+        else:
+            extension = max(0.0, min(max_extension, (last_active + 1) * frame_seconds - end))
+            # Adaptive analysis may refine a longer tail, but never shorten the
+            # established 0.5 s fallback that users already see in the preview.
+            extension = max(_TAIL_FALLBACK_PADDING, extension)
+        result[segment.id] = min(limit, end + extension)
+    return result
+
 # demucs(~2GB) + whisper(~3GB) 同卡并行所需的最小空闲显存。
 # 低于它强行并行会触发驱动 sysmem fallback，两负载超线性互拖。
 _PARALLEL_DEMUCS_MIN_FREE_VRAM = 5_000_000_000
@@ -258,6 +419,9 @@ class JobRecord:
     # 应用自己写出 srt/ass 时的 mtime 戳;用于区分"应用写的"与"外部编辑过的"文件,
     # 防止 list_segments 把应用刚写好的字幕误判为外部编辑而反向覆盖(丢失 speaker/items)。
     subtitle_file_stamps: dict[str, float] = field(default_factory=dict)
+    retry_count: int = 0
+    phase_times: dict[str, float] = field(default_factory=dict)
+    error_kind: str | None = None
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -426,6 +590,9 @@ class JobManager:
         self.diarization_device = diarization_device
         self._jobs: dict[str, JobRecord] = {}
         self._queue: queue.Queue[str] = queue.Queue()
+        self._queue_paused = False
+        self._queue_condition = threading.Condition()
+        self._phase_starts: dict[str, float] = {}
         self._render_lock = threading.Lock()
         self._translate_lock = threading.Lock()
         self._proofread_lock = threading.Lock()
@@ -445,6 +612,8 @@ class JobManager:
         # segments.json 的解析缓存: job_id -> (stat 指纹, 解析结果)。
         # 指纹 = (mtime_ns, size),任何写入(应用保存/外部 srt 反向同步)都会改变它,缓存自动失效。
         self._segments_cache: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+        # job_id -> (input stat, segment time signature, adaptive end map).
+        self._tail_padding_cache: dict[str, tuple[tuple[int, int], tuple[tuple[str, float, float], ...], dict[str, float] | None]] = {}
         self._load_existing_jobs()
         self._worker = threading.Thread(target=self._worker_loop, name="mtd-job-worker", daemon=True)
         self._worker.start()
@@ -613,6 +782,23 @@ class JobManager:
 
     def enqueue(self, job_id: str) -> None:
         self._queue.put(job_id)
+
+    def queue_info(self) -> dict[str, Any]:
+        """Return queue state without exposing the internal queue object."""
+        with self._queue_condition:
+            paused = self._queue_paused
+        return {"paused": paused, "pending": self._queue.qsize(), "active": len(self._active_jobs)}
+
+    def pause_queue(self) -> dict[str, Any]:
+        with self._queue_condition:
+            self._queue_paused = True
+        return self.queue_info()
+
+    def resume_queue(self) -> dict[str, Any]:
+        with self._queue_condition:
+            self._queue_paused = False
+            self._queue_condition.notify_all()
+        return self.queue_info()
 
     # ------------------------------------------------------------ 事件与日志
 
@@ -800,6 +986,7 @@ class JobManager:
         self._emit_times.pop(job_id, None)
         self._emit_status.pop(job_id, None)
         self._segments_cache.pop(job_id, None)
+        self._tail_padding_cache.pop(job_id, None)
         self._progress_save_times.pop(job_id, None)
         self._cancelled_jobs.discard(job_id)
         shutil.rmtree(job.job_dir, ignore_errors=True)
@@ -810,7 +997,8 @@ class JobManager:
         命中缓存时返回的是共享对象——调用方不得就地修改返回值或其嵌套结构
         (现有调用点均为只读或 from_dict/{**seg} 拷贝,新增调用点必须遵守)。
         """
-        return self._load_segments(job_id)[0]
+        data, _version = self._load_segments(job_id)
+        return self._decorate_display_ends(self.get_job(job_id), data)
 
     def list_segments_with_version(self, job_id: str) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
         """同 list_segments,并附带 segments.json 的 stat 指纹(供 ETag/304 判断)。
@@ -818,7 +1006,38 @@ class JobManager:
         指纹与缓存 key 来自同一次调用,保证"数据与指纹"一致,不会出现
         ETag 比数据新导致客户端 304 卡在旧稿的情况。
         """
-        return self._load_segments(job_id)
+        data, version = self._load_segments(job_id)
+        return self._decorate_display_ends(self.get_job(job_id), data), version
+
+    def _adaptive_end_map(self, job: JobRecord, segments: list[SubtitleSegment]) -> dict[str, float] | None:
+        input_path = Path(job.input_path)
+        try:
+            stat = input_path.stat()
+            input_key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+        signature = tuple((segment.id, float(segment.start), float(segment.end)) for segment in segments)
+        cached = self._tail_padding_cache.get(job.id)
+        if cached is not None and cached[0] == input_key and cached[1] == signature:
+            return cached[2]
+        result = _adaptive_tail_endings(input_path, segments)
+        self._tail_padding_cache[job.id] = (input_key, signature, result)
+        return result
+
+    def _decorate_display_ends(self, job: JobRecord, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        segments = [SubtitleSegment.from_dict(item) for item in data if isinstance(item, dict)]
+        end_map = self._adaptive_end_map(job, segments)
+        for index, (item, segment) in enumerate(zip(data, segments)):
+            next_start = segments[index + 1].start if index + 1 < len(segments) else segment.end + _TAIL_FALLBACK_PADDING
+            fallback = min(next_start, segment.end + _TAIL_FALLBACK_PADDING)
+            item["display_end"] = round(float((end_map or {}).get(segment.id, fallback)), 3)
+        # Keep the parsed list identity: callers use it as an immutable cache value
+        # and existing API code relies on repeated reads returning the same object.
+        return data
+
+    def _export_segments_for_job(self, job: JobRecord, segments: list[SubtitleSegment]) -> list[SubtitleSegment]:
+        end_map = self._adaptive_end_map(job, segments)
+        return _padded_export_segments(segments, end_overrides=end_map)
 
     def _load_segments(self, job_id: str) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
         job = self.get_job(job_id)
@@ -860,7 +1079,7 @@ class JobManager:
             self._set_status(job, "waiting_review", 0.95, error=None)
         else:
             self._touch(job, error=None)
-        return [segment.to_dict() for segment in segments]
+        return self._decorate_display_ends(job, [segment.to_dict() for segment in segments])
 
     # ------------------------------------------------------------ 查找与替换
 
@@ -1027,23 +1246,23 @@ class JobManager:
                 right_text = seg.text[cut:].lstrip()
             left = SubtitleSegment(
                 id=seg.id, start=seg.start, end=max(left_items[-1].end, seg.start),
-                speaker=seg.speaker, text=left_text or seg.text, items=left_items,
+                speaker=seg.speaker, text=left_text or seg.text, items=left_items, confidence=seg.confidence, quality_flags=seg.quality_flags, quality_reasons=seg.quality_reasons,
             )
             right = SubtitleSegment(
                 id=new_id,
                 start=min(right_items[0].start, seg.end), end=seg.end,
-                speaker=seg.speaker, text=right_text or seg.text, items=right_items,
+                speaker=seg.speaker, text=right_text or seg.text, items=right_items, confidence=seg.confidence, quality_flags=seg.quality_flags, quality_reasons=seg.quality_reasons,
             )
         else:
             ratio = (t - seg.start) / duration
             cut = max(1, min(len(seg.text) - 1, round(len(seg.text) * ratio)))
             left = SubtitleSegment(
                 id=seg.id, start=seg.start, end=t, speaker=seg.speaker,
-                text=seg.text[:cut].rstrip(), items=None,
+                text=seg.text[:cut].rstrip(), items=None, confidence=seg.confidence, quality_flags=seg.quality_flags, quality_reasons=seg.quality_reasons,
             )
             right = SubtitleSegment(
                 id=new_id, start=t, end=seg.end,
-                speaker=seg.speaker, text=seg.text[cut:].lstrip(), items=None,
+                speaker=seg.speaker, text=seg.text[cut:].lstrip(), items=None, confidence=seg.confidence, quality_flags=seg.quality_flags, quality_reasons=seg.quality_reasons,
             )
         return left, right
 
@@ -1156,7 +1375,7 @@ class JobManager:
                 logger.debug("split: fallback to source text skipped", exc_info=True)
         self._write_subtitle_files(job, segments)
         self._touch(job, error=None)
-        return [segment.to_dict() for segment in segments]
+        return self._decorate_display_ends(job, [segment.to_dict() for segment in segments])
 
     def merge_segments(self, job_id: str, segment_ids: list[str]) -> list[dict[str, Any]]:
         """把多条**相邻**字幕合并成一条;说话人取第一条,items 依序拼接。
@@ -1199,7 +1418,7 @@ class JobManager:
             self._mark_structure_changed(job)
         self._write_subtitle_files(job, segments)
         self._touch(job, error=None)
-        return [segment.to_dict() for segment in segments]
+        return self._decorate_display_ends(job, [segment.to_dict() for segment in segments])
 
     def sync_segments_from_subtitle_files(self, job_id: str) -> dict[str, Any]:
         job = self.get_job(job_id)
@@ -1293,12 +1512,12 @@ class JobManager:
             width, height = probe_video_size(job.input_path)
             write_text(
                 ass_path,
-                export_ass(segments, style=style, video_width=width, video_height=height),
+                export_ass(_padded_export_segments(segments), style=style, video_width=width, video_height=height),
                 encoding="utf-8-sig",
             )
             write_text(
                 srt_path,
-                export_srt(segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
+                export_srt(_padded_export_segments(segments), show_speaker=style.show_speaker, speaker_names=style.speaker_names),
                 encoding="utf-8-sig",
             )
             write_text(
@@ -1933,6 +2152,9 @@ class JobManager:
     def _worker_loop(self) -> None:
         while True:
             job_id = self._queue.get()
+            with self._queue_condition:
+                while self._queue_paused:
+                    self._queue_condition.wait()
             self._active_jobs.add(job_id)
             try:
                 self._process_job(self.get_job(job_id))
@@ -2127,6 +2349,7 @@ class JobManager:
                     segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
                 # 重复幻觉过滤：音乐段里同一句"不存在的话"反复出现的模式。
                 segments = drop_repeated_hallucinations(segments)
+                _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
             self._raise_if_cancelled(job.id)
 
             # 串行路径：转录已完成、whisper 显存已让出，现在才启动 demucs
@@ -2181,6 +2404,9 @@ class JobManager:
                 words=(result.words if result else checkpoint_words),
                 audio_path=vocals_path,
             )
+            # 说话人标记可能返回新建的 SubtitleSegment，重新附加 ASR 质量信息，
+            # 确保最终写入 segments.json 的对象包含置信度。
+            _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
             if vocals_path is not None:
                 try:
                     Path(vocals_path).unlink(missing_ok=True)
@@ -2331,7 +2557,7 @@ class JobManager:
                 self._set_status(job, "rendering", 0.95, error=None)
                 segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job.id)]
                 width, height = probe_video_size(job.input_path)
-                write_text(job.ass_path, export_ass(segments, style=style, video_width=width, video_height=height))
+                write_text(job.ass_path, export_ass(self._export_segments_for_job(job, segments), style=style, video_width=width, video_height=height))
                 def on_render_progress(ratio: float) -> None:
                     progress = max(job.progress, 0.95 + max(0.0, min(1.0, ratio)) * 0.049)
                     self._set_status(
@@ -2378,17 +2604,20 @@ class JobManager:
         style: SubtitleStyle | None = None,
     ) -> None:
         write_text(job.segments_path, export_json(segments))
+        # 导出字幕给句尾留少量缓冲；工程 JSON 保留 ASR 原始时间，便于继续编辑。
+        self._tail_padding_cache.pop(job.id, None)
+        export_segments = self._export_segments_for_job(job, segments)
         if style is None:
             style = SubtitleStyle.from_dict(job.subtitle_style) if job.subtitle_style else SubtitleStyle(font_size=48)
         write_text(
             job.srt_path,
-            export_srt(segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
+            export_srt(export_segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
             encoding="utf-8-sig",
         )
         width, height = probe_video_size(job.input_path)
         write_text(
             job.ass_path,
-            export_ass(segments, style=style, video_width=width, video_height=height),
+            export_ass(export_segments, style=style, video_width=width, video_height=height),
             encoding="utf-8-sig",
         )
         # 记录应用写出时的 mtime,sync 时据此跳过应用自己写的文件。
@@ -2443,6 +2672,11 @@ class JobManager:
         job.status = status
         job.progress = max(0.0, min(1.0, progress))
         if status != previous:
+            # Persist coarse phase durations for queue diagnostics.
+            phase_started = getattr(self, "_phase_starts", {}).get(job.id)
+            if phase_started is not None:
+                job.phase_times[previous] = round(max(0.0, time.time() - phase_started), 3)
+            self._phase_starts[job.id] = time.time()
             detail = f" -> {status} ({job.progress:.0%})" + (f" error={error}" if error else "")
             self.job_log(job, previous + detail, level=logging.ERROR if error else logging.INFO)
         self._touch(job, error=error, save=save)

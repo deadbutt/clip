@@ -1190,6 +1190,7 @@
       border: 0;
       border-radius: 0;
     }
+    .table-column .table-wrap { scroll-behavior: smooth; }
     .subtitle-table {
       width: 100%;
       border-collapse: separate;
@@ -1792,3 +1793,10 @@
       .signal-hero-footer { left: 20px; right: 20px; }
       .jobs-card .task-list { padding: 4px 0; }
     }
+
+.quality-flag { color: #d97706; font-size: 11px; margin-top: 3px; }
+
+
+.quality-score { color: #5f8f84; font-size: 11px; margin-top: 3px; }
+.quality-score.warning { color: #d97706; }
+

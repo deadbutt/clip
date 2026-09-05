@@ -1877,7 +1877,11 @@ function renderSegments(segments, preferredIndex = null) {
     end: Number(segment.end),
     speaker: segment.speaker,
     text: segment.text,
-    items: segment.items || null
+    items: segment.items || null,
+    display_end: segment.display_end == null ? null : Number(segment.display_end),
+    confidence: segment.confidence == null ? null : Number(segment.confidence),
+    quality_flags: segment.quality_flags || null,
+    quality_reasons: segment.quality_reasons || null
   }));
   renderSpeakerMap(segments);
   renderTimeline(segments);
@@ -1907,7 +1911,7 @@ function createSegmentRow(segment, index) {
     <td><input class="start" type="number" min="0" step="0.01" value="${segment.start}"></td>
     <td><input class="end" type="number" min="0" step="0.01" value="${segment.end}"></td>
     <td class="speaker-cell"><span class="speaker-dot" style="background:${dotColor}"></span><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
-    <td><textarea class="text" rows="1" title="Ctrl+Enter：在光标处拆分（按词级时间戳对齐到词边界）">${escapeHtml(segment.text)}</textarea></td>
+    <td><textarea class="text" rows="1" title="Ctrl+Enter：在光标处拆分（按词级时间戳对齐到词边界）">${escapeHtml(segment.text)}</textarea>${segment.confidence != null ? `<div class="quality-score ${segment.quality_flags?.length ? "warning" : ""}" title="${escapeHtml((segment.quality_reasons || []).join("；"))}">置信度 ${Math.round(segment.confidence * 100)}%${segment.quality_flags?.length ? " · ⚠ 需复核" : ""}</div>` : ""}</td>
     <td>
       <div class="segment-actions">
         <button class="segment-action add-row-above" type="button" title="在上方添加字幕">↑+</button>
@@ -3107,7 +3111,7 @@ function syncActiveSegment(force = false) {
   const userScrolling = performance.now() < tableUserScrollUntil;
   const playing = preview && !preview.paused && !preview.ended;
   const shouldScroll = !userScrolling && (force || playing);
-  setActiveSegment(index, shouldScroll);
+  setActiveSegment(index, shouldScroll, { followPlayback: playing });
   updateTimelinePlayhead(segments);
   updateSubtitlePreview(segments);
 }
@@ -3158,13 +3162,24 @@ function scrollSegmentIndexIntoView(index, options = {}) {
   index = Number(index);
   if (!Number.isInteger(index) || index < 0 || !cachedSegments || index >= cachedSegments.length) return;
   const stickyHeaderHeight = 30;
-  const rowTop = index * TABLE_ROW_HEIGHT;
-  const rowBottom = rowTop + TABLE_ROW_HEIGHT;
+  // 虚拟列表中的字幕行高度会因换行而不同，不能用 index * 常量估算滚动位置。
+  // 已渲染行优先使用真实 DOM 坐标；未渲染行先用估算定位，下一帧再校正。
+  const renderedRow = tbody.querySelector(`tr[data-index="${index}"]`);
+  const containerRect = container.getBoundingClientRect();
+  const rowRect = renderedRow?.getBoundingClientRect();
+  const rowTop = rowRect ? container.scrollTop + rowRect.top - containerRect.top : index * TABLE_ROW_HEIGHT;
+  const rowBottom = rowRect ? container.scrollTop + rowRect.bottom - containerRect.top : rowTop + TABLE_ROW_HEIGHT;
   const viewTop = container.scrollTop + stickyHeaderHeight;
   const viewBottom = container.scrollTop + container.clientHeight;
   let nextScrollTop = container.scrollTop;
   if (options.align === 'center') {
     nextScrollTop = Math.max(0, rowTop - Math.max(0, (container.clientHeight - TABLE_ROW_HEIGHT) / 2));
+  } else if (options.followPlayback) {
+    // 播放跟随使用中部安全区：字幕换行时只向前滚一点，避免当前行贴在底部。
+    const safeTop = container.scrollTop + Math.max(stickyHeaderHeight + 12, container.clientHeight * 0.28);
+    const safeBottom = container.scrollTop + container.clientHeight * 0.72;
+    if (rowTop < safeTop) nextScrollTop = Math.max(0, rowTop - container.clientHeight * 0.28);
+    else if (rowBottom > safeBottom) nextScrollTop = Math.max(0, rowBottom - container.clientHeight * 0.55);
   } else if (rowTop < viewTop) {
     nextScrollTop = Math.max(0, rowTop - stickyHeaderHeight - 4);
   } else if (rowBottom > viewBottom) {
@@ -3173,6 +3188,9 @@ function scrollSegmentIndexIntoView(index, options = {}) {
   if (Math.abs(nextScrollTop - container.scrollTop) > 1) {
     container.scrollTop = nextScrollTop;
     renderVisibleSegmentRows();
+    if (!renderedRow) {
+      requestAnimationFrame(() => scrollSegmentIndexIntoView(index, options));
+    }
   }
 }
 
@@ -3226,7 +3244,11 @@ function updateSubtitlePreview(segments) {
 function isSegmentVisibleAtTime(segment, time) {
   const start = Number(segment.start);
   const end = Number(segment.end);
-  return Number.isFinite(start) && Number.isFinite(end) && start <= time && time < end;
+  // 后端按音频能量计算句尾缓冲；旧任务/离线数据仍使用固定兜底值。
+  const displayEnd = Number.isFinite(Number(segment.display_end))
+    ? Number(segment.display_end)
+    : end + 0.50;
+  return Number.isFinite(start) && Number.isFinite(end) && start <= time && time < displayEnd;
 }
 
 function findSegmentIndexAtTime(segments, time) {
