@@ -1456,8 +1456,9 @@ class JobManager:
         *,
         min_duration: float = 45.0,
         target_duration: float = 120.0,
-        max_duration: float | None = 180.0,
+        max_duration: float | None = 300.0,
         limit: int = 24,
+        merge_expansion_limit: float | None = None,
         selector: Any | None = None,
     ) -> list[dict[str, Any]]:
         segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job_id)]
@@ -1470,6 +1471,7 @@ class JobManager:
                 target_duration=target_duration,
                 max_duration=max_duration,
                 limit=rule_limit,
+                merge_expansion_limit=merge_expansion_limit,
             )
         ]
         if selector is not None:

@@ -845,7 +845,7 @@ def create_app(
         job_id: str,
         min_duration: float = 45.0,
         target_duration: float = 120.0,
-        max_duration: float = 180.0,
+        max_duration: float = 0.0,
         limit: int = 24,
         strategy: str = "rules",
     ):
@@ -858,14 +858,18 @@ def create_app(
                     selector = _active_proofreader()
                 except RuntimeError as exc:
                     return JSONResponse({"detail": str(exc)}, status_code=503)
-            # max_duration <= 0 表示不设时长上限，长度交给目标秒数评分与 AI 判断
+            # 规则粗筛需要硬上限，避免连续字幕一路合并成整部视频；
+            # AI 精选不设硬上限，由模型结合上下文决定范围。
+            effective_max_duration = max_duration if max_duration > 0 else (300.0 if strategy == "rules" else None)
+            merge_expansion_limit = max(30.0, target_duration * 0.75) if strategy == "rules" else None
             return {
                 "clips": manager.list_clip_candidates(
                     job_id,
                     min_duration=min_duration,
                     target_duration=target_duration,
-                    max_duration=max_duration if max_duration > 0 else None,
+                    max_duration=effective_max_duration,
                     limit=limit,
+                    merge_expansion_limit=merge_expansion_limit,
                     selector=selector,
                 )
             }

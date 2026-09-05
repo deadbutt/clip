@@ -71,6 +71,11 @@ const taskStatusEl = document.querySelector('#taskStatus');
 const taskUsageEl = document.querySelector('#taskUsage');
 const taskParamsEl = document.querySelector('#taskParams');
 const taskNoticeEl = document.querySelector('#taskNotice');
+const operationProgressMetaEl = document.querySelector('#operationProgressMeta');
+const operationProgressLabelEl = document.querySelector('#operationProgressLabel');
+const operationProgressTextEl = document.querySelector('#operationProgressText');
+const operationProgressEl = document.querySelector('#operationProgress');
+const operationProgressBarEl = document.querySelector('#operationProgressBar');
 const renderProgressMetaEl = document.querySelector('#renderProgressMeta');
 const renderProgressTextEl = document.querySelector('#renderProgressText');
 const renderProgressEl = document.querySelector('#renderProgress');
@@ -126,9 +131,6 @@ const clipTitleInput = document.querySelector('#clipTitleInput');
 const clipStartInput = document.querySelector('#clipStart');
 const clipEndInput = document.querySelector('#clipEnd');
 const clipDurationInput = document.querySelector('#clipDuration');
-const clipMinDurationInput = document.querySelector('#clipMinDuration');
-const clipTargetDurationInput = document.querySelector('#clipTargetDuration');
-const clipMaxDurationInput = document.querySelector('#clipMaxDuration');
 const useActiveSegmentBtn = document.querySelector('#useActiveSegment');
 const findClipsBtn = document.querySelector('#findClips');
 const findClipsRulesBtn = document.querySelector('#findClipsRules');
@@ -982,7 +984,7 @@ renderBtn.addEventListener('click', async () => {
   }
 });
 
-rerunBtn.addEventListener('click', () => {
+if (rerunBtn) rerunBtn.addEventListener('click', () => {
   if (currentJob) showRerunDraft(currentJob);
 });
 
@@ -1238,7 +1240,9 @@ function renderCurrentJob(job, options = {}) {
   }
   ensureClipQueueForJob();
   renderJobList();
-  if (EDIT_STATES.has(job.status)) showEditor(job, options);
+  const keepWorkbenchForPostprocess = currentJob && currentJob.id === job.id
+    && (job.status === 'translating' || job.status === 'proofreading');
+  if (EDIT_STATES.has(job.status) || keepWorkbenchForPostprocess) showEditor(job, options);
   else showProcessing(job);
 }
 
@@ -1253,6 +1257,7 @@ function showImportView(options = {}) {
   ensureClipQueueForJob();
   closeSettings();
   closeTranslate();
+  proofreadModal.classList.add('is-hidden');
   closeClips();
   setEditorDirty(false);
   fileInput.value = '';
@@ -1330,6 +1335,8 @@ async function showEditor(job, options = {}) {
   setVisible(workbench);
   closeSettings();
   closeTranslate();
+  // Post-processing runs in place; the workbench toolbar owns its progress.
+  proofreadModal.classList.add('is-hidden');
   closeClips();
   const mediaUrl = apiUrl(`api/jobs/${job.id}/media`);
   if (preview.dataset.jobId !== job.id) {
@@ -1349,6 +1356,7 @@ function updateEditorChrome(job) {
   taskUsageEl.textContent = tokenUsageSummary(job);
   taskParamsEl.textContent = parameterSummary(job);
   updateRenderProgress(job);
+  updateOperationProgress(job);
   updateTranslateProgress(job);
   if (job.error) setTaskNotice(job.error, 'error');
   else if (truncationWarning(job)) setTaskNotice('可能截断，建议提高输出 tokens 后重新转写。', 'warning');
@@ -1501,6 +1509,7 @@ function setTaskNotice(message, kind) {
 }
 
 function updateRerunAction(job) {
+  if (!rerunBtn) return;
   rerunBtn.disabled = RUNNING_STATES.has(job.status);
   rerunBtn.textContent = '重新转写';
 }
@@ -3194,6 +3203,27 @@ function scrollSegmentIndexIntoView(index, options = {}) {
   }
 }
 
+function updateOperationProgress(job) {
+  const status = job && job.status;
+  const active = status === 'translating' || status === 'proofreading';
+  operationProgressMetaEl.classList.toggle('is-hidden', !active);
+  operationProgressEl.classList.toggle('is-hidden', !active);
+  if (!active) return;
+  const info = status === 'translating' ? (job.translation || {}) : (job.proofread || {});
+  const done = Number(info.done || 0);
+  const total = Number(info.total || 0);
+  const rawPercent = info.percent == null
+    ? (total > 0 ? done * 100 / total : 0)
+    : Number(info.percent || 0);
+  const percent = Math.max(0, Math.min(100, rawPercent));
+  operationProgressLabelEl.textContent = status === 'translating' ? '翻译进度' : '校对进度';
+  operationProgressTextEl.textContent = total > 0
+    ? `${done}/${total} (${Math.round(percent)}%)`
+    : `${Math.round(percent)}%`;
+  operationProgressBarEl.style.width = `${Math.max(2, percent)}%`;
+  operationProgressEl.setAttribute('aria-valuenow', String(Math.round(percent)));
+}
+
 function updateSubtitlePreview(segments) {
   segments = segments || collectSegments();
   updateSourceMaskPreview();
@@ -3409,7 +3439,7 @@ function startProofreadPolling() {
   stopProofreadPolling();
   if (!currentJob) return;
   proofreadPollTimer = setInterval(async () => {
-    if (!currentJob || !proofreadModal || proofreadModal.classList.contains('is-hidden')) {
+    if (!currentJob || currentJob.status !== 'proofreading') {
       stopProofreadPolling();
       return;
     }
@@ -3466,6 +3496,8 @@ async function runProofread() {
     proofreadResult = data;
     renderProofreadResult(data);
     await refreshJobs({ keepSelection: true, skipSegments: true });
+    const proofCount = (data.suggestions || []).length + (data.term_corrections || []).length;
+    setTaskNotice(`校对完成：发现 ${proofCount} 处可处理项，点击“AI 校对”查看详情。`, '');
   } catch (err) {
     stopProofreadPolling();
     proofreadStatusEl.textContent = '校对失败：' + (err.message || err);
@@ -3859,6 +3891,7 @@ async function translateCurrentSubtitles() {
     translateStatusEl.textContent = translationDoneStatus(data);
     renderTranslationReview(data);
     await refreshJobs({ keepSelection: true, skipSegments: true });
+    setTaskNotice(translationDoneStatus(data), '');
   } catch (err) {
     translateStatusEl.textContent = '翻译失败：' + (err.message || err);
   } finally {
@@ -4012,15 +4045,9 @@ async function findClipCandidates(strategy = 'model') {
   findClipsRulesBtn.disabled = true;
   clipStatusEl.textContent = strategy === 'model' ? '正在生成候选并让模型评选...' : '正在按结构和时长粗筛...';
   try {
-    const minDuration = Math.max(10, Number(clipMinDurationInput.value || 60));
-    const targetDuration = Math.max(minDuration, Number(clipTargetDurationInput.value || 120));
-    // 最长秒数留空 = 不设上限，长度由目标秒数评分和 AI 判断
-    const rawMax = Number(clipMaxDurationInput.value);
-    const maxDuration = clipMaxDurationInput.value.trim() === '' || !Number.isFinite(rawMax) || rawMax <= 0
-      ? 0
-      : Math.max(targetDuration, rawMax);
     const limit = strategy === 'model' ? 8 : 24;
-    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips?min_duration=${minDuration}&target_duration=${targetDuration}&max_duration=${maxDuration}&limit=${limit}&strategy=${strategy}`), { cache: 'no-store' });
+    // 时长参数由后端统一控制：规则粗筛最多 5 分钟，AI 精选不设硬上限。
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips?limit=${limit}&strategy=${strategy}`), { cache: 'no-store' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '查找候选片段失败');
     renderClipCandidates(data.clips || []);

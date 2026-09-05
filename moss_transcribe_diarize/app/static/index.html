@@ -222,6 +222,8 @@
           <span id="selectedName" class="bar-name"></span>
           <span id="taskStatus" class="pill">待校对</span>
           <span id="taskNotice" class="task-notice is-hidden"></span>
+          <span id="operationProgressMeta" class="operation-progress-meta is-hidden"><span id="operationProgressLabel">处理中</span><strong id="operationProgressText">0%</strong></span>
+          <div id="operationProgress" class="progress operation-progress is-hidden" role="progressbar" aria-label="处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="operationProgressBar" class="bar"></div></div>
           <span id="renderProgressMeta" class="render-progress-meta is-hidden"><span>烧录进度</span><strong id="renderProgressText">0%</strong></span>
           <div id="renderProgress" class="progress bar-progress is-hidden"><div id="renderProgressBar" class="bar"></div></div>
           <div class="bar-spacer"></div>
@@ -387,7 +389,7 @@
           </div>
         </div>
         <div id="clipsModal" class="settings-modal is-hidden">
-          <div class="settings-modal-card wide">
+          <div class="settings-modal-card wide clips-card">
             <div class="settings-modal-head">
               <strong>精华切片</strong>
               <button id="closeClips" class="ghost small" type="button" aria-label="关闭">✕</button>
@@ -400,11 +402,6 @@
                     <div class="clip-panel-head">
                       <strong>候选片段</strong>
                       <span id="clipCandidateCount">0 个</span>
-                    </div>
-                    <div class="row">
-                      <div><label for="clipMinDuration">最短秒数</label><input id="clipMinDuration" type="number" min="10" step="5" value="60" /></div>
-                      <div><label for="clipTargetDuration">目标秒数</label><input id="clipTargetDuration" type="number" min="20" step="5" value="120" /></div>
-                      <div><label for="clipMaxDuration">最长秒数(留空不限)</label><input id="clipMaxDuration" type="number" min="0" step="5" placeholder="不限" /></div>
                     </div>
                     <div class="clip-actions" style="margin-top:10px">
                       <button id="findClips" class="primary small" type="button">AI 精选</button>
@@ -447,7 +444,7 @@
           </div>
         </div>
         <div id="settingsModal" class="settings-modal is-hidden">
-          <div class="settings-modal-card">
+          <div class="settings-modal-card settings-card">
             <div class="settings-modal-head">
               <strong>设置</strong>
               <button id="closeSettings" class="ghost small" type="button" aria-label="关闭">✕</button>
@@ -565,9 +562,8 @@
                   </div>
                 </div>
               </div>
-              <div class="group">
+              <div class="group settings-actions">
                 <button id="settingsSave" class="primary" type="button">保存修改</button>
-                <button id="rerun" class="ghost">重新转写</button>
               </div>
             </div>
           </div>

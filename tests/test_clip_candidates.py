@@ -86,6 +86,15 @@ class DedupeCandidatesTest(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual((merged[0].start, merged[0].end), (0.0, 100.0))
 
+    def test_near_duplicate_windows_are_deduped_even_when_union_exceeds_cap(self):
+        a = self._candidate("a", 0.0, 180.0, score=90.0)
+        b = self._candidate("b", 78.0, 256.0, score=60.0)
+
+        merged = _dedupe_candidates([a, b], max_duration=180.0)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual((merged[0].start, merged[0].end), (0.0, 180.0))
+
     def test_disjoint_candidates_are_both_kept(self):
         a = self._candidate("a", 0.0, 100.0)
         b = self._candidate("b", 500.0, 600.0)

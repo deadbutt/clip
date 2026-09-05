@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clips", type=int, default=0, help="Generate this many highlight candidates after transcription.")
     parser.add_argument("--clip-min-duration", type=float, default=60.0)
     parser.add_argument("--clip-target-duration", type=float, default=120.0)
-    parser.add_argument("--clip-max-duration", type=float, default=180.0)
+    parser.add_argument("--clip-max-duration", type=float, default=300.0)
     parser.add_argument("--render-clips", action="store_true", help="Render generated clip candidates to MP4.")
     parser.add_argument("--render", action="store_true", help="Burn subtitle.ass into output.mp4 with FFmpeg.")
     return parser.parse_args()

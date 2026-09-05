@@ -83,8 +83,9 @@ def generate_clip_candidates(
     *,
     min_duration: float = 45.0,
     target_duration: float = 120.0,
-    max_duration: float | None = 180.0,
+    max_duration: float | None = 300.0,
     limit: int = 24,
+    merge_expansion_limit: float | None = None,
 ) -> list[ClipCandidate]:
     prepared = _prepare_segments(segments)
     if not prepared:
@@ -104,7 +105,11 @@ def generate_clip_candidates(
                 break
             candidates.append(_score_window(window, target_duration=target_duration))
 
-    deduped = _dedupe_candidates(candidates, max_duration=max_duration)
+    deduped = _dedupe_candidates(
+        candidates,
+        max_duration=max_duration,
+        merge_expansion_limit=merge_expansion_limit,
+    )
     deduped.sort(key=lambda item: item.score, reverse=True)
     for index, item in enumerate(deduped[:limit], start=1):
         item.id = f"clip_{index:03d}"
@@ -169,7 +174,7 @@ def _score_window(window: list[SubtitleSegment], *, target_duration: float) -> C
 
 
 def _dedupe_candidates(
-    candidates: list[ClipCandidate], *, max_duration: float | None = 180.0
+    candidates: list[ClipCandidate], *, max_duration: float | None = 300.0, merge_expansion_limit: float | None = None
 ) -> list[ClipCandidate]:
     """重叠候选(>65%)合并为取时间外沿的一条更完整片段；合并超时长上限才丢弃（上限为 None 时不限）。"""
     ordered = sorted(candidates, key=lambda item: item.score, reverse=True)
@@ -181,10 +186,20 @@ def _dedupe_candidates(
         for i, kept in enumerate(output):
             intersection = max(0.0, min(candidate.end, kept.end) - max(candidate.start, kept.start))
             shorter = max(1.0, min(candidate.duration, kept.duration))
-            if intersection / shorter <= 0.65:
+            # 滑动窗口通常只错开一小段时间；用较短片段作为基准，
+            # 55% 以上重叠就视为同一候选主题，避免重复卡片堆积。
+            if intersection / shorter <= 0.55:
                 continue
             merged_start = min(candidate.start, kept.start)
             merged_end = max(candidate.end, kept.end)
+            expansion = merged_end - merged_start - min(candidate.duration, kept.duration)
+            if merge_expansion_limit is not None and (
+                expansion > merge_expansion_limit or merged_end - merged_start > merge_expansion_limit * 2
+            ):
+                # 相似的长窗口可能只是包住了同一个高分片段；直接丢弃
+                # 外围候选，避免连续滑窗链式合并成整部视频。
+                blocked = True
+                continue
             if max_duration is not None and merged_end - merged_start > max_duration:
                 # 合并会突破时长硬限制：只有与所有重叠项都合不动时才丢弃
                 blocked = True
