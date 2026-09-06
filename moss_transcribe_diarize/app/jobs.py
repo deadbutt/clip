@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +41,10 @@ from .audio_timeline import (
     extract_timeline_fixed_audio,
     total_hole_seconds,
 )
-from .clips import generate_clip_candidates, rebase_segments_for_clip
+from .clip_service import ClipOperationsMixin, _padded_export_segments
 from .ffmpeg import (
     FFmpegCancelled,
     burn_ass_subtitles,
-    burn_ass_subtitles_clip,
     detect_ffmpeg,
     probe_media_duration,
     probe_video_size,
@@ -215,21 +214,6 @@ def _apply_transcription_quality(segments: list[SubtitleSegment], metrics: list[
         segment.confidence = round(score, 4)
         segment.quality_flags = flags or None
         segment.quality_reasons = reasons or None
-
-
-def _padded_export_segments(
-    segments: list[SubtitleSegment],
-    padding: float = _TAIL_FALLBACK_PADDING,
-    end_overrides: dict[str, float] | None = None,
-) -> list[SubtitleSegment]:
-    """Apply sentence-tail buffers while keeping segment source times untouched."""
-    out: list[SubtitleSegment] = []
-    for index, segment in enumerate(segments):
-        next_start = segments[index + 1].start if index + 1 < len(segments) else segment.end + padding
-        requested_end = (end_overrides or {}).get(segment.id, segment.end + padding)
-        end = min(next_start, max(segment.end, requested_end))
-        out.append(replace(segment, end=max(segment.start + 0.01, end)))
-    return out
 
 
 def _rms_frames_from_audio(path: str | Path) -> list[float] | None:
@@ -558,7 +542,7 @@ class JobRecord:
         )
 
 
-class JobManager:
+class JobManager(ClipOperationsMixin):
     def __init__(
         self,
         runs_dir: str | Path,
@@ -612,6 +596,8 @@ class JobManager:
         # segments.json 的解析缓存: job_id -> (stat 指纹, 解析结果)。
         # 指纹 = (mtime_ns, size),任何写入(应用保存/外部 srt 反向同步)都会改变它,缓存自动失效。
         self._segments_cache: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+        self._clip_candidates_cache: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        self._clip_candidates_cache_lock = threading.Lock()
         # job_id -> (input stat, segment time signature, adaptive end map).
         self._tail_padding_cache: dict[str, tuple[tuple[int, int], tuple[tuple[str, float, float], ...], dict[str, float] | None]] = {}
         self._load_existing_jobs()
@@ -986,6 +972,7 @@ class JobManager:
         self._emit_times.pop(job_id, None)
         self._emit_status.pop(job_id, None)
         self._segments_cache.pop(job_id, None)
+        self._invalidate_clip_candidates_cache(job_id)
         self._tail_padding_cache.pop(job_id, None)
         self._progress_save_times.pop(job_id, None)
         self._cancelled_jobs.discard(job_id)
@@ -999,6 +986,12 @@ class JobManager:
         """
         data, _version = self._load_segments(job_id)
         return self._decorate_display_ends(self.get_job(job_id), data)
+
+    def _invalidate_clip_candidates_cache(self, job_id: str) -> None:
+        with self._clip_candidates_cache_lock:
+            stale = [key for key in self._clip_candidates_cache if key[0] == job_id]
+            for key in stale:
+                self._clip_candidates_cache.pop(key, None)
 
     def list_segments_with_version(self, job_id: str) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
         """同 list_segments,并附带 segments.json 的 stat 指纹(供 ETag/304 判断)。
@@ -1449,123 +1442,6 @@ class JobManager:
             daemon=True,
         ).start()
         return job
-
-    def list_clip_candidates(
-        self,
-        job_id: str,
-        *,
-        min_duration: float = 45.0,
-        target_duration: float = 120.0,
-        max_duration: float | None = 300.0,
-        limit: int = 24,
-        merge_expansion_limit: float | None = None,
-        selector: Any | None = None,
-    ) -> list[dict[str, Any]]:
-        segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job_id)]
-        rule_limit = max(limit, min(48, limit * 4)) if selector is not None else limit
-        candidates = [
-            candidate.to_dict()
-            for candidate in generate_clip_candidates(
-                segments,
-                min_duration=min_duration,
-                target_duration=target_duration,
-                max_duration=max_duration,
-                limit=rule_limit,
-                merge_expansion_limit=merge_expansion_limit,
-            )
-        ]
-        if selector is not None:
-            return selector.rank_clip_candidates(candidates, limit=limit)
-        return candidates
-
-    def render_clip(
-        self,
-        job_id: str,
-        *,
-        start: float,
-        end: float,
-        style_payload: dict[str, Any] | None = None,
-        name: str | None = None,
-    ) -> dict[str, Any]:
-        job = self.get_job(job_id)
-        if not detect_ffmpeg().available:
-            raise RuntimeError("ffmpeg and ffprobe are not available on PATH.")
-        if not job.segments_path.exists():
-            raise RuntimeError("No subtitle segments are available for this job.")
-
-        start = max(0.0, float(start))
-        end = max(start + 0.25, float(end))
-        style = SubtitleStyle.from_dict(style_payload)
-        clip_id = _safe_clip_name(name or f"clip_{start:.2f}_{end:.2f}")
-        clip_key = f"{job.id}/{clip_id}"
-        with self._rendering_clips_lock:
-            if clip_key in self._rendering_clips:
-                raise RuntimeError("该片段正在渲染中,请等当前渲染完成后再试。")
-            self._rendering_clips.add(clip_key)
-        try:
-            job.clips_dir.mkdir(parents=True, exist_ok=True)
-            ass_path = job.clips_dir / f"{clip_id}.ass"
-            srt_path = job.clips_dir / f"{clip_id}.srt"
-            metadata_path = job.clips_dir / f"{clip_id}.json"
-            output_path = job.clips_dir / f"{clip_id}.mp4"
-            segments = self._clip_segments(job, start=start, end=end)
-            if not segments:
-                raise RuntimeError("The selected range does not contain any subtitle segments.")
-            width, height = probe_video_size(job.input_path)
-            write_text(
-                ass_path,
-                export_ass(_padded_export_segments(segments), style=style, video_width=width, video_height=height),
-                encoding="utf-8-sig",
-            )
-            write_text(
-                srt_path,
-                export_srt(_padded_export_segments(segments), show_speaker=style.show_speaker, speaker_names=style.speaker_names),
-                encoding="utf-8-sig",
-            )
-            write_text(
-                metadata_path,
-                json.dumps(
-                    {
-                        "source_media": job.media_name,
-                        "source_start": start,
-                        "source_end": end,
-                        "duration": end - start,
-                        "clip_timeline_start": 0.0,
-                        "clip_timeline_end": end - start,
-                        "segments": [segment.to_dict() for segment in segments],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-            )
-            burn_ass_subtitles_clip(
-                job.input_path,
-                ass_path,
-                output_path,
-                start=start,
-                end=end,
-                style=style,
-                # 切片烧录不进任务状态机（不占 RUNNING_STATES），取消检查主要
-                # 兜住任务被删除的情况，避免给已删除目录继续写产物。
-                cancel_check=lambda: job.id not in self._jobs,
-            )
-        finally:
-            self._rendering_clips.discard(clip_key)
-        return {
-            "filename": output_path.name,
-            "path": str(output_path),
-            "start": start,
-            "end": end,
-            "duration": end - start,
-            "segments": len(segments),
-            "files": {
-                "mp4": output_path.name,
-                "srt": srt_path.name,
-                "ass": ass_path.name,
-                "metadata": metadata_path.name,
-            },
-        }
 
     def translate(
         self,
@@ -2594,10 +2470,6 @@ class JobManager:
             except Exception as exc:
                 self._set_status(job, "waiting_review", 0.95, error=f"Render failed: {exc}")
 
-    def _clip_segments(self, job: JobRecord, *, start: float, end: float) -> list[SubtitleSegment]:
-        source = [SubtitleSegment.from_dict(item) for item in self.list_segments(job.id)]
-        return rebase_segments_for_clip(source, start=start, end=end)
-
     def _write_subtitle_files(
         self,
         job: JobRecord,
@@ -2605,6 +2477,7 @@ class JobManager:
         *,
         style: SubtitleStyle | None = None,
     ) -> None:
+        self._invalidate_clip_candidates_cache(job.id)
         write_text(job.segments_path, export_json(segments))
         # 导出字幕给句尾留少量缓冲；工程 JSON 保留 ASR 原始时间，便于继续编辑。
         self._tail_padding_cache.pop(job.id, None)
@@ -2775,9 +2648,3 @@ def _sanitize_display_name(name: str) -> str:
     cleaned = _DISPLAY_NAME_ILLEGAL_RE.sub(" ", str(name))
     cleaned = re.sub(r"\s+", " ", cleaned).strip().strip(".")
     return cleaned[:80]
-
-
-def _safe_clip_name(name: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(name).strip())
-    safe = safe.strip("._")
-    return safe[:80] or f"clip_{uuid.uuid4().hex[:8]}"

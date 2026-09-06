@@ -1,6 +1,17 @@
 const RUNNING_STATES = new Set(['queued', 'downloading', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'proofreading', 'rendering']);
 const EDIT_STATES = new Set(['waiting_review', 'rendering', 'done']);
 const TERMINAL_STATES = new Set(['waiting_review', 'done', 'failed', 'cancelled']);
+const {
+  apiUrl,
+  normalizedSpeakerCount,
+  formatTimelineTime,
+  formatDuration,
+  escapeHtml,
+  encodeClipPayload,
+  decodeClipPayload,
+  makeClipId,
+  normalizeQueuedClip
+} = window.MtdWorkbenchUtils;
 const fileInput = document.querySelector('#file');
 const importTitleEl = document.querySelector('#importTitle');
 const rerunSourceEl = document.querySelector('#rerunSource');
@@ -109,9 +120,9 @@ const timelineScroll = document.querySelector('#timelineScroll');
 const timelineTrack = document.querySelector('#timelineTrack');
 const timelineRuler = document.querySelector('#timelineRuler');
 const timelineLane = document.querySelector('#timelineLane');
+const timelineClipLane = document.querySelector('#timelineClipLane');
 const timelinePlayhead = document.querySelector('#timelinePlayhead');
 const timelineGuide = document.querySelector('#timelineGuide');
-const timelineClipRange = document.querySelector('#timelineClipRange');
 const timelineMeta = document.querySelector('#timelineMeta');
 const translateModeSelect = document.querySelector('#translateMode');
 const targetLanguageInput = document.querySelector('#targetLanguage');
@@ -127,25 +138,14 @@ const restoreTranslationBtn = document.querySelector('#restoreTranslation');
 const translationReviewEl = document.querySelector('#translationReview');
 const translationReviewMetaEl = document.querySelector('#translationReviewMeta');
 const translationReviewListEl = document.querySelector('#translationReviewList');
-const clipTitleInput = document.querySelector('#clipTitleInput');
-const clipStartInput = document.querySelector('#clipStart');
-const clipEndInput = document.querySelector('#clipEnd');
-const clipDurationInput = document.querySelector('#clipDuration');
-const useActiveSegmentBtn = document.querySelector('#useActiveSegment');
 const findClipsBtn = document.querySelector('#findClips');
 const findClipsRulesBtn = document.querySelector('#findClipsRules');
-const renderClipBtn = document.querySelector('#renderClip');
 const renderClipQueueBtn = document.querySelector('#renderClipQueue');
-const clipMoveBackBtn = document.querySelector('#clipMoveBack');
-const clipMoveForwardBtn = document.querySelector('#clipMoveForward');
-const clipStartEarlierBtn = document.querySelector('#clipStartEarlier');
-const clipEndLaterBtn = document.querySelector('#clipEndLater');
 const clipStatusEl = document.querySelector('#clipStatus');
 const clipListEl = document.querySelector('#clipList');
-const clipQueueListEl = document.querySelector('#clipQueueList');
 const clipCandidateCountEl = document.querySelector('#clipCandidateCount');
-const clipQueueCountEl = document.querySelector('#clipQueueCount');
 const clipModelStatusEl = document.querySelector('#clipModelStatus');
+const clipContextMenu = document.querySelector('#clipContextMenu');
 const openProofreadBtn = document.querySelector('#openProofread');
 const closeProofreadBtn = document.querySelector('#closeProofread');
 const proofreadModal = document.querySelector('#proofreadModal');
@@ -243,6 +243,8 @@ let dismissedAlignmentItems = new Set();
 let clipQueueJobId = '';
 let selectedClips = [];
 let activeClipId = '';
+let clipContextClipId = '';
+let clipClickSuppressUntil = 0;
 const SEGMENT_EDGE_PX = 8;
 const SEGMENT_DRAG_THRESHOLD = 3;
 const SEGMENT_DRAG_SENSITIVITY = 5;
@@ -254,12 +256,6 @@ const assFontLineHeightFactor = 1.448;
 const speakerPalette = ['#ffffff', '#ffe75b', '#8ff286', '#ffa7bb', '#ffd700', '#6bb5ff', '#db8eff', '#d8d8d8'];
 const RENDER_PROGRESS_BASE = 0.95;
 const RENDER_PROGRESS_SPAN = 0.049;
-
-function apiUrl(path) {
-  const clean = String(path).replace(/^[/]+/, '');
-  const basePath = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
-  return new URL(clean, window.location.origin + basePath).toString();
-}
 
 function setPreviewSource(src) {
   preview.src = src;
@@ -323,13 +319,6 @@ function applyTranslatorDefaults(defaults) {
   translateProtectedTermsInput.value = terms.join(', ');
 }
 
-function normalizedSpeakerCount(value) {
- if (value === '' || value == null) return '';
- const count = Number(value);
- if (!Number.isFinite(count) || count <= 0) return '';
- return String(Math.max(1, Math.min(10, Math.round(count))));
-}
-
 function renderModelInfo(model) {
   const parts = [];
   if (model.path) {
@@ -358,7 +347,12 @@ function openTranslate() {
   translateModal.classList.remove('is-hidden');
 }
 function closeTranslate() { translateModal.classList.add('is-hidden'); }
-function openClips() { ensureClipQueueForJob(); updateClipActions(); updateTimelineClipRange(); clipsModal.classList.remove('is-hidden'); }
+function openClips() {
+  ensureClipQueueForJob();
+  updateClipActions();
+  updateTimelineClipRange();
+  clipsModal.classList.remove('is-hidden');
+}
 function closeClips() { clipsModal.classList.add('is-hidden'); }
 
 function startSubtitleSyncPolling() {
@@ -689,6 +683,23 @@ translateModal.addEventListener('click', (event) => {
 clipsModal.addEventListener('click', (event) => {
   if (event.target === clipsModal) closeClips();
 });
+if (clipContextMenu) {
+  clipContextMenu.addEventListener('click', (event) => {
+    const action = event.target.closest('[data-clip-context-action]')?.dataset.clipContextAction;
+    if (!action) return;
+    const clipId = clipContextClipId;
+    hideClipContextMenu();
+    if (action === 'export') renderClipById(clipId);
+    else if (action === 'merge') mergeClipWithNeighbors(clipId);
+    else if (action === 'remove') removeQueuedClip(clipId);
+  });
+}
+document.addEventListener('click', (event) => {
+  if (clipContextMenu && !event.target.closest('#clipContextMenu')) hideClipContextMenu();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') hideClipContextMenu();
+});
 deleteCurrentBtn.addEventListener('click', async () => {
   if (currentJob) await deleteJob(currentJob.id);
 });
@@ -871,7 +882,7 @@ syncSubtitlesBtn.addEventListener('click', async () => {
   await loadSegments(currentJob.id, { preserveSelection: true, force: true });
 });
 undoBtn.addEventListener('click', undoEdit);
-redoBtn.addEventListener('click', redoEdit);
+if (redoBtn) redoBtn.addEventListener('click', redoEdit);
 
 addSegmentBtn.addEventListener('click', addSegmentAtPlayhead);
 deleteSegmentBtn.addEventListener('click', deleteActiveSegment);
@@ -882,11 +893,9 @@ nudgeStartRightBtn.addEventListener('click', () => nudgeActiveSegment('start', 0
 nudgeEndLeftBtn.addEventListener('click', () => nudgeActiveSegment('end', -0.1));
 nudgeEndRightBtn.addEventListener('click', () => nudgeActiveSegment('end', 0.1));
 settingsSaveBtn.addEventListener('click', () => { saveSegments(); });
-useActiveSegmentBtn.addEventListener('click', useActiveSegmentAsClipRange);
 findClipsBtn.addEventListener('click', () => findClipCandidates('model'));
 findClipsRulesBtn.addEventListener('click', () => findClipCandidates('rules'));
-renderClipBtn.addEventListener('click', renderSelectedClip);
-renderClipQueueBtn.addEventListener('click', renderQueuedClips);
+if (renderClipQueueBtn) renderClipQueueBtn.addEventListener('click', renderQueuedClips);
 translateZhBtn.addEventListener('click', translateCurrentSubtitles);
 restoreTranslationBtn.addEventListener('click', restoreSourceSubtitles);
 translationReviewListEl.addEventListener('click', (event) => {
@@ -928,37 +937,6 @@ proofreadAlignmentListEl.addEventListener('click', (event) => {
   proofreadModal.classList.add('is-hidden');
   updateSubtitlePreview();
 });
-clipTitleInput.addEventListener('input', () => {
-  const clip = activeClip();
-  if (!clip) return;
-  updateClipFromValues(clip.id, { title: clipTitleInput.value });
-});
-clipStartInput.addEventListener('change', () => {
-  const clip = activeClip();
-  if (!clip) {
-    updateTimelineClipRange();
-    return;
-  }
-  updateClipFromValues(clip.id, { start: Number(clipStartInput.value || 0), end: Number(clipEndInput.value || 0), seek: true });
-});
-clipEndInput.addEventListener('change', () => {
-  const clip = activeClip();
-  if (!clip) {
-    updateTimelineClipRange();
-    return;
-  }
-  updateClipFromValues(clip.id, { start: Number(clipStartInput.value || 0), end: Number(clipEndInput.value || 0) });
-});
-clipDurationInput.addEventListener('change', () => {
-  const clip = activeClip();
-  if (!clip) return;
-  const duration = Math.max(0.25, Number(clipDurationInput.value || 0));
-  updateClipFromValues(clip.id, { start: clip.start, end: clip.start + duration });
-});
-clipMoveBackBtn.addEventListener('click', () => nudgeActiveClip({ shift: -1 }));
-clipMoveForwardBtn.addEventListener('click', () => nudgeActiveClip({ shift: 1 }));
-clipStartEarlierBtn.addEventListener('click', () => nudgeActiveClip({ startDelta: -0.5 }));
-clipEndLaterBtn.addEventListener('click', () => nudgeActiveClip({ endDelta: 0.5 }));
 
 renderBtn.addEventListener('click', async () => {
   if (!currentJob || !ffmpegAvailable) return;
@@ -1011,7 +989,30 @@ timelineScroll.addEventListener('pointerdown', (event) => {
   timelineScroll.setPointerCapture(event.pointerId);
   seekTimelineFromPointer(event);
 });
-timelineClipRange.addEventListener('pointerdown', onClipRangePointerDown);
+if (timelineClipLane) {
+  timelineClipLane.addEventListener('pointerdown', (event) => {
+    const range = event.target.closest('.timeline-clip-range');
+    if (range) onClipRangePointerDown(event, range);
+  });
+  timelineClipLane.addEventListener('click', (event) => {
+    const range = event.target.closest('.timeline-clip-range');
+    if (!range || performance.now() < clipClickSuppressUntil) return;
+    const clip = selectedClips.find((item) => item.id === range.dataset.clipId);
+    if (!clip) return;
+    selectClip(clip.id, { seek: true });
+  });
+  timelineClipLane.addEventListener('contextmenu', (event) => {
+    const range = event.target.closest('.timeline-clip-range');
+    if (!range) return;
+    event.preventDefault();
+    const clip = selectedClips.find((item) => item.id === range.dataset.clipId);
+    if (!clip) return;
+    activeClipId = clip.id;
+    clipContextClipId = clip.id;
+    renderClipQueue();
+    showClipContextMenu(event.clientX, event.clientY);
+  });
+}
 timelineScroll.addEventListener('pointermove', (event) => {
   if (!timelineDragging) return;
   event.preventDefault();
@@ -1997,19 +1998,38 @@ function renderTimeline(segments) {
   const laneHeight = 44;
   const laneTop = 42;
   const laneCount = Math.max(1, layout.count);
-  const laneAreaHeight = laneTop + laneCount * laneHeight + 14;
+  const subtitleLaneHeight = laneTop + laneCount * laneHeight + 14;
+  const clipLaneTop = 32 + subtitleLaneHeight;
+  const clipLaneHeight = timelineClipLaneHeight();
   timelineTrack.style.width = trackWidth + 'px';
-  timelineTrack.style.height = Math.max(timelineScroll.clientHeight, 32 + laneAreaHeight) + 'px';
-  timelineLane.style.height = laneAreaHeight + 'px';
+  timelineTrack.style.height = Math.max(timelineScroll.clientHeight, clipLaneTop + clipLaneHeight) + 'px';
+  timelineLane.style.height = subtitleLaneHeight + 'px';
+  if (timelineClipLane) {
+    timelineClipLane.style.top = clipLaneTop + 'px';
+    timelineClipLane.style.height = clipLaneHeight + 'px';
+  }
   timelineMeta.textContent = segments.length + ' 段' + (duration ? ' · ' + formatTimelineTime(duration) : '') + (laneCount > 1 ? ' · ' + laneCount + ' 层' : '');
   timelineRuler.innerHTML = '';
   timelineLane.innerHTML = '';
   renderTimelineTicks(duration, pixelsPerSecond);
   renderVisibleTimelineSegments();
-  timelineTrack.appendChild(timelineClipRange);
   timelineTrack.appendChild(timelinePlayhead);
-  updateTimelineClipRange();
+  timelineTrack.appendChild(timelineGuide);
+  renderTimelineClipRanges();
   updateTimelinePlayhead(segments);
+}
+
+function timelineClipLaneHeight() {
+  const hasAlternates = (selectedClips || []).some((clip) => clip.lane === 'alternate');
+  return hasAlternates ? 108 : 58;
+}
+
+function updateTimelineClipLaneLayout() {
+  if (!timelineClipLane || !timelineTrack) return;
+  const height = timelineClipLaneHeight();
+  const laneTop = Number.parseFloat(timelineClipLane.style.top) || 0;
+  timelineClipLane.style.height = height + 'px';
+  timelineTrack.style.height = Math.max(timelineScroll.clientHeight || 0, laneTop + height) + 'px';
 }
 
 function renderVisibleTimelineSegments() {
@@ -2061,30 +2081,140 @@ function scheduleVisibleTimelineRender() {
 }
 
 function updateTimelineClipRange() {
-  if (!timelineClipRange || !currentJob) return;
-  const start = Math.max(0, Number(clipStartInput.value || 0));
-  const end = Math.max(start, Number(clipEndInput.value || 0));
-  if (!(end > start)) {
-    timelineClipRange.classList.remove('visible');
+  if (!timelineClipLane) return;
+  const clips = selectedClips || [];
+  const elements = Array.from(timelineClipLane.querySelectorAll('.timeline-clip-range'));
+  const clipIds = clips.map((clip) => String(clip.id || ''));
+  // During pointer dragging, update the existing DOM nodes in place. Rebuilding
+  // the lane here would detach the pointer-captured element and make the drag
+  // jump or stop after the first move.
+  if (elements.length !== clips.length || elements.some((element) => !clipIds.includes(element.dataset.clipId || ''))) {
+    renderTimelineClipRanges();
     return;
   }
-  timelineClipRange.style.left = Math.round(start * currentPixelsPerSecond) + 'px';
-  timelineClipRange.style.width = Math.max(2, Math.round((end - start) * currentPixelsPerSecond)) + 'px';
-  const label = timelineClipRange.querySelector('.timeline-clip-label');
-  if (label) label.textContent = `${formatTimelineTime(start)} - ${formatTimelineTime(end)}`;
-  timelineClipRange.classList.add('visible');
+  timelineClipLane.classList.toggle('is-empty', clips.length === 0);
+  timelineClipLane.classList.toggle('has-alternates', clips.some((clip) => clip.lane === 'alternate'));
+  updateTimelineClipLaneLayout();
+  for (const clip of clips) {
+    const element = elements.find((item) => item.dataset.clipId === String(clip.id));
+    if (!element) continue;
+    updateTimelineClipElement(element, clip);
+  }
 }
 
-function onClipRangePointerDown(event) {
+function updateTimelineClipElement(element, clip) {
+  const start = Math.max(0, Number(clip.start) || 0);
+  const end = Math.max(start + 0.25, Number(clip.end) || start + 0.25);
+  const pps = Math.max(0.001, currentPixelsPerSecond || 1);
+  element.style.left = Math.round(start * pps) + 'px';
+  element.style.width = Math.max(8, Math.round((end - start) * pps)) + 'px';
+  element.classList.toggle('active', clip.id === activeClipId);
+  const label = element.querySelector('.timeline-clip-label');
+  if (label) label.textContent = (clip.lane === 'alternate' ? '备选 · ' : '') + (clip.title || '未命名片段');
+  const meta = element.querySelector('.timeline-clip-meta');
+  if (meta) meta.textContent = formatTimelineTime(start) + '–' + formatTimelineTime(end) + (clip.lane === 'alternate' ? ' · 备选' : '');
+  element.title = (clip.title || '未命名片段') + (clip.lane === 'alternate' ? ' · 重复备选' : '') + ' · ' + formatTimelineTime(start) + ' - ' + formatTimelineTime(end) + ' · 右键查看操作';
+}
+
+function getTimelineClipElement(clipId) {
+  if (!timelineClipLane) return null;
+  return Array.from(timelineClipLane.querySelectorAll('.timeline-clip-range'))
+    .find((element) => element.dataset.clipId === String(clipId)) || null;
+}
+
+function renderTimelineClipRanges() {
+  if (!timelineClipLane) return;
+  timelineClipLane.replaceChildren();
+  const clips = selectedClips || [];
+  timelineClipLane.classList.toggle('is-empty', clips.length === 0);
+  timelineClipLane.classList.toggle('has-alternates', clips.some((clip) => clip.lane === 'alternate'));
+  updateTimelineClipLaneLayout();
+  for (const clip of clips) {
+    const element = document.createElement('div');
+    const isAlternate = clip.lane === 'alternate';
+    element.className = 'timeline-clip-range' + (isAlternate ? ' alternate' : '') + (clip.id === activeClipId ? ' active' : '');
+    element.dataset.clipId = clip.id;
+    element.dataset.clipLane = isAlternate ? 'alternate' : 'primary';
+    element.innerHTML = '<button class="timeline-clip-handle start" type="button" data-clip-drag="start" aria-label="拖动切片开头"></button>'
+      + '<span class="timeline-clip-label"></span><span class="timeline-clip-meta"></span>'
+      + '<button class="timeline-clip-handle end" type="button" data-clip-drag="end" aria-label="拖动切片结尾"></button>';
+    updateTimelineClipElement(element, clip);
+    timelineClipLane.appendChild(element);
+  }
+}
+
+function showClipContextMenu(x, y) {
+  if (!clipContextMenu) return;
+  clipContextMenu.style.left = Math.max(8, Math.min(window.innerWidth - 210, x)) + 'px';
+  clipContextMenu.style.top = Math.max(8, Math.min(window.innerHeight - 150, y)) + 'px';
+  clipContextMenu.classList.remove('is-hidden');
+}
+
+function hideClipContextMenu() {
+  if (clipContextMenu) clipContextMenu.classList.add('is-hidden');
+  clipContextClipId = '';
+}
+
+function nearestClipNeighbors(clipId) {
+  const index = selectedClips.findIndex((clip) => clip.id === clipId);
+  if (index < 0) return { index: -1, neighbors: [] };
+  const clip = selectedClips[index];
+  const neighbors = selectedClips
+    .map((item, itemIndex) => {
+      const overlap = Math.min(item.end, clip.end) - Math.max(item.start, clip.start);
+      const gap = overlap >= 0 ? 0 : Math.min(Math.abs(item.start - clip.end), Math.abs(item.end - clip.start));
+      return { item, itemIndex, overlap, gap };
+    })
+    .filter(({ itemIndex, gap }) => itemIndex !== index && gap <= 2.0)
+    .sort((a, b) => (b.overlap - a.overlap) || (a.gap - b.gap))
+    .slice(0, 1);
+  return { index, neighbors };
+}
+
+function mergeClipWithNeighbors(clipId) {
+  const { index, neighbors } = nearestClipNeighbors(clipId);
+  if (index < 0 || !neighbors.length) {
+    clipStatusEl.textContent = '没有找到 2 秒内相邻或重叠的片段可合并。';
+    return;
+  }
+  const neighborIndex = neighbors[0].itemIndex;
+  const first = selectedClips[index];
+  const second = selectedClips[neighborIndex];
+  const start = Math.min(first.start, second.start);
+  const end = Math.max(first.end, second.end);
+  const merged = {
+    ...first,
+    id: makeClipId(),
+    start,
+    end,
+    title: first.title && first.title !== '未命名片段' ? first.title : second.title,
+    reason: '合并相邻片段',
+    selectionMethod: 'manual',
+    lane: 'primary',
+    parentId: ''
+  };
+  selectedClips = selectedClips.filter((_, itemIndex) => itemIndex !== index && itemIndex !== neighborIndex);
+  selectedClips.push(merged);
+  selectedClips.sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0));
+  activeClipId = merged.id;
+  renderClipQueue();
+  renderTimelineClipRanges();
+  clipStatusEl.textContent = `已合并为 ${formatTimelineTime(start)} - ${formatTimelineTime(end)}。`;
+}
+
+function onClipRangePointerDown(event, rangeElement = null) {
   if (event.button !== 0 || !currentJob) return;
-  const clip = activeClip();
+  const element = rangeElement || event.target.closest('.timeline-clip-range');
+  const clip = selectedClips.find((item) => item.id === element?.dataset.clipId) || activeClip();
   if (!clip) {
     clipStatusEl.textContent = '先从已选切片里选中一个片段。';
     return;
   }
+  activeClipId = clip.id;
+  updateTimelineClipRange();
   event.preventDefault();
   event.stopPropagation();
-  const rect = timelineClipRange.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
   const offsetX = event.clientX - rect.left;
   const edgeZone = Math.min(18, Math.max(8, rect.width / 3));
   let mode = event.target.dataset.clipDrag || 'move';
@@ -2109,8 +2239,8 @@ function onClipRangePointerDown(event) {
     newStart: null,
     newEnd: null
   };
-  timelineClipRange.classList.add('dragging');
-  try { timelineClipRange.setPointerCapture(event.pointerId); } catch (err) {}
+  element.classList.add('dragging');
+  try { element.setPointerCapture(event.pointerId); } catch (err) {}
   const moveHandler = (ev) => onClipRangePointerMove(ev, clipDragState);
   const upHandler = (ev) => {
     onClipRangePointerUp(ev, clipDragState);
@@ -2192,15 +2322,56 @@ function computeClipSnap(state, newStart, newEnd) {
 
 function onClipRangePointerUp(event, state) {
   if (!state) return;
-  timelineClipRange.classList.remove('dragging');
+  const element = getTimelineClipElement(state.clipId);
+  if (element) element.classList.remove('dragging');
   stopTimelineEdgeAutoScroll();
   hideTimelineGuide();
-  try { timelineClipRange.releasePointerCapture(event.pointerId); } catch (err) {}
+  try { element?.releasePointerCapture(event.pointerId); } catch (err) {}
   if (state.moved && state.newStart != null && state.newEnd != null) {
     updateClipFromValues(state.clipId, { start: state.newStart, end: state.newEnd, seek: state.mode !== 'end' });
-    clipStatusEl.textContent = `已调整切片：${formatTimelineTime(state.newStart)} - ${formatTimelineTime(state.newEnd)}。`;
+    clipClickSuppressUntil = performance.now() + 140;
+    const merged = mergeTouchingClips(state.clipId);
+    if (!merged) clipStatusEl.textContent = `已调整切片：${formatTimelineTime(state.newStart)} - ${formatTimelineTime(state.newEnd)}。`;
   }
   clipDragState = null;
+}
+
+function mergeTouchingClips(clipId) {
+  const clip = selectedClips.find((item) => item.id === clipId);
+  if (!clip) return false;
+  const neighbor = selectedClips
+    .filter((item) => item.id !== clipId)
+    .map((item) => {
+      const overlap = Math.min(clip.end, item.end) - Math.max(clip.start, item.start);
+      const gap = overlap >= 0 ? 0 : Math.min(Math.abs(item.start - clip.end), Math.abs(item.end - clip.start));
+      return { item, overlap, gap };
+    })
+    .filter(({ overlap, gap }) => overlap >= 0.25 || gap <= 0.12)
+    .sort((a, b) => (b.overlap - a.overlap) || (a.gap - b.gap))[0]?.item;
+  if (!neighbor) return false;
+  const start = Math.min(clip.start, neighbor.start);
+  const end = Math.max(clip.end, neighbor.end);
+  const merged = {
+    ...clip,
+    id: makeClipId(),
+    start,
+    end,
+    title: clip.title || neighbor.title || '合并片段',
+    reason: '拖动合并相邻片段',
+    selectionMethod: 'manual',
+    lane: 'primary',
+    parentId: '',
+    score: Math.max(Number(clip.score) || 0, Number(neighbor.score) || 0),
+    segmentIds: [...new Set([...(clip.segmentIds || []), ...(neighbor.segmentIds || [])])]
+  };
+  selectedClips = selectedClips.filter((item) => item.id !== clip.id && item.id !== neighbor.id);
+  selectedClips.push(merged);
+  selectedClips.sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0));
+  activeClipId = merged.id;
+  renderClipQueue();
+  renderTimelineClipRanges();
+  clipStatusEl.textContent = `已合并 ${formatTimelineTime(start)} - ${formatTimelineTime(end)}。`;
+  return true;
 }
 
 function onSegmentPointerDown(event, index, segment) {
@@ -2458,14 +2629,6 @@ function timelineDuration(segments) {
   const mediaDuration = Number(preview.duration || 0);
   const segmentDuration = Math.max(0, ...segments.map((segment) => Number(segment.end) || 0));
   return Math.max(mediaDuration, segmentDuration);
-}
-
-function formatTimelineTime(seconds) {
-  seconds = Math.max(0, Number(seconds) || 0);
-  const total = Math.floor(seconds);
-  const minutes = Math.floor(total / 60);
-  const secs = total % 60;
-  return String(minutes).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
 }
 
 function resizeSegmentTextarea(textarea, expanded) {
@@ -4050,9 +4213,9 @@ async function findClipCandidates(strategy = 'model') {
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips?limit=${limit}&strategy=${strategy}`), { cache: 'no-store' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '查找候选片段失败');
-    renderClipCandidates(data.clips || []);
+    replaceClipQueue(data.clips || []);
     clipStatusEl.textContent = (data.clips || []).length
-      ? (strategy === 'model' ? 'AI 精选完成。仍建议回看原片并微调边界。' : '规则粗筛完成，这些不是模型判断结果。')
+      ? (strategy === 'model' ? 'AI 精选完成。仍建议回看原片并微调边界。' : '规则粗筛完成：高分主候选在上轨，重复备选在下轨。')
       : '没有找到合适候选片段。';
   } catch (err) {
     clipStatusEl.textContent = '查找候选片段失败：' + (err.message || err);
@@ -4067,69 +4230,24 @@ function updateClipActions() {
   openClipsBtn.disabled = !currentJob;
   findClipsBtn.disabled = !activeLlmProfile() || !currentJob;
   findClipsRulesBtn.disabled = !currentJob;
-  renderClipBtn.disabled = !currentJob || !ffmpegAvailable || !activeClip();
-  renderClipQueueBtn.disabled = !currentJob || !ffmpegAvailable || !selectedClips.length;
+  if (renderClipQueueBtn) renderClipQueueBtn.disabled = !currentJob || !ffmpegAvailable || !selectedClips.length;
   const active = activeLlmProfile();
   clipModelStatusEl.textContent = active
-    ? `AI 精选使用 ${active.model || '默认模型'}（${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'}）；规则粗筛只生成候选，不代表内容质量。`
+    ? `AI 精选使用 ${active.model || '默认模型'}（${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'}）；候选会显示在主时间轴。`
     : 'AI 精选未启用（首页未配置 AI 服务）；当前只能规则粗筛。';
-  if (clipQueueCountEl) clipQueueCountEl.textContent = `${selectedClips.length} 个`;
 }
 
 function renderClipCandidates(clips) {
-  if (clipCandidateCountEl) clipCandidateCountEl.textContent = `${clips.length} 个`;
-  if (!clips.length) {
-    clipListEl.innerHTML = '<div class="clip-empty">没有候选片段</div>';
-    return;
-  }
-  clipListEl.innerHTML = clips.map((clip) => {
-    const encoded = encodeClipPayload(clip);
-    return `
-    <div class="clip-card" data-clip-start="${Number(clip.start) || 0}" data-clip-end="${Number(clip.end) || 0}" data-clip-payload="${encoded}">
-      <div class="clip-card-head">
-        <span>原片 ${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round(Number(clip.duration) || 0)}s</span>
-        <strong>${clip.selection_method === 'model' ? 'AI ' : '规则 '}${Math.round(Number(clip.score) || 0)}</strong>
-      </div>
-      <div class="clip-title">${escapeHtml(clip.title || '未命名片段')}</div>
-      <div class="clip-reason">${escapeHtml(clip.reason || '')}</div>
-      <div class="clip-actions" style="margin-top:8px">
-        <button class="ghost small preview-clip" type="button">回看原片</button>
-        <button class="primary small pick-clip" type="button">选用并微调</button>
-      </div>
-    </div>
-  `;
-  }).join('');
+  replaceClipQueue(clips);
 }
 
 clipListEl.addEventListener('click', (event) => {
-  const button = event.target.closest('.pick-clip, .preview-clip');
-  if (!button) return;
-  const card = button.closest('.clip-card');
-  if (!card) return;
-  const start = Number(card.dataset.clipStart || 0);
-  if (button.classList.contains('preview-clip')) {
-    preview.currentTime = start;
-    preview.play().catch(() => {});
-    return;
-  }
-  clipListEl.querySelectorAll('.clip-card').forEach((item) => item.classList.toggle('selected', item === card));
-  const clip = decodeClipPayload(card.dataset.clipPayload) || {
-    start,
-    end: Number(card.dataset.clipEnd || 0),
-    title: '未命名片段',
-    reason: '',
-    score: 0,
-    selection_method: 'rules'
-  };
-  addClipToQueue(clip);
-});
-
-clipQueueListEl.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-clip-action]');
-  const card = event.target.closest('.clip-card.queue');
+  const card = event.target.closest('.clip-card[data-clip-id]');
   if (!card) return;
   const id = card.dataset.clipId;
-  if (!id) return;
+  const clip = selectedClips.find((item) => item.id === id);
+  if (!clip) return;
+  const button = event.target.closest('[data-clip-action]');
   if (!button) {
     selectClip(id, { seek: true });
     return;
@@ -4137,10 +4255,33 @@ clipQueueListEl.addEventListener('click', (event) => {
   event.stopPropagation();
   const action = button.dataset.clipAction;
   if (action === 'select') selectClip(id, { seek: true });
-  if (action === 'up') moveQueuedClip(id, -1);
-  if (action === 'down') moveQueuedClip(id, 1);
-  if (action === 'remove') removeQueuedClip(id);
+  else if (action === 'preview') {
+    preview.currentTime = clip.start;
+    preview.play().catch(() => {});
+  } else if (action === 'remove') removeQueuedClip(id);
+  else if (action === 'up') moveQueuedClip(id, -1);
+  else if (action === 'down') moveQueuedClip(id, 1);
 });
+
+function replaceClipQueue(clips) {
+  selectedClips = (Array.isArray(clips) ? clips : []).map((clip, index) => normalizeQueuedClip(clip, `candidate_${Date.now()}_${index}`));
+  activeClipId = selectedClips[0]?.id || '';
+  renderClipQueue();
+  renderTimelineClipRanges();
+  const clip = activeClip();
+  if (clip) setClipRange(clip.start, clip.end, false);
+  updateClipActions();
+}
+
+/* 保留给旧调用方的别名：候选现在直接进入待选列表和主时间轴。 */
+function addCandidateToQueue(source) {
+  const clip = normalizeQueuedClip(source);
+  selectedClips.push(clip);
+  activeClipId = clip.id;
+  renderClipQueue();
+  renderTimelineClipRanges();
+  return clip;
+}
 
 function ensureClipQueueForJob() {
   const jobId = currentJob ? currentJob.id : '';
@@ -4150,42 +4291,6 @@ function ensureClipQueueForJob() {
   activeClipId = '';
   renderClipQueue();
   syncClipEditor();
-}
-
-function encodeClipPayload(clip) {
-  try {
-    return escapeHtml(JSON.stringify(clip));
-  } catch (_) {
-    return '';
-  }
-}
-
-function decodeClipPayload(value) {
-  try {
-    return JSON.parse(value || '{}');
-  } catch (_) {
-    return null;
-  }
-}
-
-function makeClipId() {
-  return 'clip_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
-}
-
-function normalizeQueuedClip(source) {
-  const start = Math.max(0, Number(source.start) || 0);
-  const fallbackEnd = start + Math.max(0.25, Number(source.duration) || 120);
-  const end = Math.max(start + 0.25, Number(source.end) || fallbackEnd);
-  return {
-    id: makeClipId(),
-    sourceId: source.id || '',
-    start,
-    end,
-    title: String(source.title || '未命名片段').trim() || '未命名片段',
-    reason: String(source.reason || ''),
-    score: Number(source.score) || 0,
-    selectionMethod: source.selection_method || source.selectionMethod || 'rules'
-  };
 }
 
 function activeClip() {
@@ -4237,63 +4342,55 @@ function removeQueuedClip(id) {
 }
 
 function renderClipQueue() {
-  if (clipQueueCountEl) clipQueueCountEl.textContent = `${selectedClips.length} 个`;
+  const alternateCount = selectedClips.filter((clip) => clip.lane === 'alternate').length;
+  const primaryCount = selectedClips.length - alternateCount;
+  if (clipCandidateCountEl) {
+    clipCandidateCountEl.textContent = alternateCount
+      ? `${primaryCount} 主候选 · ${alternateCount} 重复备选`
+      : `${selectedClips.length} 个`;
+  }
   if (!selectedClips.length) {
-    clipQueueListEl.innerHTML = '<div class="clip-empty">从左侧候选点“选用并微调”，或用当前字幕创建一个切片。</div>';
+    clipListEl.innerHTML = '<div class="clip-empty">点击“AI 精选”或“规则粗筛”后，候选会出现在这里，并同步显示在主时间轴。</div>';
+    updateTimelineClipRange();
     return;
   }
-  clipQueueListEl.innerHTML = selectedClips.map((clip, index) => `
-    <div class="clip-card queue${clip.id === activeClipId ? ' selected' : ''}" data-clip-id="${escapeHtml(clip.id)}">
+  clipListEl.innerHTML = selectedClips.map((clip, index) => `
+    <div class="clip-card queue${clip.lane === 'alternate' ? ' alternate' : ''}${clip.id === activeClipId ? ' selected' : ''}" data-clip-id="${escapeHtml(clip.id)}">
       <div class="clip-order">${index + 1}</div>
       <div>
         <div class="clip-card-head">
           <span>${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round((clip.end - clip.start) * 10) / 10}s</span>
-          <strong>${clip.selectionMethod === 'model' ? 'AI ' : clip.selectionMethod === 'manual' ? '手动' : '规则 '}${clip.score ? Math.round(clip.score) : ''}</strong>
+          <strong>${clip.lane === 'alternate' ? '重复备选' : clip.selectionMethod === 'model' ? 'AI 精选' : clip.selectionMethod === 'manual' ? '手动' : '规则粗筛'}${clip.score ? ' · ' + Math.round(clip.score) : ''}</strong>
         </div>
         <div class="clip-title">${escapeHtml(clip.title)}</div>
-        <div class="clip-reason">${escapeHtml(clip.reason || '手动微调')}</div>
+        <div class="clip-reason">${escapeHtml(clip.reason || '可在主时间轴上继续调整范围')}</div>
       </div>
       <div class="clip-card-actions">
-        <button class="ghost small" type="button" data-clip-action="up" title="上移">↑</button>
-        <button class="ghost small" type="button" data-clip-action="down" title="下移">↓</button>
-        <button class="ghost small" type="button" data-clip-action="select" title="选中">◎</button>
-        <button class="ghost small" type="button" data-clip-action="remove" title="移除">×</button>
+        <button class="ghost small" type="button" data-clip-action="select" title="定位到时间轴">定位</button>
+        <button class="ghost small" type="button" data-clip-action="preview" title="回看原片">回看</button>
+        <button class="ghost small" type="button" data-clip-action="remove" title="移除">移除</button>
       </div>
     </div>
   `).join('');
+  updateTimelineClipRange();
 }
 
 function syncClipEditor() {
-  const clip = activeClip();
-  const disabled = !clip;
-  [clipTitleInput, clipStartInput, clipEndInput, clipDurationInput, clipMoveBackBtn, clipMoveForwardBtn, clipStartEarlierBtn, clipEndLaterBtn].forEach((el) => {
-    if (el) el.disabled = disabled;
-  });
-  if (!clip) {
-    clipTitleInput.value = '';
-    clipStartInput.value = '0';
-    clipEndInput.value = '0';
-    clipDurationInput.value = '';
-    return;
-  }
-  clipTitleInput.value = clip.title;
-  clipStartInput.value = clip.start.toFixed(1);
-  clipEndInput.value = clip.end.toFixed(1);
-  clipDurationInput.value = Math.max(0.25, clip.end - clip.start).toFixed(1);
+  // 切片边界的唯一编辑入口是主时间轴；弹窗只展示待选列表。
+  updateTimelineClipRange();
 }
 
 function updateClipFromValues(id, values = {}) {
   const clip = selectedClips.find((item) => item.id === id);
   if (!clip) return;
-  let start = values.start == null ? Number(clipStartInput.value || clip.start) : Number(values.start);
-  let end = values.end == null ? Number(clipEndInput.value || clip.end) : Number(values.end);
+  let start = values.start == null ? Number(clip.start) : Number(values.start);
+  let end = values.end == null ? Number(clip.end) : Number(values.end);
   start = Math.max(0, Number.isFinite(start) ? start : clip.start);
   end = Math.max(start + 0.25, Number.isFinite(end) ? end : clip.end);
   clip.start = Math.round(start * 10) / 10;
   clip.end = Math.round(end * 10) / 10;
   if (values.title != null) clip.title = String(values.title).trim() || '未命名片段';
   activeClipId = id;
-  syncClipEditor();
   renderClipQueue();
   setClipRange(clip.start, clip.end, values.seek);
   updateClipActions();
@@ -4312,11 +4409,13 @@ function nudgeActiveClip({ shift = 0, startDelta = 0, endDelta = 0 }) {
 function setClipRange(start, end, seek) {
   start = Math.max(0, Number(start) || 0);
   end = Math.max(start + 0.25, Number(end) || start + 120);
-  clipStartInput.value = start.toFixed(1);
-  clipEndInput.value = end.toFixed(1);
-  clipDurationInput.value = (end - start).toFixed(1);
   updateTimelineClipRange();
   if (seek) preview.currentTime = start;
+}
+
+function renderClipById(id) {
+  if (id && selectedClips.some((clip) => clip.id === id)) selectClip(id, { seek: true });
+  return renderSelectedClip();
 }
 
 async function renderSelectedClip() {
@@ -4334,7 +4433,6 @@ async function renderSelectedClip() {
     clipStatusEl.textContent = '结束时间必须大于开始时间。';
     return;
   }
-  renderClipBtn.disabled = true;
   clipStatusEl.textContent = '正在导出切片...';
   try {
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
@@ -4367,7 +4465,6 @@ async function renderQueuedClips() {
   if (!currentJob || !ffmpegAvailable || !selectedClips.length) return;
   const saved = await saveSegments();
   if (!saved) return;
-  renderClipBtn.disabled = true;
   renderClipQueueBtn.disabled = true;
   const outputs = [];
   try {
@@ -4466,14 +4563,6 @@ function elapsedJobSeconds(job) {
   return Math.max(0, (Date.now() / 1000) - Number(job.created_at || 0));
 }
 
-function formatDuration(seconds) {
-  seconds = Math.max(0, Math.round(Number(seconds) || 0));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes <= 0) return rest + 's';
-  return minutes + 'm ' + String(rest).padStart(2, '0') + 's';
-}
-
 function statusClass(status) {
   return 'pill ' + (status === 'failed' ? 'bad' : status === 'done' ? 'ok' : status === 'cancelled' ? 'muted' : '');
 }
@@ -4496,14 +4585,6 @@ function statusLabel(status) {
     idle: '空闲'
   };
   return labels[status] || status;
-}
-
-function escapeHtml(value) {
-  return String(value == null ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 refreshRuntime();

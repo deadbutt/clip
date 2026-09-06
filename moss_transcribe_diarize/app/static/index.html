@@ -228,7 +228,6 @@
           <div id="renderProgress" class="progress bar-progress is-hidden"><div id="renderProgressBar" class="bar"></div></div>
           <div class="bar-spacer"></div>
           <button id="undoBtn" class="ghost icon-btn" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销" disabled>↶</button>
-          <button id="redoBtn" class="ghost icon-btn" type="button" title="重做 (Ctrl+Y)" aria-label="重做" disabled>↷</button>
           <button id="syncSubtitles" class="ghost" type="button">Sync SRT</button>
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
@@ -267,11 +266,7 @@
                 <div id="timelineTrack" class="timeline-track">
                   <div id="timelineRuler" class="timeline-ruler"></div>
                   <div id="timelineLane" class="timeline-lane"></div>
-                  <div id="timelineClipRange" class="timeline-clip-range">
-                    <button class="timeline-clip-handle start" type="button" data-clip-drag="start" aria-label="拖动切片开头"></button>
-                    <span class="timeline-clip-label"></span>
-                    <button class="timeline-clip-handle end" type="button" data-clip-drag="end" aria-label="拖动切片结尾"></button>
-                  </div>
+                  <div id="timelineClipLane" class="timeline-clip-lane" aria-label="切片候选轨"></div>
                   <div id="timelinePlayhead" class="timeline-playhead"></div>
                   <div id="timelineGuide" class="timeline-guide"></div>
                 </div>
@@ -397,51 +392,34 @@
             <div class="settings-modal-body">
               <div id="clipModelStatus" class="meta model-state"></div>
               <div class="clip-tools">
-                <div class="clip-grid">
-                  <section class="clip-panel">
-                    <div class="clip-panel-head">
-                      <strong>候选片段</strong>
-                      <span id="clipCandidateCount">0 个</span>
-                    </div>
-                    <div class="clip-actions" style="margin-top:10px">
-                      <button id="findClips" class="primary small" type="button">AI 精选</button>
-                      <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
-                    </div>
-                    <div id="clipList" class="clip-list" style="margin-top:10px"></div>
-                  </section>
-                  <section class="clip-panel">
-                    <div class="clip-panel-head">
-                      <strong>已选切片</strong>
-                      <span id="clipQueueCount">0 个</span>
-                    </div>
-                    <div id="clipQueueList" class="clip-list"></div>
-                    <div class="clip-editor">
-                      <div class="row">
-                        <div><label for="clipTitleInput">切片名称</label><input id="clipTitleInput" type="text" value="" placeholder="clip name" /></div>
-                      </div>
-                      <div class="row" style="margin-top:10px">
-                        <div><label for="clipStart">原片开始秒数</label><input id="clipStart" type="number" min="0" step="0.1" value="0" /></div>
-                        <div><label for="clipEnd">原片结束秒数</label><input id="clipEnd" type="number" min="0.1" step="0.1" value="120" /></div>
-                        <div><label for="clipDuration">切片时长</label><input id="clipDuration" type="number" min="0.25" step="0.1" value="120" /></div>
-                      </div>
-                      <div class="clip-nudge-actions">
-                        <button id="clipMoveBack" class="ghost small" type="button">整体 -1s</button>
-                        <button id="clipMoveForward" class="ghost small" type="button">整体 +1s</button>
-                        <button id="clipStartEarlier" class="ghost small" type="button">开头 -0.5s</button>
-                        <button id="clipEndLater" class="ghost small" type="button">结尾 +0.5s</button>
-                      </div>
-                      <div class="clip-actions" style="margin-top:10px">
-                        <button id="useActiveSegment" class="ghost small" type="button">使用当前字幕时间</button>
-                        <button id="renderClip" class="warn small" type="button">导出当前切片</button>
-                        <button id="renderClipQueue" class="ghost small" type="button">按顺序导出全部</button>
-                      </div>
-                    </div>
-                  </section>
+                <div class="clip-modal-actions">
+                  <button id="findClips" class="primary small" type="button">AI 精选</button>
+                  <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
+                  <span class="clip-modal-hint">主时间轴上轨是高分主候选，下轨是重复备选；两层都可以拖动、拉伸和合并。</span>
                 </div>
+                <section class="clip-pending-panel clip-panel">
+                  <div class="clip-panel-head">
+                    <div>
+                      <span class="clip-section-kicker">PENDING CUTS</span>
+                      <strong>待选切片</strong>
+                    </div>
+                    <span id="clipCandidateCount">0 个</span>
+                  </div>
+                  <div id="clipList" class="clip-list clip-pending-list"></div>
+                  <div class="clip-pending-footer">
+                    <span class="clip-modal-hint">右键主时间轴上的片段可导出、删除或合并；重复备选不会自动并入主候选。</span>
+                    <button id="renderClipQueue" class="primary small" type="button">一键导出全部</button>
+                  </div>
+                </section>
                 <div id="clipStatus" class="export-status"></div>
               </div>
             </div>
           </div>
+        </div>
+        <div id="clipContextMenu" class="clip-context-menu is-hidden" role="menu" aria-label="切片操作">
+          <button type="button" data-clip-context-action="export">导出此片段</button>
+          <button type="button" data-clip-context-action="merge">合并相邻/重叠片段</button>
+          <button type="button" data-clip-context-action="remove" class="danger">移除该片段</button>
         </div>
         <div id="settingsModal" class="settings-modal is-hidden">
           <div class="settings-modal-card settings-card">
@@ -571,6 +549,7 @@
       </section>
     </section>
   </main>
+<script src="/static/app_utils.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

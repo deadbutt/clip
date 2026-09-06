@@ -353,11 +353,72 @@ class RenderClipConcurrencyTest(unittest.TestCase):
             # clip 名经 _safe_clip_name 安全化后点号变下划线: clip_1.00_5.00 → clip_1_00_5_00
             mgr._rendering_clips.add(f"{job.id}/clip_1_00_5_00")
             with (
-                patch("moss_transcribe_diarize.app.jobs.detect_ffmpeg", return_value=Available()),
+                patch("moss_transcribe_diarize.app.clip_service.detect_ffmpeg", return_value=Available()),
                 self.assertRaises(RuntimeError) as ctx,
             ):
                 mgr.render_clip(job.id, start=1.0, end=5.0)
             self.assertIn("正在渲染", str(ctx.exception))
+
+
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class RenderClipCacheTest(unittest.TestCase):
+    def test_render_clip_reuses_complete_export_until_inputs_change(self):
+        """完成过的同一切片不重复编码,字幕/样式变化则失效。"""
+        from moss_transcribe_diarize.app.server import create_app
+
+        class Available:
+            available = True
+            ffmpeg = "ffmpeg"
+            ffprobe = "ffprobe"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            mgr = app.state.manager
+            job, input_path = mgr.create_job_for_upload("video.mp4")
+            input_path.write_bytes(b"source-media")
+            job.segments_path.write_text(
+                '[{"id":"seg-1","start":1,"end":4,"speaker":"S00","text":"hello"}]',
+                encoding="utf-8",
+            )
+
+            def fake_burn(_input, _ass, output, **_kwargs):
+                Path(output).write_bytes(b"encoded-mp4")
+                return Path(output)
+
+            with (
+                patch("moss_transcribe_diarize.app.clip_service.detect_ffmpeg", return_value=Available()),
+                patch("moss_transcribe_diarize.app.clip_service.probe_video_size", return_value=(1920, 1080)),
+                patch(
+                    "moss_transcribe_diarize.app.clip_service.burn_ass_subtitles_clip",
+                    side_effect=fake_burn,
+                ) as burn,
+            ):
+                first = mgr.render_clip(job.id, start=1.0, end=5.0, name="same")
+                second = mgr.render_clip(job.id, start=1.0, end=5.0, name="same")
+                self.assertFalse(first["cached"])
+                self.assertTrue(second["cached"])
+                self.assertEqual(burn.call_count, 1)
+
+                # The same filename is intentionally reused; the cache key,
+                # rather than the filename, decides whether encoding is safe.
+                mgr.render_clip(job.id, start=1.0, end=6.0, name="same")
+                self.assertEqual(burn.call_count, 2)
+
+                job.segments_path.write_text(
+                    '[{"id":"seg-1","start":1,"end":4,"speaker":"S00","text":"changed"}]',
+                    encoding="utf-8",
+                )
+                mgr.render_clip(job.id, start=1.0, end=5.0, name="same")
+                self.assertEqual(burn.call_count, 3)
+
+                mgr.render_clip(
+                    job.id,
+                    start=1.0,
+                    end=5.0,
+                    name="same",
+                    style_payload={"font_size": 72},
+                )
+                self.assertEqual(burn.call_count, 4)
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")

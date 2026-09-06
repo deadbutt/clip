@@ -871,6 +871,7 @@ def create_app(
                     limit=limit,
                     merge_expansion_limit=merge_expansion_limit,
                     selector=selector,
+                    include_alternates=strategy == "rules",
                 )
             }
         except KeyError as exc:

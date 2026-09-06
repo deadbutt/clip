@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import asdict, dataclass
 from typing import Iterable
@@ -55,6 +56,19 @@ ENDING_PATTERNS = [
     "最后",
 ]
 
+# Rule screening starts from sliding windows. Those windows are useful for
+# scoring, while the primary shortlist below removes their overlap. The
+# looser ratio is kept for associating lower-scoring alternates with a parent.
+MAX_CANDIDATE_OVERLAP_RATIO = 0.35
+# Primary rule-screened clips are meant to be a readable shortlist.  Any
+# overlap is treated as the same time range; a tiny gap is also treated as
+# continuous so that two sliding windows cannot appear as a repeated pair.
+PRIMARY_CANDIDATE_OVERLAP_RATIO = 0.0
+PRIMARY_CANDIDATE_MIN_GAP = 3.0
+PRIMARY_CLIP_SECONDS_PER_RESULT = 150.0
+PRIMARY_MIN_RESULTS = 4
+ADJACENT_MERGE_GAP = 4.0
+
 
 @dataclass(slots=True)
 class ClipCandidate:
@@ -67,6 +81,12 @@ class ClipCandidate:
     text: str
     segment_ids: list[str]
     selection_method: str = "rules"
+    # Candidates returned by rule screening can be split into a primary lane
+    # and a lower-confidence alternate lane.  The latter keeps useful
+    # overlapping windows visible without putting them on top of the primary
+    # ranges in the timeline.
+    lane: str = "primary"
+    parent_id: str | None = None
 
     @property
     def duration(self) -> float:
@@ -78,6 +98,32 @@ class ClipCandidate:
         return data
 
 
+@dataclass(slots=True)
+class _ScoredWindow:
+    """Cheap internal representation used while exploring sliding windows."""
+
+    start_index: int
+    end_index: int
+    start: float
+    end: float
+    score: float
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
+@dataclass(slots=True)
+class _SegmentFeatures:
+    text_length: int
+    separator_before: int
+    hook_mask: int
+    ending_hits: int
+    punctuation_count: int
+    has_question: bool
+    complete: bool
+
+
 def generate_clip_candidates(
     segments: Iterable[SubtitleSegment | dict],
     *,
@@ -86,34 +132,137 @@ def generate_clip_candidates(
     max_duration: float | None = 300.0,
     limit: int = 24,
     merge_expansion_limit: float | None = None,
+    include_alternates: bool = False,
+    alternate_limit: int | None = None,
+    adaptive_limit: bool = True,
 ) -> list[ClipCandidate]:
     prepared = _prepare_segments(segments)
     if not prepared:
         return []
 
-    candidates: list[ClipCandidate] = []
+    scored_windows: list[_ScoredWindow] = []
+    segment_features = _build_segment_features(prepared)
     for start_index, first in enumerate(prepared):
-        window: list[SubtitleSegment] = []
-        for segment in prepared[start_index:]:
-            if window and segment.start - window[-1].end > 12.0:
+        text_length = 0
+        separator_count = 0
+        hook_mask = 0
+        punctuation_count = 0
+        pause_count = 0
+        has_question = False
+        for end_index in range(start_index, len(prepared)):
+            segment = prepared[end_index]
+            if end_index > start_index and segment.start - prepared[end_index - 1].end > 12.0:
                 break
-            window.append(segment)
-            duration = window[-1].end - first.start
+            features = segment_features[end_index]
+            if end_index > start_index:
+                separator_count += features.separator_before
+                previous = prepared[end_index - 1]
+                if 0.45 <= segment.start - previous.end <= 4.0:
+                    pause_count += 1
+            text_length += features.text_length
+            hook_mask |= features.hook_mask
+            punctuation_count += features.punctuation_count
+            has_question = has_question or features.has_question
+            duration = segment.end - first.start
             if duration < min_duration:
                 continue
             if max_duration is not None and duration > max_duration:
                 break
-            candidates.append(_score_window(window, target_duration=target_duration))
+            score = _score_feature_window(
+                text_length + separator_count,
+                duration,
+                hook_mask.bit_count(),
+                features.ending_hits,
+                has_question,
+                punctuation_count,
+                pause_count,
+                features.complete,
+                target_duration=target_duration,
+            )
+            scored_windows.append(
+                _ScoredWindow(
+                    start_index=start_index,
+                    end_index=end_index,
+                    start=round(first.start, 2),
+                    end=round(segment.end, 2),
+                    score=score,
+                )
+            )
 
+    # Suppress near-duplicate windows before the legacy boundary-merging pass.
+    # Merging first can turn a chain of 120-second windows into a long outer
+    # range, which is exactly the repeated-content behaviour the UI exposes as
+    # two clips containing one another.
+    raw_candidates = scored_windows
+    primary_limit = _adaptive_primary_limit(prepared, limit) if adaptive_limit else max(1, int(limit))
+    primary_windows = _suppress_overlapping_candidates(
+        scored_windows,
+        max_overlap_ratio=(PRIMARY_CANDIDATE_OVERLAP_RATIO if adaptive_limit else MAX_CANDIDATE_OVERLAP_RATIO),
+        min_gap=PRIMARY_CANDIDATE_MIN_GAP if adaptive_limit else 0.0,
+        limit=primary_limit,
+    )
+    candidates = [_materialize_window(item, prepared, target_duration=target_duration) for item in primary_windows]
     deduped = _dedupe_candidates(
         candidates,
         max_duration=max_duration,
         merge_expansion_limit=merge_expansion_limit,
     )
+    # Once representative windows are selected, join touching windows that
+    # are clearly one continuous topic.  This avoids the "cut, then cut
+    # again" look while keeping the hard maximum duration intact.
+    if adaptive_limit:
+        deduped = _merge_adjacent_candidates(
+            deduped,
+            max_duration=max_duration,
+            max_gap=ADJACENT_MERGE_GAP,
+        )
     deduped.sort(key=lambda item: item.score, reverse=True)
-    for index, item in enumerate(deduped[:limit], start=1):
+    for index, item in enumerate(deduped[:primary_limit], start=1):
         item.id = f"clip_{index:03d}"
-    return deduped[:limit]
+        item.lane = "primary"
+        item.parent_id = None
+
+    primary = deduped[:primary_limit]
+    if not include_alternates or not primary:
+        return primary
+
+    # Keep a small, lower-scoring sample from each primary window's overlap
+    # cluster.  These are intentionally not merged into the primary ranges:
+    # the UI displays them on a separate lane for manual comparison.
+    alternate_pool: list[ClipCandidate] = []
+    primary_ids = {(item.start_index, item.end_index) for item in primary_windows}
+    for candidate in raw_candidates:
+        if (candidate.start_index, candidate.end_index) in primary_ids:
+            continue
+        overlaps = [item for item in primary if _overlap_ratio(candidate, item) > MAX_CANDIDATE_OVERLAP_RATIO]
+        if not overlaps:
+            continue
+        parent = max(overlaps, key=lambda item: (item.score, -item.start))
+        if candidate.score >= parent.score:
+            continue
+        alternate_pool.append(candidate)
+
+    # The alternate lane is a comparison aid, not a second full result set.
+    # Keep at most one lower-scoring window for roughly every two primary
+    # clips, otherwise a 17-minute video fills the timeline with duplicates.
+    alternate_cap = min(
+        alternate_limit if alternate_limit is not None else primary_limit,
+        max(1, math.ceil(len(primary) / 2)),
+    )
+    alternate_windows = _suppress_overlapping_candidates(
+        alternate_pool,
+        max_overlap_ratio=0.70,
+        min_gap=0.0,
+        limit=alternate_cap,
+    )
+    alternates = [_materialize_window(item, prepared, target_duration=target_duration) for item in alternate_windows]
+    for index, item in enumerate(alternates, start=1):
+        item.id = f"clip_alt_{index:03d}"
+        item.lane = "alternate"
+        overlaps = [parent for parent in primary if _overlap_ratio(item, parent) > MAX_CANDIDATE_OVERLAP_RATIO]
+        parent = max(overlaps, key=lambda candidate: (candidate.score, -candidate.start)) if overlaps else None
+        item.parent_id = parent.id if parent else None
+    return [*primary, *alternates]
 
 
 def _prepare_segments(segments: Iterable[SubtitleSegment | dict]) -> list[SubtitleSegment]:
@@ -134,6 +283,80 @@ def _prepare_segments(segments: Iterable[SubtitleSegment | dict]) -> list[Subtit
         )
     prepared.sort(key=lambda item: (item.start, item.end))
     return prepared
+
+
+def _build_segment_features(segments: list[SubtitleSegment]) -> list[_SegmentFeatures]:
+    """Precompute values that are reused by every sliding window."""
+    hook_patterns = tuple(pattern.lower() for pattern in HOOK_PATTERNS)
+    ending_patterns = tuple(pattern.lower() for pattern in ENDING_PATTERNS)
+    features: list[_SegmentFeatures] = []
+    for index, segment in enumerate(segments):
+        lower = segment.text.lower()
+        hook_mask = sum(1 << pattern_index for pattern_index, pattern in enumerate(hook_patterns) if pattern in lower)
+        ending_hits = sum(1 for pattern in ending_patterns if pattern in lower)
+        features.append(
+            _SegmentFeatures(
+                text_length=len(segment.text),
+                separator_before=(
+                    1
+                    if index > 0 and segments[index - 1].text[-1:].isascii() and segment.text[:1].isascii()
+                    else 0
+                ),
+                hook_mask=hook_mask,
+                ending_hits=ending_hits,
+                punctuation_count=len(re.findall(r"[!！?？。]", segment.text)),
+                has_question=bool(re.search(r"[?？]", segment.text)),
+                complete=_looks_complete(segment.text),
+            )
+        )
+    return features
+
+
+def _score_feature_window(
+    text_length: int,
+    duration: float,
+    hook_hits: int,
+    ending_hits: int,
+    has_question: bool,
+    punctuation_count: int,
+    pause_count: int,
+    complete: bool,
+    *,
+    target_duration: float,
+) -> float:
+    """Score a window from precomputed features without rebuilding its text."""
+    duration = max(0.1, duration)
+    question_bonus = 8.0 if has_question else 0.0
+    density = min(26.0, text_length / max(duration, 1.0) * 7.0)
+    duration_score = max(0.0, 22.0 - abs(duration - target_duration) / max(target_duration, 1.0) * 22.0)
+    punctuation_bonus = min(8.0, punctuation_count * 1.4)
+    short_pause_bonus = min(6.0, pause_count * 1.5)
+    completeness = 10.0 if complete else 3.0
+    return round(
+        20.0
+        + hook_hits * 4.0
+        + ending_hits * 3.0
+        + question_bonus
+        + punctuation_bonus
+        + short_pause_bonus
+        + density
+        + duration_score
+        + completeness,
+        2,
+    )
+
+
+def _materialize_window(
+    window: _ScoredWindow,
+    segments: list[SubtitleSegment],
+    *,
+    target_duration: float,
+) -> ClipCandidate:
+    """Build the full public candidate only after a window survives NMS."""
+    candidate = _score_window(segments[window.start_index : window.end_index + 1], target_duration=target_duration)
+    candidate.start = window.start
+    candidate.end = window.end
+    return candidate
 
 
 def _score_window(window: list[SubtitleSegment], *, target_duration: float) -> ClipCandidate:
@@ -176,7 +399,13 @@ def _score_window(window: list[SubtitleSegment], *, target_duration: float) -> C
 def _dedupe_candidates(
     candidates: list[ClipCandidate], *, max_duration: float | None = 300.0, merge_expansion_limit: float | None = None
 ) -> list[ClipCandidate]:
-    """重叠候选(>65%)合并为取时间外沿的一条更完整片段；合并超时长上限才丢弃（上限为 None 时不限）。"""
+    """重叠候选合并为取时间外沿的一条更完整片段。
+
+    The generator performs representative-window suppression before calling
+    this helper.  Keeping the merge behaviour here preserves the helper's
+    existing semantics for manually supplied candidates and for callers that
+    explicitly want boundary expansion.
+    """
     ordered = sorted(candidates, key=lambda item: item.score, reverse=True)
     output: list[ClipCandidate] = []
     while ordered:
@@ -222,6 +451,91 @@ def _dedupe_candidates(
         if merged_into is None and not blocked:
             output.append(candidate)
     return output
+
+
+def _adaptive_primary_limit(prepared: list[SubtitleSegment], requested_limit: int) -> int:
+    """Scale the readable rule shortlist with the source duration.
+
+    ``limit`` remains a caller-provided upper bound, while the default rule
+    screen gets about one representative result per 150 seconds.  This keeps
+    a 17-minute source around 6–8 clips instead of returning every sliding
+    window that happened to score well.
+    """
+    if not prepared:
+        return 0
+    requested = max(1, int(requested_limit))
+    duration = max(0.0, prepared[-1].end)
+    duration_limit = max(PRIMARY_MIN_RESULTS, math.ceil(duration / PRIMARY_CLIP_SECONDS_PER_RESULT))
+    return min(requested, duration_limit)
+
+
+def _suppress_overlapping_candidates(
+    candidates: list[ClipCandidate],
+    *,
+    max_overlap_ratio: float = MAX_CANDIDATE_OVERLAP_RATIO,
+    min_gap: float = 0.0,
+    limit: int | None = None,
+) -> list[ClipCandidate]:
+    """Keep the highest-scoring representative from each overlapping window group.
+
+    Candidate generation deliberately explores many start/end combinations.
+    Non-maximum suppression is applied to those raw windows before any range
+    merge, so a lower-scoring window cannot survive merely because it extends a
+    higher-scoring window's boundary.  The overlap ratio uses the shorter
+    candidate as its denominator; consequently a containing range is always
+    rejected regardless of which one is longer.
+    """
+    if not candidates:
+        return []
+    threshold = max(0.0, min(1.0, float(max_overlap_ratio)))
+    ordered = sorted(candidates, key=lambda item: (-item.score, item.start, item.end))
+    selected: list[ClipCandidate] = []
+    for candidate in ordered:
+        duplicate = False
+        for kept in selected:
+            intersection = max(0.0, min(candidate.end, kept.end) - max(candidate.start, kept.start))
+            shorter = max(1.0, min(candidate.duration, kept.duration))
+            distance = min(abs(candidate.start - kept.end), abs(kept.start - candidate.end))
+            if intersection / shorter > threshold or (intersection <= 0.0 and distance < max(0.0, min_gap)):
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        selected.append(candidate)
+        if limit is not None and limit > 0 and len(selected) >= limit:
+            break
+    return selected
+
+
+def _merge_adjacent_candidates(
+    candidates: list[ClipCandidate], *, max_duration: float | None, max_gap: float
+) -> list[ClipCandidate]:
+    """Merge selected windows that touch at a natural topic boundary."""
+    if not candidates:
+        return []
+    ordered = sorted(candidates, key=lambda item: (item.start, item.end))
+    output: list[ClipCandidate] = []
+    for candidate in ordered:
+        if output:
+            previous = output[-1]
+            gap = candidate.start - previous.end
+            merged_end = max(previous.end, candidate.end)
+            if gap <= max(0.0, max_gap) and (
+                max_duration is None or merged_end - previous.start <= max_duration
+            ):
+                previous.end = round(merged_end, 2)
+                previous.score = max(previous.score, candidate.score)
+                previous.text = previous.text if len(previous.text) >= len(candidate.text) else candidate.text
+                previous.segment_ids = list(dict.fromkeys([*previous.segment_ids, *candidate.segment_ids]))
+                continue
+        output.append(candidate)
+    return output
+
+
+def _overlap_ratio(left: ClipCandidate, right: ClipCandidate) -> float:
+    intersection = max(0.0, min(left.end, right.end) - max(left.start, right.start))
+    shorter = max(1.0, min(left.duration, right.duration))
+    return intersection / shorter
 
 
 def _pattern_hits(text: str, patterns: list[str]) -> int:
