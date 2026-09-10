@@ -32,8 +32,9 @@ def _run_download(tmp_path: Path, monkeypatch, lines: list[str], **kwargs):
 
     captured: dict[str, object] = {}
 
-    def fake_popen(cmd, **_kwargs):
+    def fake_popen(cmd, **popen_kwargs):
         captured["cmd"] = list(cmd)
+        captured.update(popen_kwargs)
         return _FakeProc([line.replace("{out}", str(tmp_path)) for line in lines])
 
     monkeypatch.setattr(downloader.subprocess, "Popen", fake_popen)
@@ -86,6 +87,20 @@ def test_parses_printed_title_and_fires_callback_once(tmp_path, monkeypatch):
     assert titles == ["My Fake 视频 Title"]
     # 进度照常转发：起点与收尾两个 tick 均被捕获。
     assert [round(ratio, 3) for ratio, _info in ticks][:2] == [0.123, 1.0]
+
+
+def test_forces_utf8_for_yt_dlp_pipe(tmp_path, monkeypatch):
+    _, captured, _ = _run_download(tmp_path, monkeypatch, ["mtd_title:中文标题"])
+
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert captured["env"]["PYTHONUTF8"] == "1"
+    assert "bufsize" not in captured
+
+
+def test_decodes_bundled_yt_dlp_gbk_output():
+    raw = "【熟肉】赛后采访中文cut".encode("gbk")
+
+    assert downloader._decode_yt_dlp_line(raw) == "【熟肉】赛后采访中文cut"
 
 
 def test_missing_title_falls_back_to_none(tmp_path, monkeypatch):

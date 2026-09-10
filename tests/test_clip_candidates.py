@@ -148,6 +148,7 @@ class DedupeCandidatesTest(unittest.TestCase):
     def test_overlapping_candidates_merge_to_outer_bounds(self):
         a = self._candidate("a", 0.0, 100.0, score=90.0)
         b = self._candidate("b", 10.0, 130.0, score=60.0)  # 重叠 90/100 = 90%
+        a.reason = "100s, hook"
 
         merged = _dedupe_candidates([a, b], max_duration=180.0)
 
@@ -155,6 +156,7 @@ class DedupeCandidatesTest(unittest.TestCase):
         self.assertEqual((merged[0].start, merged[0].end), (0.0, 130.0))
         self.assertEqual(merged[0].score, 90.0)
         self.assertEqual(merged[0].segment_ids, ["a", "b"])
+        self.assertEqual(merged[0].reason, "130s, hook")
 
     def test_merge_rejected_when_exceeding_max_duration(self):
         # 重叠 80% 但合并后 0~200 超过 max_duration=180: 退回丢弃低分条

@@ -74,6 +74,15 @@ class FakeHallucinationWhisperModel(FakeWhisperModel):
         return iter(segments), FakeInfo()
 
 
+class FakePunctuationWhisperModel(FakeWhisperModel):
+    def transcribe(self, path, **kwargs):
+        FakePunctuationWhisperModel.last_kwargs = kwargs
+        return iter([
+            FakeSegment(0.0, 1.0, "..."),
+            FakeSegment(1.0, 2.0, "Real speech."),
+        ]), FakeInfo()
+
+
 class WhisperRunnerTest(unittest.TestCase):
     def test_ensure_ffmpeg_on_path_prepends_portable_directory(self):
         from moss_transcribe_diarize.app import whisper_runner as module
@@ -166,6 +175,14 @@ class WhisperRunnerTest(unittest.TestCase):
         self.assertIn("This is real speech.", result.text)
         self.assertNotIn("Satsang with Mooji", result.text)
         self.assertNotIn("ah...", result.text)
+
+    def test_transcribe_drops_punctuation_only_segments(self):
+        module = types.SimpleNamespace(WhisperModel=FakePunctuationWhisperModel)
+        with patch.dict(sys.modules, {"faster_whisper": module}):
+            result = WhisperRunner("small", device="cpu", dtype="int8").transcribe("sample.mp4")
+
+        self.assertNotIn("...", result.text)
+        self.assertIn("Real speech.", result.text)
 
 
 if __name__ == "__main__":

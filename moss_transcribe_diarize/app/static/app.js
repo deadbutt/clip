@@ -1917,11 +1917,17 @@ function createSegmentRow(segment, index) {
     && new Set(speakerList.filter(Boolean)).size > 1 && segment.speaker
     ? speakerColorOf(segment.speaker, speakerList)
     : 'transparent';
+  const qualityReasons = (segment.quality_reasons || []).join('；');
+  const qualityMarkup = segment.confidence != null
+    ? `<div class="quality-score ${segment.quality_flags?.length ? "warning" : ""}" title="${escapeHtml(qualityReasons)}">置信度 ${Math.round(segment.confidence * 100)}%${segment.quality_flags?.length ? " · ⚠ 需复核" : ""}</div>`
+    : segment.quality_flags?.length
+      ? `<div class="quality-score warning" title="${escapeHtml(qualityReasons)}">质量指标不可用 · ⚠ 需复核</div>`
+      : '';
   tr.innerHTML = `
     <td><input class="start" type="number" min="0" step="0.01" value="${segment.start}"></td>
     <td><input class="end" type="number" min="0" step="0.01" value="${segment.end}"></td>
     <td class="speaker-cell"><span class="speaker-dot" style="background:${dotColor}"></span><input class="speaker" type="text" value="${escapeHtml(segment.speaker)}"></td>
-    <td><textarea class="text" rows="1" title="Ctrl+Enter：在光标处拆分（按词级时间戳对齐到词边界）">${escapeHtml(segment.text)}</textarea>${segment.confidence != null ? `<div class="quality-score ${segment.quality_flags?.length ? "warning" : ""}" title="${escapeHtml((segment.quality_reasons || []).join("；"))}">置信度 ${Math.round(segment.confidence * 100)}%${segment.quality_flags?.length ? " · ⚠ 需复核" : ""}</div>` : ""}</td>
+    <td><textarea class="text" rows="1" title="Ctrl+Enter：在光标处拆分（按词级时间戳对齐到词边界）">${escapeHtml(segment.text)}</textarea>${qualityMarkup}</td>
     <td>
       <div class="segment-actions">
         <button class="segment-action add-row-above" type="button" title="在上方添加字幕">↑+</button>
@@ -4467,6 +4473,7 @@ async function renderQueuedClips() {
   if (!saved) return;
   renderClipQueueBtn.disabled = true;
   const outputs = [];
+  const failures = [];
   try {
     for (let index = 0; index < selectedClips.length; index += 1) {
       const clip = selectedClips[index];
@@ -4474,26 +4481,33 @@ async function renderQueuedClips() {
       renderClipQueue();
       setClipRange(clip.start, clip.end, true);
       clipStatusEl.textContent = `正在导出 ${index + 1}/${selectedClips.length}：${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)}...`;
-      const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          start: clip.start,
-          end: clip.end,
-          style: collectSubtitleStyle(),
-          name: `${String(index + 1).padStart(2, '0')}_${clip.title || `clip_${clip.start.toFixed(1)}_${clip.end.toFixed(1)}`}`
-        })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '导出切片失败');
-      outputs.push(data);
+      try {
+        const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start: clip.start,
+            end: clip.end,
+            style: collectSubtitleStyle(),
+            name: `${String(index + 1).padStart(2, '0')}_${clip.title || `clip_${clip.start.toFixed(1)}_${clip.end.toFixed(1)}`}`
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '导出切片失败');
+        outputs.push({ index, data });
+      } catch (err) {
+        failures.push({ index, message: err.message || String(err) });
+      }
     }
-    const links = outputs.map((data, index) => {
+    const links = outputs.map(({ data, index }) => {
       const filename = data.filename || (data.files || {}).mp4;
       const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(filename)}`);
       return `<a href="${href}" target="_blank">#${index + 1} MP4</a>`;
     }).join(' · ');
-    clipStatusEl.innerHTML = `已按当前顺序导出 ${outputs.length} 个切片：${links}`;
+    const failureText = failures.length
+      ? `；${failures.length} 个失败（${failures.map((item) => `#${item.index + 1} ${item.message}`).join('；')}）`
+      : '';
+    clipStatusEl.innerHTML = `批量导出完成：${outputs.length} 个成功${failureText}${links ? `：${links}` : ''}`;
   } catch (err) {
     clipStatusEl.textContent = '批量导出失败：' + (err.message || err);
   } finally {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import socket
 import tempfile
 import time
@@ -57,6 +58,17 @@ class WorkerThreadTest(unittest.TestCase):
             self.assertEqual(processed, [job.id])
             self.assertTrue(manager._worker.is_alive())
 
+    def test_shutdown_stops_idle_worker(self):
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = JobManager(
+                Path(tmpdir), _StubRunner(), prompt="p", max_length=1024, max_new_tokens=8
+            )
+            manager.shutdown(timeout=2.0)
+
+            self.assertFalse(manager._worker.is_alive())
+
     def test_worker_survives_process_job_crash(self):
         from moss_transcribe_diarize.app.jobs import JobManager
 
@@ -81,6 +93,128 @@ class WorkerThreadTest(unittest.TestCase):
                     manager._queue.join()
 
             self.assertTrue(manager._worker.is_alive())
+
+
+class SubtitleFileSyncTest(unittest.TestCase):
+    def test_ass_external_edit_wins_while_srt_exists(self):
+        from moss_transcribe_diarize.app.jobs import JobManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.wav"
+            source.write_bytes(b"audio")
+            manager = JobManager(
+                Path(tmpdir) / "runs", _StubRunner(), prompt="p", max_length=64, max_new_tokens=8
+            )
+            manager.pause_queue()
+            created = manager.create_job_from_file(source, "source.wav")
+            job = created[0] if isinstance(created, tuple) else created
+            manager._write_subtitle_files(job, [
+                SubtitleSegment(
+                    "seg_0001",
+                    0.0,
+                    1.0,
+                    "S01",
+                    "hello world",
+                    items=[SubtitleItem("hello", 0.0, 0.5), SubtitleItem("world", 0.5, 1.0)],
+                    confidence=0.81,
+                ),
+            ])
+            old_mtime_ns = job.ass_path.stat().st_mtime_ns
+            ass = job.ass_path.read_text(encoding="utf-8-sig").replace("hello", "ASS_CHANGED", 1)
+            job.ass_path.write_text(ass, encoding="utf-8-sig")
+            os.utime(job.ass_path, ns=(old_mtime_ns + 1_000_000_000, old_mtime_ns + 1_000_000_000))
+
+            segments = manager.list_segments(job.id)
+
+            self.assertEqual(segments[0]["text"], "ASS_CHANGED world")
+            self.assertEqual(segments[0]["id"], "seg_0001")
+            self.assertEqual(segments[0]["end"], 1.0)
+            self.assertEqual(segments[0]["confidence"], 0.81)
+            self.assertEqual(len(segments[0]["items"]), 2)
+            manager.shutdown(timeout=2.0)
+
+
+class TranscriptionQualityTest(unittest.TestCase):
+    def test_job_record_has_metrics_checkpoint_path(self):
+        from moss_transcribe_diarize.app.jobs import JobRecord
+
+        job = JobRecord(
+            id="metrics",
+            status="waiting_review",
+            media_name="sample",
+            input_path="sample.wav",
+            job_dir=".",
+            inference_prompt="",
+            max_length=1024,
+            max_new_tokens=8,
+            decoding="greedy",
+            temperature=None,
+        )
+        self.assertEqual(job.raw_metrics_path.name, "raw_metrics.json")
+
+    def test_flags_low_confidence_generic_music_hallucination(self):
+        from moss_transcribe_diarize.app.jobs import _apply_transcription_quality
+
+        segment = SubtitleSegment("seg_0001", 341.06, 342.38, "S00", "Thank you very much.")
+        metrics = [{
+            "start": 341.0,
+            "end": 342.5,
+            "avg_logprob": -0.68,
+            "no_speech_prob": 0.0,
+            "compression_ratio": 1.0,
+        }]
+        _apply_transcription_quality([segment], metrics)
+
+        self.assertLess(segment.confidence, 0.70)
+        self.assertIn("possible_hallucination", segment.quality_flags or [])
+
+    def test_flags_punctuation_only_segment_without_metrics(self):
+        from moss_transcribe_diarize.app.jobs import _apply_transcription_quality
+
+        segment = SubtitleSegment("seg_0001", 12.4, 12.5, "S00", ".")
+        _apply_transcription_quality([segment], None)
+
+        self.assertIn("quality_unavailable", segment.quality_flags or [])
+        self.assertIn("possible_hallucination", segment.quality_flags or [])
+
+    def test_flags_common_game_announcer_line_for_review(self):
+        from moss_transcribe_diarize.app.jobs import _apply_transcription_quality
+
+        segment = SubtitleSegment("seg_0001", 51.9, 53.82, "S00", "First blood!")
+        metrics = [{
+            "start": 51.0,
+            "end": 54.0,
+            "avg_logprob": -0.27,
+            "no_speech_prob": 0.0,
+            "compression_ratio": 1.0,
+        }]
+        _apply_transcription_quality([segment], metrics)
+
+        self.assertIn("possible_effect_voice", segment.quality_flags or [])
+
+    def test_flags_observed_game_announcer_variants(self):
+        from moss_transcribe_diarize.app.jobs import _apply_transcription_quality
+
+        segments = [
+            SubtitleSegment("seg_0001", 0.0, 1.0, "S00", "Burst Blood!", confidence=0.86),
+            SubtitleSegment("seg_0002", 1.0, 2.0, "S00", "Pentakill!", confidence=0.86),
+        ]
+        _apply_transcription_quality(segments, None)
+
+        self.assertTrue(all("possible_effect_voice" in (item.quality_flags or []) for item in segments))
+
+
+class JobFailureClassificationTest(unittest.TestCase):
+    def test_invalid_media_hides_decoder_internals(self):
+        from moss_transcribe_diarize.app.jobs import _classify_job_failure
+
+        kind, message = _classify_job_failure(
+            RuntimeError("[Errno 1094995529] Invalid data found when processing input: raw AV internals")
+        )
+
+        self.assertEqual(kind, "invalid_media")
+        self.assertIn("损坏", message)
+        self.assertNotIn("1094995529", message)
 
 
 class RestartRecoveryTest(unittest.TestCase):

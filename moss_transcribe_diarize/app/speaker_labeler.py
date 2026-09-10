@@ -786,7 +786,10 @@ def _assign_turns_to_segments(
 
     def _emit(start: float, end: float, text: str, speaker_raw: str) -> None:
         nonlocal seg_counter, previous_source
-        if not text.strip() or end - start < 0.15:
+        # ASR can legitimately produce very short interjections (for example a
+        # 100 ms "Yeah?"). Diarization is allowed to relabel or split text, but
+        # must never turn an existing non-empty subtitle into data loss.
+        if not text.strip() or end <= start:
             return
         previous_source = speaker_raw
         seg_counter += 1

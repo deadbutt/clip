@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 
 StatusCallback = Callable[[str, float | None, int | None], None]
 
+# Python 3.8+ on Windows no longer searches arbitrary PATH entries for DLL
+# dependencies. Keep add_dll_directory handles alive for the process lifetime.
+_DLL_DIRECTORY_HANDLES: list[object] = []
+
 _PART_HEAD_RE = re.compile(r"^\[(\d+(?:\.\d+)?)\]")
 _PART_TAIL_RE = re.compile(r"\[(\d+(?:\.\d+)?)\]$")
 
@@ -206,6 +210,7 @@ class WhisperRunner:
         if self._model is not None:
             return
         _ensure_ffmpeg_on_path()
+        _ensure_cuda_dlls_available(self.device_name)
         os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
         errors: list[str] = []
@@ -321,6 +326,14 @@ class WhisperRunner:
             end = max(start, float(segment.end))
             text = str(segment.text or "").strip()
             if not text:
+                continue
+            # A punctuation-only decode is never useful subtitle content and is
+            # a common long-silence hallucination (".", "...", "♪"). Drop it
+            # at the ASR boundary; quality metadata still handles manually
+            # supplied/imported punctuation rows for review diagnostics.
+            if not re.search(r"[\w\u3400-\u9fff]", text, flags=re.UNICODE):
+                if status_callback is not None:
+                    status_callback("transcribing", _duration_progress(end, duration), segment_count)
                 continue
             segment_metrics.append({"start": start, "end": end, "avg_logprob": float(getattr(segment, "avg_logprob", 0.0) or 0.0), "no_speech_prob": float(getattr(segment, "no_speech_prob", 0.0) or 0.0), "compression_ratio": float(getattr(segment, "compression_ratio", 0.0) or 0.0)})
             if repeat_guard.should_skip(text):
@@ -728,6 +741,28 @@ def _ensure_ffmpeg_on_path() -> None:
     if ffmpeg_dir in parts:
         return
     os.environ["PATH"] = os.pathsep.join([ffmpeg_dir, *parts]) if parts else ffmpeg_dir
+
+
+def _ensure_cuda_dlls_available(device: str = "auto") -> None:
+    """Expose PyTorch's bundled CUDA DLLs to CTranslate2 on Windows."""
+    if os.name != "nt" or str(device or "auto").lower() == "cpu":
+        return
+    try:
+        import torch
+    except ImportError:
+        return
+    torch_lib = Path(torch.__file__).resolve().parent / "lib"
+    if not torch_lib.is_dir():
+        return
+    torch_lib_text = str(torch_lib)
+    path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    if torch_lib_text not in path_parts:
+        os.environ["PATH"] = os.pathsep.join([torch_lib_text, *path_parts])
+    if hasattr(os, "add_dll_directory"):
+        try:
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(torch_lib_text))
+        except OSError:
+            pass
 
 
 def _duration_progress(position: float, duration: float) -> float:

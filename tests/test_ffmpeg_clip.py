@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from moss_transcribe_diarize.app.ffmpeg import _build_clip_filter_graph
+from moss_transcribe_diarize.app.ffmpeg import FFmpegProcessError, _build_clip_filter_graph
 
 
 class FfmpegClipTest(unittest.TestCase):
@@ -19,6 +19,13 @@ class FfmpegClipTest(unittest.TestCase):
         self.assertLess(trim_position, reset_position)
         self.assertLess(reset_position, subtitle_position)
         self.assertIn("atrim=start=100.000:duration=20.000", graph)
+
+    def test_process_error_keeps_diagnostics_out_of_user_message(self):
+        error = FFmpegProcessError(1, "ffmpeg version x\nlibass verbose internals")
+
+        self.assertIn("媒体处理失败", str(error))
+        self.assertNotIn("libass", str(error))
+        self.assertIn("libass", error.detail)
 
 
 if __name__ == "__main__":

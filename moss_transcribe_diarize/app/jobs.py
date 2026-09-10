@@ -97,6 +97,11 @@ class _AppendFileHandler(logging.Handler):
         try:
             with open(self.path, "a", encoding="utf-8") as handle:
                 handle.write(self.format(record) + "\n")
+        except FileNotFoundError:
+            # A test fixture or a user deletion may remove the job directory
+            # while a cooperative worker is winding down. There is nowhere to
+            # persist this final line, and logging it to stderr only adds noise.
+            return
         except Exception:
             self.handleError(record)
 
@@ -177,6 +182,24 @@ class JobCancelled(BaseException):
     取消必须穿透它们直达各阶段入口的 `except JobCancelled`。"""
     pass
 
+
+def _classify_job_failure(exc: Exception) -> tuple[str | None, str]:
+    """Return a stable error kind and a message suitable for the job UI."""
+    message = str(exc)
+    lowered = f"{type(exc).__name__}: {message}".lower()
+    invalid_markers = (
+        "invalid data found when processing input",
+        "invaliddataerror",
+        "moov atom not found",
+        "could not find codec parameters",
+        "end of file",
+    )
+    if any(marker in lowered for marker in invalid_markers):
+        return "invalid_media", "无法读取该媒体文件。文件可能为空、损坏或格式不受支持。"
+    if "no audio" in lowered or "audio stream" in lowered:
+        return "missing_audio", "媒体中没有可用于转录的音频轨。"
+    return None, message
+
 # Audio consumes ~12.5 prompt tokens/sec (Whisper 30s -> 375 tokens after 4x merge).
 # Transcript output is ~10 generated tokens/sec of speech; use 14 with a safety margin
 # so a single pass is unlikely to hit the limit and force a costly re-run.
@@ -189,29 +212,53 @@ _TOKEN_ROUNDING = 512
 
 def _apply_transcription_quality(segments: list[SubtitleSegment], metrics: list[dict[str, float]] | None) -> None:
     """Attach explainable, segment-level ASR quality metadata without extra inference."""
-    if not metrics:
-        return
     for segment in segments:
-        overlaps = [m for m in metrics if float(m.get("end", 0)) > segment.start and float(m.get("start", 0)) < segment.end]
-        if not overlaps:
-            continue
-        avg_logprob = sum(float(m.get("avg_logprob", 0)) for m in overlaps) / len(overlaps)
-        no_speech = max(float(m.get("no_speech_prob", 0)) for m in overlaps)
-        compression = max(float(m.get("compression_ratio", 0)) for m in overlaps)
-        score = max(0.0, min(1.0, (avg_logprob + 1.5) / 1.5))
-        score *= max(0.0, 1.0 - no_speech)
-        flags: list[str] = []
-        reasons: list[str] = []
-        if avg_logprob < -0.8:
-            flags.append("low_confidence")
-            reasons.append("ASR 平均对数概率较低")
-        if no_speech >= 0.6:
-            flags.append("possible_hallucination")
-            reasons.append("无语音概率较高")
-        if compression >= 2.4:
-            flags.append("possible_repetition")
-            reasons.append("文本压缩比异常")
-        segment.confidence = round(score, 4)
+        overlaps = [
+            m for m in (metrics or [])
+            if float(m.get("end", 0)) > segment.start and float(m.get("start", 0)) < segment.end
+        ]
+        flags = list(segment.quality_flags or [])
+        reasons = list(segment.quality_reasons or [])
+
+        def add(flag: str, reason: str) -> None:
+            if flag not in flags:
+                flags.append(flag)
+                reasons.append(reason)
+
+        if overlaps:
+            avg_logprob = sum(float(m.get("avg_logprob", 0)) for m in overlaps) / len(overlaps)
+            no_speech = max(float(m.get("no_speech_prob", 0)) for m in overlaps)
+            compression = max(float(m.get("compression_ratio", 0)) for m in overlaps)
+            score = max(0.0, min(1.0, (avg_logprob + 1.5) / 1.5))
+            score *= max(0.0, 1.0 - no_speech)
+            segment.confidence = round(score, 4)
+            if avg_logprob < -0.8:
+                add("low_confidence", "ASR 平均对数概率较低")
+            if no_speech >= 0.6:
+                add("possible_hallucination", "无语音概率较高")
+            if compression >= 2.4:
+                add("possible_repetition", "文本压缩比异常")
+        elif segment.confidence is None:
+            add("quality_unavailable", "该段没有可用的 ASR 质量指标")
+
+        text = segment.text.strip()
+        lexical = re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+        generic_phrase = bool(re.fullmatch(
+            r"(?:thank you(?: very much)?|thanks(?: for watching)?|thank you for watching|"
+            r"please subscribe|subscribe|like and subscribe)",
+            normalized,
+        ))
+        if not lexical:
+            add("possible_hallucination", "字幕只包含标点或非文字符号")
+        if generic_phrase and (segment.confidence is None or segment.confidence < 0.70):
+            add("possible_hallucination", "低置信度的常见模板短语，可能来自音乐或静音段")
+        if re.fullmatch(
+            r"(?:(?:first|burst) blood|double kill|triple kill|quadra kill|penta ?kill|legendary|"
+            r"rampage|unstoppable|shut down|godlike|executed|you have slain an enemy)!?",
+            normalized,
+        ):
+            add("possible_effect_voice", "常见游戏播报语音，可能不是目标人物对白")
         segment.quality_flags = flags or None
         segment.quality_reasons = reasons or None
 
@@ -416,6 +463,11 @@ class JobRecord:
         return Path(self.job_dir) / "raw_words.json"
 
     @property
+    def raw_metrics_path(self) -> Path:
+        """Checkpointed Whisper segment metrics used when resuming from words."""
+        return Path(self.job_dir) / "raw_metrics.json"
+
+    @property
     def segments_path(self) -> Path:
         return Path(self.job_dir) / "segments.json"
 
@@ -474,6 +526,8 @@ class JobRecord:
         }
         data["files"] = {
             "raw_transcript": str(self.raw_transcript_path),
+            "raw_words": str(self.raw_words_path),
+            "raw_metrics": str(self.raw_metrics_path),
             "segments": str(self.segments_path),
             "srt": str(self.srt_path),
             "ass": str(self.ass_path),
@@ -573,9 +627,10 @@ class JobManager(ClipOperationsMixin):
         self.pyannote_model = pyannote_model
         self.diarization_device = diarization_device
         self._jobs: dict[str, JobRecord] = {}
-        self._queue: queue.Queue[str] = queue.Queue()
+        self._queue: queue.Queue[str | None] = queue.Queue()
         self._queue_paused = False
         self._queue_condition = threading.Condition()
+        self._shutdown_event = threading.Event()
         self._phase_starts: dict[str, float] = {}
         self._render_lock = threading.Lock()
         self._translate_lock = threading.Lock()
@@ -792,6 +847,23 @@ class JobManager(ClipOperationsMixin):
         """server 启动时注入事件循环与 SSE hub；worker 线程经 call_soon_threadsafe 桥接。"""
         self._event_loop = loop
         self._event_hub = hub
+
+    def shutdown(self, *, wait: bool = True, timeout: float = 5.0) -> None:
+        """Stop accepting worker work and request cancellation of the active job."""
+        if self._shutdown_event.is_set():
+            return
+        self._shutdown_event.set()
+        self._cancelled_jobs.update(self._active_jobs)
+        with self._queue_condition:
+            self._queue_paused = False
+            self._queue_condition.notify_all()
+        self._queue.put(None)
+        if wait and self._worker.is_alive():
+            self._worker.join(timeout=max(0.0, timeout))
+        self._event_loop = None
+        self._event_hub = None
+        for job_id in list(self._job_loggers):
+            self._close_job_logger(job_id)
 
     def _emit_job_event(self, job: JobRecord, *, force: bool = False) -> None:
         hub = self._event_hub
@@ -2030,9 +2102,15 @@ class JobManager(ClipOperationsMixin):
     def _worker_loop(self) -> None:
         while True:
             job_id = self._queue.get()
+            if job_id is None:
+                self._queue.task_done()
+                break
             with self._queue_condition:
-                while self._queue_paused:
+                while self._queue_paused and not self._shutdown_event.is_set():
                     self._queue_condition.wait()
+            if self._shutdown_event.is_set():
+                self._queue.task_done()
+                continue
             self._active_jobs.add(job_id)
             try:
                 self._process_job(self.get_job(job_id))
@@ -2167,19 +2245,32 @@ class JobManager(ClipOperationsMixin):
                 self.job_log(job, "后台启动 demucs 人声分离（与转录并行）")
                 vocals_executor = ThreadPoolExecutor(max_workers=1)
                 vocals_future = vocals_executor.submit(
-                    vocal_separator.separate_vocals, audio_path, job.job_dir
+                    vocal_separator.separate_vocals,
+                    audio_path,
+                    job.job_dir,
+                    cancel_check=lambda: job.id in self._cancelled_jobs or self._shutdown_event.is_set(),
                 )
             elif demucs_needed:
                 self.job_log(job, "空闲显存不足，demucs 人声分离改为转录完成后串行执行")
 
             # 断点续传：检查转录是否已完成（raw_words.json 存在则跳过 whisper）
             checkpoint_words = None
+            checkpoint_metrics = None
             if caption_segments is None and job.raw_words_path.exists():
                 try:
                     _words_data = json.loads(job.raw_words_path.read_text(encoding="utf-8"))
                     checkpoint_words = [(float(s), float(e), str(t)) for s, e, t in _words_data]
+                    if job.raw_metrics_path.exists():
+                        raw_metrics = json.loads(job.raw_metrics_path.read_text(encoding="utf-8"))
+                        if isinstance(raw_metrics, list):
+                            checkpoint_metrics = [
+                                {str(key): float(value) for key, value in item.items()}
+                                for item in raw_metrics
+                                if isinstance(item, dict)
+                            ]
                 except Exception:
                     checkpoint_words = None
+                    checkpoint_metrics = None
 
             if caption_segments is not None:
                 result = None
@@ -2194,6 +2285,7 @@ class JobManager(ClipOperationsMixin):
                 result = None
                 segments = regroup_sentences_from_words(checkpoint_words)
                 segments = drop_repeated_hallucinations(segments)
+                _apply_transcription_quality(segments, checkpoint_metrics)
                 job.generated_tokens = job.generated_tokens or 0
                 self._set_status(job, "postprocessing", 0.85, error=None)
             else:
@@ -2222,6 +2314,11 @@ class JobManager(ClipOperationsMixin):
                         json.dumps([[s, e, t] for s, e, t in result.words], ensure_ascii=False),
                         encoding="utf-8",
                     )
+                    if result.segment_metrics:
+                        job.raw_metrics_path.write_text(
+                            json.dumps(result.segment_metrics, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
                     segments = regroup_sentences_from_words(result.words)
                 else:
                     segments = regroup_sentences(subtitle_segments_from_transcript(result.text, postprocess=False))
@@ -2237,13 +2334,18 @@ class JobManager(ClipOperationsMixin):
                 self.job_log(job, "开始 demucs 人声分离（串行）")
                 vocals_executor = ThreadPoolExecutor(max_workers=1)
                 vocals_future = vocals_executor.submit(
-                    vocal_separator.separate_vocals, audio_path, job.job_dir
+                    vocal_separator.separate_vocals,
+                    audio_path,
+                    job.job_dir,
+                    cancel_check=lambda: job.id in self._cancelled_jobs or self._shutdown_event.is_set(),
                 )
 
             if vocals_future is not None:
                 try:
                     vocals_path = vocals_future.result()
                     self.job_log(job, "demucs 人声分离完成")
+                except vocal_separator.VocalSeparationCancelled:
+                    raise JobCancelled
                 except Exception as exc:
                     vocals_path = None
                     self.job_log(job, f"demucs 人声分离失败，回退原始音频: {exc}", level=logging.WARNING, exc_info=True)
@@ -2284,7 +2386,10 @@ class JobManager(ClipOperationsMixin):
             )
             # 说话人标记可能返回新建的 SubtitleSegment，重新附加 ASR 质量信息，
             # 确保最终写入 segments.json 的对象包含置信度。
-            _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
+            _apply_transcription_quality(
+                segments,
+                getattr(result, "segment_metrics", None) if result is not None else checkpoint_metrics,
+            )
             if vocals_path is not None:
                 try:
                     Path(vocals_path).unlink(missing_ok=True)
@@ -2329,7 +2434,8 @@ class JobManager(ClipOperationsMixin):
                 self._progress_save_times.pop(job.id, None)
                 return
             self.job_log(job, f"任务失败: {exc}", level=logging.ERROR, exc_info=True)
-            self._set_status(job, "failed", 1.0, error=str(exc))
+            job.error_kind, user_message = _classify_job_failure(exc)
+            self._set_status(job, "failed", 1.0, error=user_message)
             self._progress_save_times.pop(job.id, None)
 
     def _download_phase(self, job: JobRecord) -> None:
@@ -2510,25 +2616,108 @@ class JobManager(ClipOperationsMixin):
         if not force:
             # 应用自己写出的文件(mtime 与记录的戳一致)不是外部编辑,跳过;
             # 否则 srt 写在 segments.json 之后,每次 list_segments 都会误触发反向同步。
-            if job.subtitle_file_stamps.get(source_kind) == source_mtime:
+            recorded_stamp = job.subtitle_file_stamps.get(source_kind)
+            if recorded_stamp == source_mtime:
                 return None
-            if job.segments_path.exists() and job.segments_path.stat().st_mtime >= source_mtime:
+            # A differing application-written stamp is positive evidence of an
+            # external edit. Only use the JSON mtime fallback for legacy jobs
+            # which have no subtitle stamps at all.
+            if recorded_stamp is None and job.segments_path.exists() and job.segments_path.stat().st_mtime >= source_mtime:
                 return None
         text = source_path.read_text(encoding="utf-8-sig" if source_kind == "srt" else "utf-8")
         segments = parse_srt(text) if source_kind == "srt" else parse_ass(text)
         if not segments and text.strip():
             return None
+        segments = self._merge_external_segment_metadata(job, segments)
         style = SubtitleStyle.from_dict(job.subtitle_style) if job.subtitle_style else SubtitleStyle(font_size=48)
         self._write_subtitle_files(job, segments, style=style)
-        write_text(job.segments_path, export_json(segments))
         self._touch(job, error=None)
         return {"source": source_kind, "count": len(segments)}
 
+    def _merge_external_segment_metadata(
+        self,
+        job: JobRecord,
+        parsed: list[SubtitleSegment],
+    ) -> list[SubtitleSegment]:
+        """Keep engineering metadata when SRT/ASS only changes user-facing fields."""
+        if not job.segments_path.exists():
+            return parsed
+        try:
+            old = [
+                SubtitleSegment.from_dict(item)
+                for item in json.loads(job.segments_path.read_text(encoding="utf-8"))
+                if isinstance(item, dict)
+            ]
+        except Exception:
+            return parsed
+        if not old:
+            return parsed
+        exported = self._export_segments_for_job(job, old)
+        used: set[int] = set()
+        for index, segment in enumerate(parsed):
+            match_index: int | None = None
+            if index < len(old):
+                expected = exported[index]
+                if abs(segment.start - expected.start) <= 0.05 and abs(segment.end - expected.end) <= 0.05:
+                    match_index = index
+            if match_index is None:
+                best_score = 0.0
+                for candidate_index, candidate in enumerate(exported):
+                    if candidate_index in used:
+                        continue
+                    overlap = max(0.0, min(segment.end, candidate.end) - max(segment.start, candidate.start))
+                    union = max(segment.end, candidate.end) - min(segment.start, candidate.start)
+                    score = overlap / union if union > 0 else 0.0
+                    if score > best_score:
+                        best_score = score
+                        match_index = candidate_index
+                if best_score < 0.5:
+                    match_index = None
+            if match_index is None:
+                continue
+            used.add(match_index)
+            previous = old[match_index]
+            expected = exported[match_index]
+            unchanged_timing = (
+                abs(segment.start - expected.start) <= 0.05
+                and abs(segment.end - expected.end) <= 0.05
+            )
+            segment.id = previous.id
+            segment.confidence = previous.confidence
+            segment.quality_flags = previous.quality_flags
+            segment.quality_reasons = previous.quality_reasons
+            if unchanged_timing:
+                segment.start = previous.start
+                segment.end = previous.end
+            if previous.items:
+                segment.items = (
+                    list(previous.items)
+                    if previous.text == segment.text
+                    else align_items_to_text(previous.text, previous.items, segment.text)
+                )
+                if segment.items:
+                    segment.items = [
+                        SubtitleItem(
+                            text=item.text,
+                            start=max(segment.start, item.start),
+                            end=min(segment.end, max(item.end, segment.start + 0.01)),
+                        )
+                        for item in segment.items
+                        if item.end > segment.start and item.start < segment.end
+                    ] or None
+        return parsed
+
     def _select_subtitle_source(self, job: JobRecord, *, force: bool = False) -> tuple[Path | None, str | None]:
-        if job.srt_path.exists():
-            return job.srt_path, "srt"
-        if job.ass_path.exists():
-            return job.ass_path, "ass"
+        candidates = [(job.srt_path, "srt"), (job.ass_path, "ass")]
+        existing = [(path, kind) for path, kind in candidates if path.exists()]
+        changed = [
+            (path, kind) for path, kind in existing
+            if job.subtitle_file_stamps.get(kind) != path.stat().st_mtime
+        ]
+        if changed:
+            return max(changed, key=lambda item: item[0].stat().st_mtime_ns)
+        if force and existing:
+            return max(existing, key=lambda item: item[0].stat().st_mtime_ns)
         if force and job.segments_path.exists():
             return job.segments_path, "json"
         return None, None

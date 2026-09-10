@@ -439,7 +439,7 @@ def _dedupe_candidates(
                 end=round(merged_end, 2),
                 score=max(candidate.score, kept.score),
                 title=kept.title,
-                reason=kept.reason,
+                reason=_reason_with_duration(kept.reason, merged_end - merged_start),
                 text=kept.text if len(kept.text) >= len(candidate.text) else candidate.text,
                 segment_ids=list(dict.fromkeys([*kept.segment_ids, *candidate.segment_ids])),
             )
@@ -525,6 +525,7 @@ def _merge_adjacent_candidates(
             ):
                 previous.end = round(merged_end, 2)
                 previous.score = max(previous.score, candidate.score)
+                previous.reason = _reason_with_duration(previous.reason, previous.duration)
                 previous.text = previous.text if len(previous.text) >= len(candidate.text) else candidate.text
                 previous.segment_ids = list(dict.fromkeys([*previous.segment_ids, *candidate.segment_ids]))
                 continue
@@ -573,6 +574,17 @@ def _reason(hook_hits: int, ending_hits: int, question_bonus: float, duration: f
         parts.append("clear ending")
     if len(parts) == 1:
         parts.append("dense transcript window")
+    return ", ".join(parts)
+
+
+def _reason_with_duration(reason: str, duration: float) -> str:
+    """Refresh the leading duration after candidate ranges are merged."""
+    parts = [part.strip() for part in str(reason or "").split(",") if part.strip()]
+    duration_part = f"{max(0.0, duration):.0f}s"
+    if parts and re.fullmatch(r"\d+(?:\.\d+)?s", parts[0]):
+        parts[0] = duration_part
+    else:
+        parts.insert(0, duration_part)
     return ", ".join(parts)
 
 

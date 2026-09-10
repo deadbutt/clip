@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -73,13 +74,18 @@ def create_app(
     except ImportError as exc:
         raise RuntimeError("Install fastapi, uvicorn, and python-multipart to run the local web app.") from exc
 
-    app = FastAPI(title="蝶殇工作台")
     hub = EventHub()
 
-    @app.on_event("startup")
-    async def _bind_job_events() -> None:
+    @asynccontextmanager
+    async def _lifespan(_app):
         manager.bind_events(asyncio.get_running_loop(), hub)
         _purge_orphan_cookies_files(manager)
+        try:
+            yield
+        finally:
+            manager.shutdown(wait=True, timeout=5.0)
+
+    app = FastAPI(title="蝶殇工作台", lifespan=_lifespan)
 
     runner = WhisperRunner(model_path, device=device, dtype=dtype, language=language, beam_size=whisper_beam_size)
     manager = JobManager(
@@ -97,6 +103,7 @@ def create_app(
         diarization_device=diarization_device,
     )
     app.state.manager = manager
+
     # 同时进行的 clip 渲染(ffmpeg 编码进程)上限;整片烧录走 worker 单线程,不占此配额。
     clip_render_semaphore = asyncio.Semaphore(2)
     from .llm_profiles import LlmProfileStore
@@ -934,10 +941,8 @@ def _runner_runtime_info(runner) -> dict[str, Any]:
 
 
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#007d77"/>
-  <rect x="11" y="12" width="42" height="40" rx="8" fill="#fffdfa"/>
-  <rect x="16" y="17" width="32" height="19" rx="4" fill="#1d1f22"/>
-  <path d="M29 22v9.5l8.5-4.75z" fill="#c94b35"/>
-  <rect x="17" y="41" width="30" height="4" rx="2" fill="#007d77"/>
-  <rect x="17" y="48" width="21" height="3.5" rx="1.75" fill="#6d6a63"/>
+  <defs><linearGradient id="g" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse"><stop stop-color="#0b8f83"/><stop offset="1" stop-color="#14605e"/></linearGradient></defs>
+  <rect width="64" height="64" rx="18" fill="url(#g)"/>
+  <path d="M32 15c-6 9-15 13-15 22 0 6.6 5.4 12 12 12 2.3 0 4.4-.7 6.2-1.8A12 12 0 0 0 50 36c0-8-10-12-18-21Z" fill="#e7fffa" opacity=".96"/>
+  <path d="M32 27c-3.8 4.8-7 7.6-7 11.4a7 7 0 0 0 14 0C39 34.6 35.8 31.8 32 27Z" fill="#0b8f83" opacity=".72"/>
 </svg>"""

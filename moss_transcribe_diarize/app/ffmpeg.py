@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import shutil
 import subprocess
@@ -11,10 +12,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 ProgressCallback = Callable[[float], None]
+logger = logging.getLogger(__name__)
 
 
 class FFmpegCancelled(RuntimeError):
     """调用方通过 cancel_check 请求中止渲染时抛出，由 jobs 层转成任务取消。"""
+
+
+class FFmpegProcessError(RuntimeError):
+    """Concise user-facing FFmpeg failure with full diagnostics kept in logs."""
+
+    def __init__(self, return_code: int, detail: str) -> None:
+        super().__init__("媒体处理失败。请确认源文件可正常播放、磁盘空间充足后重试。")
+        self.return_code = return_code
+        self.detail = detail
 
 
 @dataclass(slots=True)
@@ -300,7 +311,8 @@ def _run_ffmpeg_with_progress(
     return_code = process.wait()
     if return_code != 0:
         detail = "\n".join(tail[-12:])
-        raise RuntimeError(f"ffmpeg failed with exit code {return_code}: {detail}")
+        logger.error("ffmpeg failed with exit code %s:\n%s", return_code, detail)
+        raise FFmpegProcessError(return_code, detail)
     if progress_callback is not None:
         progress_callback(1.0)
 

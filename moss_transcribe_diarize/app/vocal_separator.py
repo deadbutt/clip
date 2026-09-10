@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from .ffmpeg import detect_ffmpeg
 
@@ -20,6 +21,10 @@ DEMUCS_WEIGHTS = PROJECT_ROOT / "models" / "demucs-htdemucs" / "955717e8.safeten
 # 词间隙响度 / 语音响度 超过该比例视为存在持续背景音（音乐/吟唱）。
 # 纯人语音轨的间隙接近底噪（<0.05），持续 BGM 通常 >0.2。
 BACKGROUND_RATIO_THRESHOLD = 0.12
+
+
+class VocalSeparationCancelled(BaseException):
+    """Raised from a Demucs chunk callback when its owning job is cancelled."""
 
 
 def vocal_separation_available() -> bool:
@@ -42,6 +47,7 @@ def separate_vocals(
     work_dir: str | Path,
     *,
     device: str = "auto",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> Path | None:
     """把媒体的人声分离成 16k 单声道 wav，返回路径；失败返回 None。"""
     if not vocal_separation_available():
@@ -59,6 +65,12 @@ def separate_vocals(
         out = out_dir / "vocals_16k.wav"
         tmp44k = out_dir / "vocals_src_44k.wav"
 
+        def check_cancel(_progress: dict | None = None) -> None:
+            if cancel_check is not None and cancel_check():
+                raise VocalSeparationCancelled()
+
+        check_cancel()
+
         ffmpeg = detect_ffmpeg().ffmpeg
         # 音频抽取是短有界操作，超时说明 ffmpeg 挂死；TimeoutExpired
         # 走外层 except 的降级路径（返回 None，任务继续用原音轨跑）。
@@ -71,10 +83,18 @@ def separate_vocals(
         try:
             model = load_safetensors_model(str(DEMUCS_WEIGHTS)).eval().to(device)
             mix, sr = torchaudio.load(str(tmp44k))  # (2, T) 44100
+            check_cancel()
             with torch.no_grad():
                 estimates = apply_model(
-                    model, mix.unsqueeze(0), device=device, split=True, overlap=0.25, progress=False
+                    model,
+                    mix.unsqueeze(0),
+                    device=device,
+                    split=True,
+                    overlap=0.25,
+                    progress=False,
+                    callback=check_cancel,
                 )[0]  # (sources, 2, T)
+            check_cancel()
             vocals = estimates[model.sources.index("vocals")]
             mono = vocals.mean(dim=0, keepdim=True)
             res = torchaudio.functional.resample(mono, sr, 16000)
@@ -82,6 +102,12 @@ def separate_vocals(
         finally:
             tmp44k.unlink(missing_ok=True)
         return out if out.is_file() else None
+    except VocalSeparationCancelled:
+        try:
+            Path(work_dir, "vocals_16k.wav").unlink(missing_ok=True)
+        finally:
+            Path(work_dir, "vocals_src_44k.wav").unlink(missing_ok=True)
+        raise
     except Exception:
         return None
 

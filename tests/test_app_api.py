@@ -136,7 +136,7 @@ class SerialDemucsTest(unittest.TestCase):
                     temperature=None,
                 )
 
-        def fake_separate_vocals(src, work_dir):
+        def fake_separate_vocals(src, work_dir, **kwargs):
             order.append("demucs")
             return Path(work_dir) / "vocals_16k.wav"
 

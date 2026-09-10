@@ -146,6 +146,18 @@ def _format_eta(seconds: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def _decode_yt_dlp_line(raw: bytes | str) -> str:
+    if isinstance(raw, str):
+        return raw
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # The bundled Windows yt-dlp executable writes to pipes using the
+        # active ANSI code page (GBK on Chinese Windows), despite Python UTF-8
+        # environment flags. GB18030 is a strict superset for that output.
+        return raw.decode("gb18030", errors="replace")
+
+
 def check_cookies_file(path: str | Path) -> dict[str, Any]:
     p = Path(path)
     if not p.is_file():
@@ -283,17 +295,20 @@ def download_with_yt_dlp(
     try:
         # PyInstaller 打包的 yt-dlp 在管道 stdout 下按块缓冲，进度行会长期积压
         # 导致上层永远拿到 0%；PYTHONUNBUFFERED 强制逐行写出。
-        child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        child_env = {
+            **os.environ,
+            "PYTHONUNBUFFERED": "1",
+            # Windows pipes otherwise follow the active console code page while
+            # this parent decodes UTF-8, which turns CJK video titles into mojibake.
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        }
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             env=child_env,
             creationflags=creationflags,
-            bufsize=1,
         )
     except FileNotFoundError as e:
         raise RuntimeError(
@@ -321,7 +336,7 @@ def download_with_yt_dlp(
     def _pump_stdout() -> None:
         try:
             for raw in proc.stdout:
-                line_queue.put(raw)
+                line_queue.put(_decode_yt_dlp_line(raw))
         finally:
             line_queue.put(None)  # EOF 哨兵
 

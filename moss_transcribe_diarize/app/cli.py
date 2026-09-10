@@ -19,6 +19,7 @@ from moss_transcribe_diarize.subtitle import (
     write_text,
 )
 
+from .clip_service import _padded_export_segments
 from .clips import generate_clip_candidates, rebase_segments_for_clip
 from .ffmpeg import (
     burn_ass_subtitles,
@@ -126,7 +127,6 @@ def main() -> None:
             pyannote_model=args.pyannote_model,
             device=args.diarization_device,
         )
-        _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
         transcription_summary = {k: v for k, v in result.to_dict().items() if k != "text"}
         _apply_transcription_quality(segments, getattr(result, "segment_metrics", None))
 
@@ -176,9 +176,10 @@ def main() -> None:
     style = SubtitleStyle(show_speaker=False, speaker_colors=False)
     raw_transcript = write_text(out_dir / "raw_transcript.txt", raw_transcript_text)
     segments_path = write_text(out_dir / "segments.json", export_json(segments))
-    srt_path = write_text(out_dir / "subtitle.srt", export_srt(segments, show_speaker=style.show_speaker), encoding="utf-8-sig")
+    export_segments = _padded_export_segments(segments)
+    srt_path = write_text(out_dir / "subtitle.srt", export_srt(export_segments, show_speaker=style.show_speaker), encoding="utf-8-sig")
     width, height = probe_video_size(input_path)
-    ass_path = write_text(out_dir / "subtitle.ass", export_ass(segments, style=style, video_width=width, video_height=height), encoding="utf-8-sig")
+    ass_path = write_text(out_dir / "subtitle.ass", export_ass(export_segments, style=style, video_width=width, video_height=height), encoding="utf-8-sig")
 
     output_path = None
     if args.render:
@@ -211,9 +212,10 @@ def main() -> None:
                     continue
                 clip_ass_path = clips_dir / f"clip_{index:02d}.ass"
                 clip_mp4_path = clips_dir / f"clip_{index:02d}.mp4"
+                clip_export_segments = _padded_export_segments(clip_segments)
                 write_text(
                     clip_ass_path,
-                    export_ass(clip_segments, style=style, video_width=width, video_height=height),
+                    export_ass(clip_export_segments, style=style, video_width=width, video_height=height),
                     encoding="utf-8-sig",
                 )
                 burn_ass_subtitles_clip(input_path, clip_ass_path, clip_mp4_path, start=clip["start"], end=clip["end"], style=style)

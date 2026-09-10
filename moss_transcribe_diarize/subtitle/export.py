@@ -124,7 +124,7 @@ def parse_srt(text: str) -> list[SubtitleSegment]:
 
 def parse_ass(text: str) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
-    for index, line in enumerate((text or "").splitlines(), start=1):
+    for line in (text or "").splitlines():
         line = line.strip()
         if not line.startswith("Dialogue:"):
             continue
@@ -140,7 +140,7 @@ def parse_ass(text: str) -> list[SubtitleSegment]:
         speaker, text_body = _split_prefixed_speaker(body)
         segments.append(
             SubtitleSegment(
-                id=f"seg_{index:04d}",
+                id=f"seg_{len(segments) + 1:04d}",
                 start=start,
                 end=max(start, end),
                 speaker=speaker if speaker != "S00" or name == "S00" else name,

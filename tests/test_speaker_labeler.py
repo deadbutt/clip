@@ -76,6 +76,19 @@ class SpeakerLabelerTest(unittest.TestCase):
 
         self.assertEqual([segment.speaker for segment in labeled], ["S01", "S02", "S01"])
 
+    def test_assign_turns_preserves_short_existing_interjection(self):
+        segments = [
+            SubtitleSegment(id="seg_0001", start=18.56, end=18.66, speaker="", text="Yeah?"),
+        ]
+        turns = [(18.50, 18.75, "SPEAKER_07")]
+
+        labeled = _assign_turns_to_segments(segments, turns)
+
+        self.assertEqual(len(labeled), 1)
+        self.assertEqual(labeled[0].text, "Yeah?")
+        self.assertAlmostEqual(labeled[0].start, 18.56)
+        self.assertAlmostEqual(labeled[0].end, 18.66)
+
 
 if __name__ == "__main__":
     unittest.main()
