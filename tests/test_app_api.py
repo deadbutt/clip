@@ -803,6 +803,45 @@ class SegmentsCacheApiTest(unittest.TestCase):
             self.assertEqual([s["text"] for s in refetched.json()["segments"]], ["edited"])
             self.assertNotEqual(refetched.headers.get("etag"), etag)
 
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class AiTranslationRoutingApiTest(unittest.TestCase):
+    def test_translate_ai_uses_active_llm_profile(self):
+        from fastapi.testclient import TestClient
+
+        from moss_transcribe_diarize.app.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(model_path="fake-model", runs_dir=tmpdir, translator_provider="openai")
+            profile = app.state.llm_store.add_profile(
+                {
+                    "name": "Test AI",
+                    "base_url": "https://example.test/v1",
+                    "model": "test-model",
+                    "api_key": "test-key",
+                    "provider": "openai",
+                }
+            )
+            app.state.llm_store.set_active(profile["id"])
+            captured = {}
+
+            def fake_translate(_job_id, translator, **kwargs):
+                captured["translator"] = translator
+                captured["kwargs"] = kwargs
+                return {"segments": [], "count": 0}
+
+            app.state.manager.translate = fake_translate
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/jobs/job/translate",
+                    json={"engine": "ai", "target_language": "English"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(captured["translator"].base_url, "https://example.test/v1")
+            self.assertEqual(captured["translator"].model, "test-model")
+            self.assertEqual(captured["kwargs"]["engine"], "ai")
+            self.assertEqual(response.json()["translation_service"]["name"], "Test AI")
+
 
 if __name__ == "__main__":
     unittest.main()

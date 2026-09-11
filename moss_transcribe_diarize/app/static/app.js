@@ -45,6 +45,9 @@ const settingsModal = document.querySelector('#settingsModal');
 const openTranslateBtn = document.querySelector('#openTranslate');
 const closeTranslateBtn = document.querySelector('#closeTranslate');
 const translateModal = document.querySelector('#translateModal');
+const translateEngineSelect = document.querySelector('#translateEngine');
+const translateAiHintEl = document.querySelector('#translateAiHint');
+const llmServiceSummaryStateEl = document.querySelector('#llmServiceSummaryState');
 const openClipsBtn = document.querySelector('#openClips');
 const closeClipsBtn = document.querySelector('#closeClips');
 const clipsModal = document.querySelector('#clipsModal');
@@ -140,6 +143,10 @@ const translationReviewMetaEl = document.querySelector('#translationReviewMeta')
 const translationReviewListEl = document.querySelector('#translationReviewList');
 const findClipsBtn = document.querySelector('#findClips');
 const findClipsRulesBtn = document.querySelector('#findClipsRules');
+const startClipAnalysisBtn = document.querySelector('#startClipAnalysis');
+const clipActiveSourceLabelEl = document.querySelector('#clipActiveSourceLabel');
+const clipModelRunStateEl = document.querySelector('#clipModelRunState');
+const clipRulesRunStateEl = document.querySelector('#clipRulesRunState');
 const renderClipQueueBtn = document.querySelector('#renderClipQueue');
 const clipStatusEl = document.querySelector('#clipStatus');
 const clipListEl = document.querySelector('#clipList');
@@ -242,6 +249,10 @@ let translationReviewJobId = '';
 let dismissedAlignmentItems = new Set();
 let clipQueueJobId = '';
 let selectedClips = [];
+let clipSourceResults = { model: [], rules: [] };
+let activeClipSource = 'rules';
+let clipAnalysisBusy = false;
+let clipPersistenceTimer = 0;
 let activeClipId = '';
 let clipContextClipId = '';
 let clipClickSuppressUntil = 0;
@@ -343,6 +354,7 @@ function scheduleLayoutFit() {
 function openSettings() { settingsModal.classList.remove('is-hidden'); }
 function closeSettings() { settingsModal.classList.add('is-hidden'); }
 function openTranslate() {
+  loadLlmProfiles();
   updateTranslateAction();
   translateModal.classList.remove('is-hidden');
 }
@@ -893,10 +905,12 @@ nudgeStartRightBtn.addEventListener('click', () => nudgeActiveSegment('start', 0
 nudgeEndLeftBtn.addEventListener('click', () => nudgeActiveSegment('end', -0.1));
 nudgeEndRightBtn.addEventListener('click', () => nudgeActiveSegment('end', 0.1));
 settingsSaveBtn.addEventListener('click', () => { saveSegments(); });
-findClipsBtn.addEventListener('click', () => findClipCandidates('model'));
-findClipsRulesBtn.addEventListener('click', () => findClipCandidates('rules'));
+findClipsBtn.addEventListener('click', () => selectClipSource('model'));
+findClipsRulesBtn.addEventListener('click', () => selectClipSource('rules'));
+startClipAnalysisBtn.addEventListener('click', () => findClipCandidates(activeClipSource));
 if (renderClipQueueBtn) renderClipQueueBtn.addEventListener('click', renderQueuedClips);
 translateZhBtn.addEventListener('click', translateCurrentSubtitles);
+translateEngineSelect?.addEventListener('change', updateTranslateAction);
 restoreTranslationBtn.addEventListener('click', restoreSourceSubtitles);
 translationReviewListEl.addEventListener('click', (event) => {
   const button = event.target.closest('[data-review-action]');
@@ -1426,6 +1440,12 @@ function updateTranslateProgress(job) {
 
 function renderTranslationReview(jobOrPayload) {
   const translation = translationPayload(jobOrPayload);
+  if (translation.engine === 'local' || translation.translation_engine === 'local') {
+    translationReviewEl.classList.add('is-hidden');
+    translationReviewMetaEl.textContent = '';
+    translationReviewListEl.innerHTML = '';
+    return;
+  }
   const issues = Array.isArray(translation.validation_issues) ? translation.validation_issues : [];
   const skips = Array.isArray(translation.pretranslation_skips) ? translation.pretranslation_skips : [];
   const reviewItems = [
@@ -1596,6 +1616,7 @@ async function deleteJob(jobId) {
   const res = await fetch(apiUrl(`api/jobs/${jobId}`), { method: 'DELETE' });
   if (!res.ok) return;
   if (currentJob && currentJob.id === jobId) {
+    try { localStorage.removeItem(clipStorageKey(jobId)); } catch (err) { /* ignore */ }
     currentJob = null;
     stopSubtitleSyncPolling();
     preview.removeAttribute('src');
@@ -2205,6 +2226,7 @@ function mergeClipWithNeighbors(clipId) {
   activeClipId = merged.id;
   renderClipQueue();
   renderTimelineClipRanges();
+  persistClipSourceState();
   clipStatusEl.textContent = `已合并为 ${formatTimelineTime(start)} - ${formatTimelineTime(end)}。`;
 }
 
@@ -2376,6 +2398,7 @@ function mergeTouchingClips(clipId) {
   activeClipId = merged.id;
   renderClipQueue();
   renderTimelineClipRanges();
+  persistClipSourceState();
   clipStatusEl.textContent = `已合并 ${formatTimelineTime(start)} - ${formatTimelineTime(end)}。`;
   return true;
 }
@@ -3642,9 +3665,12 @@ async function runProofread() {
   if (!saved) return;
   proofreadRunBtn.disabled = true;
   const translated = !!(currentJob.translation && currentJob.translation.source_available);
-  proofreadStatusEl.textContent = translated
+  const needsAlignment = translated && currentJob.translation.engine !== 'local';
+  proofreadStatusEl.textContent = needsAlignment
     ? '校对中...（源稿错字修正 + 术语分析 + 译文对照检查）'
-    : '校对中...（错字修正 + 全片术语分析）';
+    : translated
+      ? '校对中...（源稿错字修正 + 术语分析；本地译文不做 AI 对照）'
+      : '校对中...（错字修正 + 全片术语分析）';
   proofreadProgressMetaEl.classList.remove('is-hidden');
   proofreadProgressEl.classList.remove('is-hidden');
   proofreadProgressTextEl.textContent = '0%';
@@ -3845,6 +3871,7 @@ async function loadLlmProfiles() {
     const data = await res.json();
     llmProfiles = data || { active_id: null, profiles: [] };
     renderLlmProfiles();
+    updateTranslateAction();
     updateProofreadAction();
     updateClipActions();
   } catch (err) { /* ignore */ }
@@ -3853,23 +3880,30 @@ async function loadLlmProfiles() {
 function renderLlmProfiles() {
   const profiles = (llmProfiles && llmProfiles.profiles) || [];
   const activeId = llmProfiles && llmProfiles.active_id;
+  if (llmServiceSummaryStateEl) {
+    const active = profiles.find((profile) => profile.id === activeId);
+    llmServiceSummaryStateEl.textContent = active ? `已启用 · ${active.name || active.model || 'AI 服务'}` : '未配置';
+    llmServiceSummaryStateEl.classList.toggle('is-connected', !!active);
+  }
   if (!profiles.length) {
-    llmProfileListEl.innerHTML = '<div class="meta">还没有 API 配置。点击"新增配置"添加一个。</div>';
+    llmProfileListEl.innerHTML = '<div class="ai-service-empty"><strong>还没有服务配置</strong><span>添加一个 OpenAI 兼容或 Ollama 服务，用于校对、翻译和精华切片。</span></div>';
     return;
   }
   llmProfileListEl.innerHTML = profiles.map((p) => `
-    <div class="llm-profile-item ${p.id === activeId ? 'active' : ''}" data-profile-id="${escapeHtml(p.id)}">
+    <div class="llm-profile-item ${p.id === activeId ? 'active' : ''}" data-profile-id="${escapeHtml(p.id)}" data-provider="${escapeHtml(p.provider || 'openai')}">
+      <div class="llm-profile-mark" aria-hidden="true">${p.provider === 'ollama' ? 'OL' : 'AI'}</div>
       <div class="llm-profile-item-info">
         <div class="llm-profile-item-name">
           <span>${escapeHtml(p.name || '未命名')}</span>
-          ${p.id === activeId ? '<span class="active-badge">使用中</span>' : ''}
+          ${p.id === activeId ? '<span class="active-badge"><i></i> 当前使用</span>' : ''}
         </div>
-        <div class="llm-profile-item-meta">${escapeHtml(p.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容')} · ${escapeHtml(p.model || '默认模型')} · ${escapeHtml(p.base_url || '')} · ${escapeHtml(p.api_key_masked || '无 Key')}</div>
+        <div class="llm-profile-item-meta"><span>${escapeHtml(p.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容')}</span><b>·</b><span>${escapeHtml(p.model || '默认模型')}</span></div>
+        <div class="llm-profile-item-endpoint">${escapeHtml(p.base_url || '未填写 Base URL')} <span>${escapeHtml(p.api_key_masked || '无 API Key')}</span></div>
       </div>
       <div class="llm-profile-item-actions">
-        ${p.id === activeId ? '' : `<button class="ghost small" type="button" data-llm-action="activate">启用</button>`}
-        <button class="ghost small" type="button" data-llm-action="edit">编辑</button>
-        <button class="ghost small" type="button" data-llm-action="delete">删除</button>
+        ${p.id === activeId ? '' : `<button class="ghost small" type="button" data-llm-action="activate">设为当前</button>`}
+        <button class="icon-action" type="button" data-llm-action="edit" title="编辑服务" aria-label="编辑服务">✎</button>
+        <button class="icon-action danger" type="button" data-llm-action="delete" title="删除服务" aria-label="删除服务">×</button>
       </div>
     </div>`).join('');
 }
@@ -3938,6 +3972,7 @@ llmProfileListEl.addEventListener('click', async (event) => {
       if (!res.ok) throw new Error(data.detail || '切换失败');
       llmProfiles = data;
       renderLlmProfiles();
+      updateTranslateAction();
       updateProofreadAction();
       updateClipActions();
     } else if (action === 'edit') {
@@ -3950,6 +3985,7 @@ llmProfileListEl.addEventListener('click', async (event) => {
       if (!res.ok) throw new Error(data.detail || '删除失败');
       llmProfiles = data;
       renderLlmProfiles();
+      updateTranslateAction();
       updateProofreadAction();
       updateClipActions();
     }
@@ -4008,8 +4044,18 @@ async function testLlmProfile() {
 }
 
 async function translateCurrentSubtitles() {
-  if (!currentJob || !translatorAvailable) {
-    translateStatusEl.textContent = '翻译服务未启动。请用 start_ollama.bat 或 start_vllm.bat 启动。';
+  const engine = translateEngineSelect?.value || 'local';
+  const active = activeLlmProfile();
+  if (!currentJob) {
+    translateStatusEl.textContent = '请先打开一个任务。';
+    return;
+  }
+  if (engine === 'local' && !translatorAvailable) {
+    translateStatusEl.textContent = '本地翻译模型未启动，请切换到 AI 服务，或用 start.bat 启动本地模型。';
+    return;
+  }
+  if (engine === 'ai' && !active) {
+    translateStatusEl.textContent = '还没有启用 AI 服务，请先在首页 AI 服务中添加并启用一个配置。';
     return;
   }
   const saved = await saveSegments();
@@ -4040,6 +4086,7 @@ async function translateCurrentSubtitles() {
       body: JSON.stringify({
         target_language: targetLanguageInput.value || '简体中文',
         mode: translateModeSelect.value || 'bilingual',
+        engine,
         protected_terms: translateProtectedTermsInput.value || ''
       })
     });
@@ -4053,6 +4100,8 @@ async function translateCurrentSubtitles() {
         validation_issues: data.validation_issues || [],
         pretranslation_skip_count: data.pretranslation_skip_count || 0,
         pretranslation_skips: data.pretranslation_skips || [],
+        engine: data.translation_engine || engine,
+        service: data.translation_service || null,
       }
     };
     renderSegments(data.segments || [], activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
@@ -4070,13 +4119,30 @@ async function translateCurrentSubtitles() {
 
 function updateTranslateAction() {
   const busy = currentJob && RUNNING_STATES.has(currentJob.status);
-  translateZhBtn.disabled = !translatorAvailable || !currentJob || busy;
-  translateZhBtn.textContent = translatorAvailable ? '开始翻译' : '翻译模型未启动';
+  const engine = translateEngineSelect?.value || 'local';
+  const active = activeLlmProfile();
+  const ready = engine === 'ai' ? !!active : translatorAvailable;
+  translateZhBtn.disabled = !ready || !currentJob || busy;
+  translateZhBtn.textContent = ready ? '开始翻译' : (engine === 'ai' ? '请先配置 AI' : '本地模型未启动');
   openTranslateBtn.disabled = !currentJob;
-  const model = translatorInfo.model || 'Qwen2.5-3B-Instruct-AWQ';
-  translateModelStatusEl.textContent = translatorAvailable
-    ? `已配置本地模型：${model}。翻译前会自动保留英文底稿。`
-    : '未配置本地翻译模型。请在前台运行 start_ollama.bat 或 start_vllm.bat 后重新打开工作台。';
+  const model = translatorInfo.model || 'Opus-MT';
+  if (engine === 'ai') {
+    translateModelStatusEl.textContent = active
+      ? `当前 AI 服务：${active.name || '未命名'} · ${active.model || '默认模型'}。翻译前会自动保留原字幕。`
+      : '尚未启用 AI 服务。请在首页 AI 服务中添加配置。';
+    if (translateAiHintEl) {
+      translateAiHintEl.textContent = active
+        ? `已连接 ${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'} · ${active.model || '默认模型'}，可翻译成任意目标语言。`
+        : 'AI 翻译会使用首页当前启用的服务配置。';
+    }
+  } else {
+    translateModelStatusEl.textContent = translatorAvailable
+      ? `本地 Opus-MT：${model} · 仅支持英译中。翻译前会自动保留英文底稿。`
+      : '本地 Opus-MT 未启动；也可以切换到 AI 服务翻译。';
+    if (translateAiHintEl) translateAiHintEl.textContent = '本地引擎适合快速批量翻译，不会调用网络服务。';
+  }
+  if (translateAiHintEl) translateAiHintEl.classList.remove('is-hidden');
+  if (targetLanguageInput) targetLanguageInput.disabled = engine === 'local';
   const translation = (currentJob && currentJob.translation) || {};
   restoreTranslationBtn.disabled = !currentJob || !translation.source_available || busy;
   updateTranslateProgress(currentJob);
@@ -4088,6 +4154,9 @@ function translationDoneStatus(data) {
   const issueCount = Number(data.validation_issue_count || 0);
   const skipCount = Number(data.pretranslation_skip_count || 0);
   const extras = [];
+  const service = data.translation_service;
+  if (data.translation_engine === 'ai' && service) extras.push(`AI · ${service.name || service.model || '当前服务'}`);
+  else if (data.translation_engine === 'local') extras.push('本地 Opus-MT');
   if (skipCount) extras.push(`自动跳过 ${skipCount} 条`);
   if (issueCount) extras.push(`可疑 ${issueCount} 条`);
   return '已翻译 ' + count + ' 条字幕' + (extras.length ? '，' + extras.join('，') : '') + '。';
@@ -4202,6 +4271,80 @@ function useActiveSegmentAsClipRange() {
   clipStatusEl.textContent = '已把当前字幕时间写入当前切片。';
 }
 
+function clipStorageKey(jobId) {
+  return `mtd-clip-sources:${encodeURIComponent(String(jobId || ''))}`;
+}
+
+function persistClipSourceState(jobId = currentJob && currentJob.id) {
+  if (!jobId || !clipQueueJobId) return;
+  clipSourceResults[activeClipSource] = selectedClips.map((clip) => ({ ...clip }));
+  try {
+    localStorage.setItem(clipStorageKey(jobId), JSON.stringify({
+      activeSource: activeClipSource,
+      sources: clipSourceResults,
+    }));
+  } catch (err) { /* Ignore a disabled/full browser storage. */ }
+}
+
+function scheduleClipStatePersistence() {
+  if (!currentJob) return;
+  if (clipPersistenceTimer) clearTimeout(clipPersistenceTimer);
+  clipPersistenceTimer = setTimeout(() => {
+    clipPersistenceTimer = 0;
+    persistClipSourceState();
+  }, 180);
+}
+
+function loadClipSourceState(jobId) {
+  let stored = null;
+  try {
+    stored = JSON.parse(localStorage.getItem(clipStorageKey(jobId)) || 'null');
+  } catch (err) { stored = null; }
+  const sources = stored && stored.sources ? stored.sources : {};
+  clipSourceResults = {
+    model: Array.isArray(sources.model) ? sources.model : [],
+    rules: Array.isArray(sources.rules) ? sources.rules : [],
+  };
+  activeClipSource = stored && ['model', 'rules'].includes(stored.activeSource)
+    ? stored.activeSource
+    : (clipSourceResults.rules.length ? 'rules' : 'model');
+}
+
+function syncClipSourceTabs() {
+  const sourceLabels = { model: 'AI 精切', rules: '规则粗筛' };
+  const modelCount = clipSourceResults.model.length;
+  const rulesCount = clipSourceResults.rules.length;
+  if (clipModelRunStateEl) clipModelRunStateEl.textContent = modelCount ? `${modelCount} 个结果` : '未运行';
+  if (clipRulesRunStateEl) clipRulesRunStateEl.textContent = rulesCount ? `${rulesCount} 个结果` : '未运行';
+  [findClipsBtn, findClipsRulesBtn].forEach((button) => {
+    if (!button) return;
+    const active = button.dataset.clipSource === activeClipSource;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  if (clipActiveSourceLabelEl) clipActiveSourceLabelEl.textContent = `当前查看：${sourceLabels[activeClipSource]}`;
+  if (startClipAnalysisBtn) startClipAnalysisBtn.textContent = clipSourceResults[activeClipSource].length ? '重新切' : '开始切';
+}
+
+function selectClipSource(source) {
+  if (!['model', 'rules'].includes(source) || !currentJob || clipAnalysisBusy) return;
+  if (source === activeClipSource) {
+    syncClipSourceTabs();
+    return;
+  }
+  persistClipSourceState();
+  activeClipSource = source;
+  selectedClips = clipSourceResults[source].map((clip, index) => normalizeQueuedClip(clip, `candidate_${Date.now()}_${index}`));
+  activeClipId = selectedClips[0]?.id || '';
+  renderClipQueue();
+  renderTimelineClipRanges();
+  const clip = activeClip();
+  if (clip) setClipRange(clip.start, clip.end, false);
+  syncClipSourceTabs();
+  clipStatusEl.textContent = `已切换到${source === 'model' ? ' AI 精切' : '规则粗筛'}结果。`;
+  updateClipActions();
+}
+
 async function findClipCandidates(strategy = 'model') {
   if (!currentJob) return;
   if (strategy === 'model' && !activeLlmProfile()) {
@@ -4210,8 +4353,8 @@ async function findClipCandidates(strategy = 'model') {
   }
   const saved = await saveSegments();
   if (!saved) return;
-  findClipsBtn.disabled = true;
-  findClipsRulesBtn.disabled = true;
+  clipAnalysisBusy = true;
+  updateClipActions();
   clipStatusEl.textContent = strategy === 'model' ? '正在生成候选并让模型评选...' : '正在按结构和时长粗筛...';
   try {
     const limit = strategy === 'model' ? 8 : 24;
@@ -4219,28 +4362,39 @@ async function findClipCandidates(strategy = 'model') {
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips?limit=${limit}&strategy=${strategy}`), { cache: 'no-store' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '查找候选片段失败');
-    replaceClipQueue(data.clips || []);
+    clipSourceResults[strategy] = Array.isArray(data.clips) ? data.clips : [];
+    activeClipSource = strategy;
+    replaceClipQueue(clipSourceResults[strategy]);
+    persistClipSourceState();
+    syncClipSourceTabs();
+    const filter = data.selection_filter || {};
+    const filteredNote = strategy === 'model' && ((filter.duplicate_dropped || 0) + (filter.overlap_dropped || 0))
+      ? ` 已自动去掉 ${Number(filter.duplicate_dropped || 0) + Number(filter.overlap_dropped || 0)} 个重复/重叠结果。`
+      : '';
     clipStatusEl.textContent = (data.clips || []).length
-      ? (strategy === 'model' ? 'AI 精选完成。仍建议回看原片并微调边界。' : '规则粗筛完成：高分主候选在上轨，重复备选在下轨。')
+      ? (strategy === 'model' ? `AI 精选完成。${filteredNote}仍建议回看原片并微调边界。` : '规则粗筛完成：高分主候选在上轨，重复备选在下轨。')
       : '没有找到合适候选片段。';
   } catch (err) {
     clipStatusEl.textContent = '查找候选片段失败：' + (err.message || err);
   } finally {
-    findClipsBtn.disabled = false;
-    findClipsRulesBtn.disabled = false;
+    clipAnalysisBusy = false;
     updateClipActions();
   }
 }
 
 function updateClipActions() {
   openClipsBtn.disabled = !currentJob;
-  findClipsBtn.disabled = !activeLlmProfile() || !currentJob;
-  findClipsRulesBtn.disabled = !currentJob;
+  findClipsBtn.disabled = !currentJob || clipAnalysisBusy;
+  findClipsRulesBtn.disabled = !currentJob || clipAnalysisBusy;
+  if (startClipAnalysisBtn) {
+    startClipAnalysisBtn.disabled = !currentJob || clipAnalysisBusy || (activeClipSource === 'model' && !activeLlmProfile());
+  }
   if (renderClipQueueBtn) renderClipQueueBtn.disabled = !currentJob || !ffmpegAvailable || !selectedClips.length;
   const active = activeLlmProfile();
   clipModelStatusEl.textContent = active
     ? `AI 精选使用 ${active.model || '默认模型'}（${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'}）；候选会显示在主时间轴。`
     : 'AI 精选未启用（首页未配置 AI 服务）；当前只能规则粗筛。';
+  syncClipSourceTabs();
 }
 
 function renderClipCandidates(clips) {
@@ -4271,6 +4425,7 @@ clipListEl.addEventListener('click', (event) => {
 
 function replaceClipQueue(clips) {
   selectedClips = (Array.isArray(clips) ? clips : []).map((clip, index) => normalizeQueuedClip(clip, `candidate_${Date.now()}_${index}`));
+  clipSourceResults[activeClipSource] = selectedClips.map((clip) => ({ ...clip }));
   activeClipId = selectedClips[0]?.id || '';
   renderClipQueue();
   renderTimelineClipRanges();
@@ -4292,10 +4447,19 @@ function addCandidateToQueue(source) {
 function ensureClipQueueForJob() {
   const jobId = currentJob ? currentJob.id : '';
   if (clipQueueJobId === jobId) return;
+  persistClipSourceState(clipQueueJobId);
   clipQueueJobId = jobId;
-  selectedClips = [];
-  activeClipId = '';
+  if (jobId) {
+    loadClipSourceState(jobId);
+    selectedClips = clipSourceResults[activeClipSource].map((clip, index) => normalizeQueuedClip(clip, `candidate_${Date.now()}_${index}`));
+  } else {
+    clipSourceResults = { model: [], rules: [] };
+    activeClipSource = 'rules';
+    selectedClips = [];
+  }
+  activeClipId = selectedClips[0]?.id || '';
   renderClipQueue();
+  syncClipSourceTabs();
   syncClipEditor();
 }
 
@@ -4330,6 +4494,7 @@ function moveQueuedClip(id, delta) {
   selectedClips.splice(next, 0, clip);
   activeClipId = id;
   renderClipQueue();
+  persistClipSourceState();
 }
 
 function removeQueuedClip(id) {
@@ -4344,6 +4509,7 @@ function removeQueuedClip(id) {
   const clip = activeClip();
   if (clip) setClipRange(clip.start, clip.end, false);
   else updateTimelineClipRange();
+  persistClipSourceState();
   updateClipActions();
 }
 
@@ -4356,8 +4522,9 @@ function renderClipQueue() {
       : `${selectedClips.length} 个`;
   }
   if (!selectedClips.length) {
-    clipListEl.innerHTML = '<div class="clip-empty">点击“AI 精选”或“规则粗筛”后，候选会出现在这里，并同步显示在主时间轴。</div>';
+    clipListEl.innerHTML = '<div class="clip-empty">先选择上方的切片来源，再点击“开始切”；生成后会显示在这里，并同步到主时间轴。</div>';
     updateTimelineClipRange();
+    scheduleClipStatePersistence();
     return;
   }
   clipListEl.innerHTML = selectedClips.map((clip, index) => `
@@ -4379,6 +4546,7 @@ function renderClipQueue() {
     </div>
   `).join('');
   updateTimelineClipRange();
+  scheduleClipStatePersistence();
 }
 
 function syncClipEditor() {
@@ -4399,6 +4567,7 @@ function updateClipFromValues(id, values = {}) {
   activeClipId = id;
   renderClipQueue();
   setClipRange(clip.start, clip.end, values.seek);
+  scheduleClipStatePersistence();
   updateClipActions();
 }
 

@@ -1523,6 +1523,8 @@ class JobManager(ClipOperationsMixin):
         target_language: str = "简体中文",
         mode: str = "replace",
         batch_size: int | None = None,
+        engine: str | None = None,
+        service: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         job = self.get_job(job_id)
         if job.status in RUNNING_STATES:
@@ -1539,11 +1541,16 @@ class JobManager(ClipOperationsMixin):
                 segments = [SubtitleSegment.from_dict(item) for item in source_payload]
                 pretranslation_skips = collect_pretranslation_skips(segments)
                 started = time.time()
+                translation_details = {
+                    "engine": engine or ("local" if getattr(translator, "provider", "") == "" else "ai"),
+                    "service": service,
+                }
 
                 def update_translation_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
                     ratio = 1.0 if total <= 0 else max(0.0, min(1.0, done / total))
                     self.job_log(job, f"翻译进度 {done}/{total}（批 {batch_start + 1}/{batch_count}）")
                     job.translation_info = {
+                        **translation_details,
                         "applied": False,
                         "in_progress": True,
                         "model": getattr(translator, "model", None),
@@ -1560,6 +1567,7 @@ class JobManager(ClipOperationsMixin):
                     self._set_status(job, "translating", 0.95 + 0.04 * ratio, error=None)
 
                 job.translation_info = {
+                    **translation_details,
                     "applied": False,
                     "in_progress": True,
                     "model": getattr(translator, "model", None),
@@ -1584,6 +1592,7 @@ class JobManager(ClipOperationsMixin):
                 translated = apply_translations(segments, translations, mode=mode)
                 self._write_subtitle_files(job, translated)
                 job.translation_info = {
+                    **translation_details,
                     "applied": True,
                     "in_progress": False,
                     "model": getattr(translator, "model", None),
@@ -1670,16 +1679,19 @@ class JobManager(ClipOperationsMixin):
                     for item in json.loads(target_path.read_text(encoding="utf-8"))
                 ]
                 started = time.time()
-                translated = target_kind == "source"
+                has_translation = target_kind == "source"
+                # 本地 Opus-MT 已经是确定性机器翻译，不再额外调用 LLM 做译文对照；
+                # AI 翻译仍保留这一步，用于检查漏译、错译和术语不一致。
+                needs_alignment = has_translation and job.translation_info.get("engine") != "local"
 
                 def update_proofread_progress(phase: str, done: int, total: int) -> None:
                     if phase == "pass1":
-                        if translated:
+                        if needs_alignment:
                             ratio = 0.5 * (done / total) if total else 0.5
                         else:
                             ratio = 0.7 * (done / total) if total else 0.7
                     else:
-                        ratio = 0.6 if translated else 1.0
+                        ratio = 0.6 if needs_alignment else 1.0
                     self.job_log(job, f"校对进度 phase={phase} {done}/{total}")
                     job.proofread_info = {
                         **job.proofread_info,
@@ -1707,7 +1719,7 @@ class JobManager(ClipOperationsMixin):
                 result = proofreader.proofread(segments, progress_callback=update_proofread_progress)
                 # 一键校对: 已翻译任务在校对源稿之后追加译文对照检查(只读标注)。
                 alignment_payload: dict[str, Any] | None = None
-                if translated:
+                if needs_alignment:
                     try:
                         pairs = self._alignment_pairs(job)
                         if pairs:

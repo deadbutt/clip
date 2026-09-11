@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -7,6 +8,8 @@ from typing import Callable, Iterable
 from moss_transcribe_diarize.subtitle import SubtitleSegment
 
 from .text_translator import translation_skip_reason
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_OPUS_MODEL_DIR = Path("models/opus-mt-en-zh-ct2-int8")
 DEFAULT_OPUS_TOKENIZER_DIR = Path("models/opus-mt-en-zh")
@@ -112,15 +115,40 @@ class LocalMtTranslator:
 
         translated_by_index = dict(passthrough)
         if source_tokens:
-            results = self._translator.translate_batch(
-                source_tokens,
-                beam_size=max(1, int(self.beam_size)),
-                max_batch_size=max(1, len(source_tokens)),
-            )
+            try:
+                results = self._translate_tokens(source_tokens)
+            except (RuntimeError, OSError) as exc:
+                if self.device != "auto":
+                    raise
+                logger.warning(
+                    "CTranslate2 GPU translation is unavailable (%s); retrying on CPU int8.",
+                    exc,
+                )
+                self._switch_to_cpu()
+                results = self._translate_tokens(source_tokens)
             for index, result in zip(source_indexes, results):
                 hypothesis = result.hypotheses[0] if result.hypotheses else []
                 translated_by_index[index] = self._decode(hypothesis)
         return [translated_by_index.get(index, str(segment.text or "")) for index, segment in enumerate(segments)]
+
+    def _translate_tokens(self, source_tokens: list[list[str]]) -> list[object]:
+        assert self._translator is not None
+        return self._translator.translate_batch(
+            source_tokens,
+            beam_size=max(1, int(self.beam_size)),
+            max_batch_size=max(1, len(source_tokens)),
+        )
+
+    def _switch_to_cpu(self) -> None:
+        import ctranslate2
+
+        self._translator = ctranslate2.Translator(
+            str(self.model_dir),
+            device="cpu",
+            compute_type="int8",
+        )
+        self.device = "cpu"
+        self.compute_type = "int8"
 
     def _decode(self, tokens: list[str]) -> str:
         assert self._target_sp is not None

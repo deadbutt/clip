@@ -38,6 +38,15 @@
                 <span>transcribe / diarize / deliver</span>
               </div>
             </div>
+            <div class="workflow-strip" aria-label="工作流程">
+              <div class="workflow-step active"><span>1</span><strong>导入</strong><small>文件或链接</small></div>
+              <i aria-hidden="true"></i>
+              <div class="workflow-step"><span>2</span><strong>转写</strong><small>Whisper + 说话人</small></div>
+              <i aria-hidden="true"></i>
+              <div class="workflow-step"><span>3</span><strong>校对</strong><small>字幕与翻译</small></div>
+              <i aria-hidden="true"></i>
+              <div class="workflow-step"><span>4</span><strong>交付</strong><small>SRT / 视频 / 切片</small></div>
+            </div>
             <div class="tab-bar">
               <button class="tab-btn active" data-tab="upload">上传文件</button>
               <button class="tab-btn" data-tab="url">链接下载</button>
@@ -138,12 +147,23 @@
             <div id="pendingList" class="pending-list"></div>
             <button id="upload" class="primary">全部开始转写</button>
             <div id="importError" class="error" style="margin-top:10px"></div>
-            <details class="cookies-settings">
-              <summary>AI 服务（校对 / 翻译用 LLM API）</summary>
-              <div class="cookies-body">
+            <details class="cookies-settings ai-service-settings" open>
+              <summary>
+                <span class="ai-service-summary-title">AI 服务</span>
+                <span class="ai-service-summary-note">校对 · 翻译 · 精华切片</span>
+                <span id="llmServiceSummaryState" class="ai-service-summary-state">未配置</span>
+              </summary>
+              <div class="cookies-body ai-service-body">
+                <div class="ai-service-intro">
+                  <span class="ai-service-intro-icon" aria-hidden="true">AI</span>
+                  <div>
+                    <strong>连接一个兼容 OpenAI 的服务</strong>
+                    <p>激活后可用于 AI 校对、AI 翻译、译文审查和精华切片。密钥只保存在本机。</p>
+                  </div>
+                </div>
                 <div id="llmProfileList" class="llm-profile-list"></div>
-                <div class="actions" style="margin-top:8px">
-                  <button id="llmProfileAdd" class="ghost small" type="button">新增配置</button>
+                <div class="actions ai-service-actions">
+                  <button id="llmProfileAdd" class="ghost small add-profile-btn" type="button"><span aria-hidden="true">+</span> 新增服务配置</button>
                 </div>
                 <div id="llmProfileEditor" class="llm-profile-editor is-hidden">
                   <div class="row">
@@ -232,7 +252,7 @@
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
           <button id="openProofread" class="ghost" type="button">AI 校对</button>
-          <button id="openTranslate" class="ghost" type="button">英译中</button>
+          <button id="openTranslate" class="ghost" type="button">翻译</button>
           <button id="openClips" class="ghost" type="button">精华切片</button>
           <button id="render" class="warn" disabled>检测 FFmpeg...</button>
           <button id="openSettings" class="ghost icon-btn" type="button" title="设置" aria-label="设置">⚙</button>
@@ -349,11 +369,25 @@
         <div id="translateModal" class="settings-modal is-hidden">
           <div class="settings-modal-card">
             <div class="settings-modal-head">
-              <strong>英译中</strong>
+              <div>
+                <strong>翻译</strong>
+                <span class="modal-subtitle">把当前字幕翻译成目标语言</span>
+              </div>
               <button id="closeTranslate" class="ghost small" type="button" aria-label="关闭">✕</button>
             </div>
             <div class="settings-modal-body">
               <div id="translateModelStatus" class="meta model-state"></div>
+              <div class="translation-engine-field">
+                <div class="field-heading">
+                  <label for="translateEngine">翻译引擎</label>
+                  <span class="meta">可随时切换，不影响原字幕</span>
+                </div>
+                <select id="translateEngine">
+                  <option value="local" selected>本地 Opus-MT · 快速、免费</option>
+                  <option value="ai">AI 服务 · 更自然、支持多语言</option>
+                </select>
+                <div id="translateAiHint" class="translation-ai-hint is-hidden"></div>
+              </div>
               <div class="row">
                 <div>
                   <label for="translateMode">字幕模式</label>
@@ -375,7 +409,7 @@
               <div id="translateStatus" class="export-status"></div>
               <div id="translationReview" class="translation-review is-hidden">
                 <div class="translation-review-head">
-                  <strong>翻译审查</strong>
+                  <strong>AI 翻译审查</strong>
                   <span id="translationReviewMeta" class="meta"></span>
                 </div>
                 <div id="translationReviewList" class="translation-review-list"></div>
@@ -392,10 +426,20 @@
             <div class="settings-modal-body">
               <div id="clipModelStatus" class="meta model-state"></div>
               <div class="clip-tools">
-                <div class="clip-modal-actions">
-                  <button id="findClips" class="primary small" type="button">AI 精选</button>
-                  <button id="findClipsRules" class="ghost small" type="button">规则粗筛</button>
-                  <span class="clip-modal-hint">主时间轴上轨是高分主候选，下轨是重复备选；两层都可以拖动、拉伸和合并。</span>
+                <div class="clip-mode-bar">
+                  <div class="clip-source-tabs" role="tablist" aria-label="切片来源">
+                    <button id="findClips" class="clip-source-tab" type="button" role="tab" data-clip-source="model" aria-selected="false">
+                      <span class="clip-source-tab-title">AI 精切</span><small id="clipModelRunState">未运行</small>
+                    </button>
+                    <button id="findClipsRules" class="clip-source-tab" type="button" role="tab" data-clip-source="rules" aria-selected="false">
+                      <span class="clip-source-tab-title">规则粗筛</span><small id="clipRulesRunState">未运行</small>
+                    </button>
+                  </div>
+                  <button id="startClipAnalysis" class="primary small" type="button">开始切</button>
+                </div>
+                <div class="clip-active-source-line">
+                  <strong id="clipActiveSourceLabel">当前查看：规则粗筛</strong>
+                  <span class="clip-modal-hint">先选择来源，再点击“开始切”；已生成的两组结果会分别保留。</span>
                 </div>
                 <section class="clip-pending-panel clip-panel">
                   <div class="clip-panel-head">
@@ -407,7 +451,7 @@
                   </div>
                   <div id="clipList" class="clip-list clip-pending-list"></div>
                   <div class="clip-pending-footer">
-                    <span class="clip-modal-hint">右键主时间轴上的片段可导出、删除或合并；重复备选不会自动并入主候选。</span>
+                    <span class="clip-modal-hint">当前来源的片段会显示在主时间轴；右键可导出、删除或合并。</span>
                     <button id="renderClipQueue" class="primary small" type="button">一键导出全部</button>
                   </div>
                 </section>

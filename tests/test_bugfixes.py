@@ -756,6 +756,33 @@ class ProofreaderResilienceTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             reader.rank_clip_candidates([{"id": "clip_001", "start": 0, "end": 5, "duration": 5, "text": "a"}])
 
+    def test_rank_clip_candidates_drops_duplicate_and_overlapping_choices(self):
+        class _RepeatedChat(Proofreader):
+            def _chat(self, system, user, temperature=0.0):
+                return json.dumps(
+                    {
+                        "selected": [
+                            {"id": "clip_001", "score": 95},
+                            {"id": "clip_001", "score": 94},
+                            {"id": "clip_002", "score": 90},
+                            {"id": "clip_003", "score": 80},
+                        ]
+                    }
+                )
+
+        reader = _RepeatedChat(base_url="http://127.0.0.1:1", model="m")
+        ranked = reader.rank_clip_candidates(
+            [
+                {"id": "clip_001", "start": 0, "end": 60, "duration": 60, "text": "a"},
+                {"id": "clip_002", "start": 45, "end": 105, "duration": 60, "text": "b"},
+                {"id": "clip_003", "start": 120, "end": 180, "duration": 60, "text": "c"},
+            ],
+            limit=8,
+        )
+
+        self.assertEqual([item["id"] for item in ranked], ["clip_001", "clip_003"])
+        self.assertEqual(reader.last_clip_filter, {"duplicate_dropped": 1, "overlap_dropped": 1})
+
 
 class PostJsonRetryClassificationTest(unittest.TestCase):
     def _post_with(self, exc: Exception):

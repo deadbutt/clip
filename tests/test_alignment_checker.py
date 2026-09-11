@@ -265,6 +265,34 @@ class AlignmentManagerTest(unittest.TestCase):
             self.assertNotIn("alignment", result)
             self.assertEqual(manager.get_job("plain-job").proofread_info.get("alignment_count"), 0)
 
+    def test_proofread_local_translation_skips_ai_alignment(self):
+        class _FakeProofreader:
+            def proofread(self, segments, *, progress_callback=None):
+                return {"suggestions": [], "term_corrections": [], "usage": {}}
+
+            def check_alignment(self, pairs, *, progress_callback=None):  # 不应被调用
+                raise AssertionError("alignment must not run for local translations")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            job_dir = self._write_job(runs, "local-translation-job")
+            self._write_segments(
+                job_dir,
+                "segments.source.json",
+                [{"id": "seg_0001", "start": 0.0, "end": 2.0, "text": "Hello.", "speaker": "S01"}],
+            )
+            self._write_segments(
+                job_dir,
+                "segments.json",
+                [{"id": "seg_0001", "start": 0.0, "end": 2.0, "text": "你好。", "speaker": "S01"}],
+            )
+            manager = self._manager(runs)
+            manager.get_job("local-translation-job").translation_info = {"engine": "local"}
+            result = manager.proofread("local-translation-job", _FakeProofreader())
+
+            self.assertNotIn("alignment", result)
+            self.assertEqual(manager.get_job("local-translation-job").proofread_info.get("alignment_count"), 0)
+
     def test_apply_alignment_replaces_translation_line_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runs = Path(tmpdir)

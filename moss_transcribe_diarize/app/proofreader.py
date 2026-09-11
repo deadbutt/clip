@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from moss_transcribe_diarize.subtitle import SubtitleSegment
@@ -63,10 +63,55 @@ pair, fixing the flagged problem, in the same subtitle style as the original Chi
 Return JSON only: {"issues":[{"n":<pair number>,"type":"omission|addition|mistranslation|terminology","note":"<Chinese, under 20 words>","suggested":"<corrected Chinese translation>"}]}
 If everything is fine return {"issues":[]}."""
 
+CLIP_OVERLAP_TOLERANCE_SECONDS = 0.05
+
+
+def _filter_non_overlapping_clips(
+    candidates: list[dict[str, Any]], *, limit: int
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Apply a deterministic final guard after the model chooses clip ids."""
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            float(item.get("start") or 0.0),
+            float(item.get("end") or 0.0),
+        ),
+    )
+    kept: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    duplicate_count = 0
+    overlap_count = 0
+    for candidate in ordered:
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id or candidate_id in seen_ids:
+            duplicate_count += 1
+            continue
+        start = float(candidate.get("start") or 0.0)
+        end = float(candidate.get("end") or start)
+        overlaps = any(
+            min(end, float(item.get("end") or 0.0))
+            - max(start, float(item.get("start") or 0.0))
+            > CLIP_OVERLAP_TOLERANCE_SECONDS
+            for item in kept
+        )
+        if overlaps:
+            overlap_count += 1
+            continue
+        seen_ids.add(candidate_id)
+        kept.append(candidate)
+        if len(kept) >= max(1, int(limit)):
+            break
+    return kept, {
+        "duplicate_dropped": duplicate_count,
+        "overlap_dropped": overlap_count,
+    }
+
 CLIP_RANK_SYSTEM = """You select highlights from a long-form transcript for short video clips.
 Judge semantic quality, not keyword count. Prefer self-contained excerpts with a strong opening,
 clear development and payoff, emotional or informational value, and little dependency on missing context.
-Avoid repetitive or substantially overlapping choices. Return JSON only in this shape:
+Avoid repetitive choices. Never select two candidates whose time ranges overlap, even slightly.
+Return unique ids only. Return JSON only in this shape:
 {"selected":[{"id":"clip_001","score":92,"title":"short Chinese title","reason":"specific Chinese reason"}]}.
 Use only provided ids."""
 
@@ -79,6 +124,7 @@ class Proofreader:
     provider: str = "openai"
     timeout: float = 300.0
     disable_thinking: bool = False
+    last_clip_filter: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def runtime_info(self) -> dict[str, Any]:
         return {
@@ -191,11 +237,12 @@ class Proofreader:
             candidate["reason"] = str(choice.get("reason") or "模型精选").strip()
             candidate["selection_method"] = "model"
             output.append(candidate)
-            if len(output) >= max(1, int(limit)):
-                break
         if not output:
             raise RuntimeError("Highlight model did not return any valid candidate ids.")
-        return output
+        filtered, self.last_clip_filter = _filter_non_overlapping_clips(output, limit=limit)
+        if not filtered:
+            raise RuntimeError("Highlight model returned only duplicate or overlapping candidates.")
+        return filtered
 
     # --------------------------------------------------------------- Pass 1
 

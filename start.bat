@@ -30,7 +30,8 @@ set HF_HUB_DISABLE_XET=1
 set TRANSLATOR_ARGS=--translator-provider openai
 if exist "models\opus-mt-en-zh-ct2-int8\model.bin" if exist "models\opus-mt-en-zh\source.spm" (
   echo Local OPUS-MT translator enabled.
-  set TRANSLATOR_ARGS=--translator-provider opus-mt --translator-model models\opus-mt-en-zh-ct2-int8 --translator-tokenizer-dir models\opus-mt-en-zh --translator-device auto --translator-compute-type auto
+  rem The bundled CTranslate2 wheel needs CUDA 12 cublas DLLs for GPU mode; use CPU int8 by default for reliable local translation.
+  set TRANSLATOR_ARGS=--translator-provider opus-mt --translator-model models\opus-mt-en-zh-ct2-int8 --translator-tokenizer-dir models\opus-mt-en-zh --translator-device cpu --translator-compute-type int8
 )
 
 start "" /min powershell -NoProfile -ExecutionPolicy Bypass -Command ^

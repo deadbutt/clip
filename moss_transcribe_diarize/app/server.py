@@ -133,6 +133,28 @@ def create_app(
         )
     app.state.translator = translator
 
+    def _active_ai_translator(protected_terms: tuple[str, ...]):
+        """按请求读取当前激活的 profile，避免服务重启后配置变更不生效。"""
+        from .text_translator import PROTECTED_TERMS, TextTranslator
+
+        profile = app.state.llm_store.get_active()
+        if profile is None:
+            raise RuntimeError("未配置 AI 翻译服务。请先在首页 AI 服务中添加并启用一个配置。")
+        base_url = str(profile.get("base_url") or "").strip()
+        model = str(profile.get("model") or "").strip()
+        if not base_url:
+            raise RuntimeError("当前 AI 服务缺少 Base URL，请到首页 AI 服务中补充配置。")
+        if not model:
+            raise RuntimeError("当前 AI 服务缺少模型名称，请到首页 AI 服务中补充配置。")
+        return TextTranslator(
+            base_url=base_url,
+            model=model,
+            api_key=str(profile.get("api_key") or "EMPTY"),
+            timeout=600.0,
+            provider=str(profile.get("provider") or "openai"),
+            protected_terms=protected_terms or tuple(PROTECTED_TERMS),
+        ), profile
+
     def _fail(exc: Exception, status: int | None = None) -> HTTPException:
         """未分类异常统一记完整堆栈到日志,前端仍只收 detail 字符串。
 
@@ -601,9 +623,6 @@ def create_app(
 
     @app.post("/api/jobs/{job_id}/translate")
     async def translate(job_id: str, request: Request):
-        translator = app.state.translator
-        if translator is None:
-            return JSONResponse({"detail": "Translation model is not configured. Start with start_ollama.bat, start_vllm.bat, --translator-provider opus-mt, or pass --translator-base-url."}, status_code=503)
         try:
             try:
                 payload: Any = await request.json()
@@ -611,22 +630,50 @@ def create_app(
                 payload = {}
             payload = payload if isinstance(payload, dict) else {}
             protected_terms = _parse_protected_terms(payload.get("protected_terms"))
-            request_translator = translator
-            if "protected_terms" in payload and hasattr(translator, "protected_terms"):
-                try:
-                    request_translator = replace(translator, protected_terms=protected_terms)
-                except TypeError:
-                    request_translator = translator
+            engine = str(payload.get("engine") or "local").strip().lower()
+            profile = None
+            if engine in {"ai", "llm", "profile"}:
+                request_translator, profile = _active_ai_translator(protected_terms)
+            elif engine in {"local", "opus-mt", "opus_mt"}:
+                translator = app.state.translator
+                if translator is None:
+                    raise RuntimeError("本地 Opus-MT 未配置，请选择 AI 翻译，或用 start.bat 启动本地翻译模型。")
+                request_translator = translator
+                if "protected_terms" in payload and hasattr(translator, "protected_terms"):
+                    try:
+                        request_translator = replace(translator, protected_terms=protected_terms)
+                    except TypeError:
+                        request_translator = translator
+            else:
+                raise ValueError("engine must be 'local' or 'ai'.")
             batch_size = payload.get("batch_size")
             batch_size = None if batch_size in ("", None) else max(1, int(batch_size))
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 manager.translate,
                 job_id,
                 request_translator,
                 target_language=str(payload.get("target_language") or "简体中文"),
                 mode=str(payload.get("mode") or "bilingual"),
                 batch_size=batch_size,
+                engine=engine,
+                service=(
+                    {
+                        "name": str(profile.get("name") or "AI 服务"),
+                        "provider": str(profile.get("provider") or "openai"),
+                        "model": str(profile.get("model") or ""),
+                    }
+                    if profile is not None
+                    else None
+                ),
             )
+            result["translation_engine"] = engine
+            if profile is not None:
+                result["translation_service"] = {
+                    "name": str(profile.get("name") or "AI 服务"),
+                    "provider": str(profile.get("provider") or "openai"),
+                    "model": str(profile.get("model") or ""),
+                }
+            return result
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -869,18 +916,20 @@ def create_app(
             # AI 精选不设硬上限，由模型结合上下文决定范围。
             effective_max_duration = max_duration if max_duration > 0 else (300.0 if strategy == "rules" else None)
             merge_expansion_limit = max(30.0, target_duration * 0.75) if strategy == "rules" else None
-            return {
-                "clips": manager.list_clip_candidates(
-                    job_id,
-                    min_duration=min_duration,
-                    target_duration=target_duration,
-                    max_duration=effective_max_duration,
-                    limit=limit,
-                    merge_expansion_limit=merge_expansion_limit,
-                    selector=selector,
-                    include_alternates=strategy == "rules",
-                )
-            }
+            clips = manager.list_clip_candidates(
+                job_id,
+                min_duration=min_duration,
+                target_duration=target_duration,
+                max_duration=effective_max_duration,
+                limit=limit,
+                merge_expansion_limit=merge_expansion_limit,
+                selector=selector,
+                include_alternates=strategy == "rules",
+            )
+            response = {"clips": clips}
+            if selector is not None:
+                response["selection_filter"] = getattr(selector, "last_clip_filter", {})
+            return response
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
