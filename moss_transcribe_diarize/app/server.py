@@ -139,13 +139,13 @@ def create_app(
 
         profile = app.state.llm_store.get_active()
         if profile is None:
-            raise RuntimeError("未配置 AI 翻译服务。请先在首页 AI 服务中添加并启用一个配置。")
+            raise RuntimeError("未配置 AI 翻译服务。请先打开顶部的 AI 服务页面添加并启用一个配置。")
         base_url = str(profile.get("base_url") or "").strip()
         model = str(profile.get("model") or "").strip()
         if not base_url:
-            raise RuntimeError("当前 AI 服务缺少 Base URL，请到首页 AI 服务中补充配置。")
+            raise RuntimeError("当前 AI 服务缺少 Base URL，请到顶部的 AI 服务页面补充配置。")
         if not model:
-            raise RuntimeError("当前 AI 服务缺少模型名称，请到首页 AI 服务中补充配置。")
+            raise RuntimeError("当前 AI 服务缺少模型名称，请到顶部的 AI 服务页面补充配置。")
         return TextTranslator(
             base_url=base_url,
             model=model,
@@ -796,7 +796,6 @@ def create_app(
                 model=str(profile.get("model") or ""),
                 api_key=api_key,
                 provider=str(profile.get("provider") or "openai"),
-                disable_thinking=bool(profile.get("disable_thinking")),
                 timeout=60.0,
             )
             return await asyncio.to_thread(proofreader.test_connection)
@@ -810,13 +809,12 @@ def create_app(
 
         profile = app.state.llm_store.get_active()
         if profile is None:
-            raise RuntimeError("No LLM API profile is active. Configure one in 设置 → AI 服务.")
+            raise RuntimeError("No LLM API profile is active. Configure one in 顶部 AI 服务页面.")
         return Proofreader(
             base_url=str(profile.get("base_url") or ""),
             model=str(profile.get("model") or ""),
             api_key=str(profile.get("api_key") or "EMPTY"),
             provider=str(profile.get("provider") or "openai"),
-            disable_thinking=bool(profile.get("disable_thinking")),
         )
 
     @app.post("/api/jobs/{job_id}/proofread")

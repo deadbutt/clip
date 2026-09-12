@@ -10,6 +10,7 @@
 <body>
   <header>
     <h1>蝶殇工作台</h1>
+    <button id="openAiSettings" class="header-action" type="button">AI 服务</button>
     <span id="runtime" class="pill">检测中</span>
   </header>
   <main>
@@ -37,15 +38,6 @@
                 <span class="signal-status"><i></i> FFmpeg ready</span>
                 <span>transcribe / diarize / deliver</span>
               </div>
-            </div>
-            <div class="workflow-strip" aria-label="工作流程">
-              <div class="workflow-step active"><span>1</span><strong>导入</strong><small>文件或链接</small></div>
-              <i aria-hidden="true"></i>
-              <div class="workflow-step"><span>2</span><strong>转写</strong><small>Whisper + 说话人</small></div>
-              <i aria-hidden="true"></i>
-              <div class="workflow-step"><span>3</span><strong>校对</strong><small>字幕与翻译</small></div>
-              <i aria-hidden="true"></i>
-              <div class="workflow-step"><span>4</span><strong>交付</strong><small>SRT / 视频 / 切片</small></div>
             </div>
             <div class="tab-bar">
               <button class="tab-btn active" data-tab="upload">上传文件</button>
@@ -147,64 +139,6 @@
             <div id="pendingList" class="pending-list"></div>
             <button id="upload" class="primary">全部开始转写</button>
             <div id="importError" class="error" style="margin-top:10px"></div>
-            <details class="cookies-settings ai-service-settings" open>
-              <summary>
-                <span class="ai-service-summary-title">AI 服务</span>
-                <span class="ai-service-summary-note">校对 · 翻译 · 精华切片</span>
-                <span id="llmServiceSummaryState" class="ai-service-summary-state">未配置</span>
-              </summary>
-              <div class="cookies-body ai-service-body">
-                <div class="ai-service-intro">
-                  <span class="ai-service-intro-icon" aria-hidden="true">AI</span>
-                  <div>
-                    <strong>连接一个兼容 OpenAI 的服务</strong>
-                    <p>激活后可用于 AI 校对、AI 翻译、译文审查和精华切片。密钥只保存在本机。</p>
-                  </div>
-                </div>
-                <div id="llmProfileList" class="llm-profile-list"></div>
-                <div class="actions ai-service-actions">
-                  <button id="llmProfileAdd" class="ghost small add-profile-btn" type="button"><span aria-hidden="true">+</span> 新增服务配置</button>
-                </div>
-                <div id="llmProfileEditor" class="llm-profile-editor is-hidden">
-                  <div class="row">
-                    <div>
-                      <label for="llmProfileName">名称</label>
-                      <input id="llmProfileName" type="text" placeholder="DeepSeek 官方" />
-                    </div>
-                    <div>
-                      <label for="llmProfileProvider">类型</label>
-                      <select id="llmProfileProvider"><option value="openai">OpenAI 兼容</option><option value="ollama">Ollama</option></select>
-                    </div>
-                  </div>
-                  <div class="row" style="margin-top:8px">
-                    <div>
-                      <label for="llmProfileBaseUrl">Base URL</label>
-                      <input id="llmProfileBaseUrl" type="text" placeholder="https://api.deepseek.com/v1" />
-                    </div>
-                    <div>
-                      <label for="llmProfileModel">模型</label>
-                      <input id="llmProfileModel" type="text" placeholder="deepseek-v4-flash" />
-                    </div>
-                  </div>
-                  <div class="row" style="margin-top:8px">
-                    <div>
-                      <label for="llmProfileApiKey">API Key（编辑时留空 = 不修改）</label>
-                      <input id="llmProfileApiKey" type="password" placeholder="sk-..." autocomplete="off" />
-                    </div>
-                    <div>
-                      <label for="llmProfileDisableThinking">关闭思考模式</label>
-                      <select id="llmProfileDisableThinking"><option value="false">否</option><option value="true">是（DeepSeek 推荐）</option></select>
-                    </div>
-                  </div>
-                  <div class="actions" style="margin-top:10px">
-                    <button id="llmProfileSave" class="primary small" type="button">保存</button>
-                    <button id="llmProfileCancel" class="ghost small" type="button">取消</button>
-                    <button id="llmProfileTest" class="ghost small" type="button">测试连通</button>
-                  </div>
-                  <div id="llmProfileTestResult" class="meta" style="margin-top:6px"></div>
-                </div>
-              </div>
-            </details>
           </div>
           <div class="panel jobs-card">
             <div class="jobs-head">
@@ -216,6 +150,88 @@
               </div>
             </div>
             <div id="jobList" class="task-list"></div>
+          </div>
+        </div>
+      </section>
+      <section id="aiSettingsView" class="view ai-settings-view is-hidden">
+        <div class="ai-settings-page">
+          <div class="ai-settings-page-head">
+            <div>
+              <span class="signal-eyebrow">SERVICE CONTROL / AI</span>
+              <h2 class="view-title">AI 服务</h2>
+              <p class="meta">管理用于校对、翻译、译文审查和精华切片的模型服务。</p>
+            </div>
+            <button id="backFromAiSettings" class="ghost" type="button">← 返回任务</button>
+          </div>
+          <div class="ai-settings-layout">
+            <div class="ai-settings-main">
+              <div class="ai-saved-services-head ai-saved-services-head-top">
+                <div><strong>已保存的服务</strong><span>点击“设为当前”决定 AI 功能使用哪一项</span></div>
+                <div class="ai-saved-services-actions">
+                  <span id="llmServiceSummaryState" class="ai-service-summary-state">未配置</span>
+                  <button id="llmProfileAdd" class="primary small" type="button"><span aria-hidden="true">+</span> 新增服务</button>
+                </div>
+              </div>
+              <div id="llmProfileList" class="llm-profile-list"></div>
+              <div id="llmProfileEditor" class="settings-modal is-hidden">
+                <div class="settings-modal-card ai-profile-modal-card">
+                  <div class="settings-modal-head">
+                    <div><strong>新增服务</strong><span class="modal-subtitle">填写接口信息后完成配置</span></div>
+                    <button id="llmProfileClose" class="ghost small" type="button" aria-label="关闭">✕</button>
+                  </div>
+                  <div class="settings-modal-body ai-profile-modal-body">
+                    <div class="ai-editor-head"><strong>服务详情</strong><span class="meta">密钥只保存在本机配置中</span></div>
+                    <div class="ai-provider-picker" role="group" aria-label="服务类型">
+                      <button class="ai-provider-choice active" type="button" data-provider-choice="openai"><strong>OpenAI 兼容</strong><small>适用于 DeepSeek、OneAPI 和各类中转</small></button>
+                      <button class="ai-provider-choice" type="button" data-provider-choice="ollama"><strong>Ollama</strong><small>连接本机或局域网模型服务</small></button>
+                    </div>
+                    <select id="llmProfileProvider" class="is-hidden" aria-hidden="true"><option value="openai">OpenAI 兼容</option><option value="ollama">Ollama</option></select>
+                    <div class="row">
+                      <div>
+                        <label for="llmProfileName">供应商名称</label>
+                        <input id="llmProfileName" type="text" placeholder="例如：DeepSeek 官方" />
+                      </div>
+                      <div>
+                        <label for="llmProfileRemark">备注</label>
+                        <input id="llmProfileRemark" type="text" placeholder="例如：公司专用账号" />
+                      </div>
+                    </div>
+                    <div class="row row-full" style="margin-top:8px">
+                      <div>
+                        <label for="llmProfileWebsite">官网链接 <span class="field-optional">可选</span></label>
+                        <input id="llmProfileWebsite" type="url" placeholder="https://example.com" />
+                      </div>
+                    </div>
+                    <div class="row row-full" style="margin-top:8px">
+                      <div>
+                        <label for="llmProfileApiKey">API Key（编辑时留空 = 不修改）</label>
+                        <input id="llmProfileApiKey" type="password" placeholder="sk-..." autocomplete="off" />
+                        <small class="field-hint">密钥只保存在本机配置中，列表仅显示掩码。</small>
+                      </div>
+                    </div>
+                    <div class="row row-full" style="margin-top:8px">
+                      <div>
+                        <label for="llmProfileBaseUrl">API 请求地址</label>
+                        <input id="llmProfileBaseUrl" type="url" placeholder="https://api.deepseek.com/v1" />
+                        <small class="field-hint">填写兼容 OpenAI Chat Completions 格式的服务端地址；末尾没有 /v1 时会自动补齐。</small>
+                      </div>
+                    </div>
+                    <div class="row row-full" style="margin-top:8px">
+                      <div>
+                        <label for="llmProfileModel">模型名称</label>
+                        <input id="llmProfileModel" type="text" placeholder="deepseek-chat" />
+                      </div>
+                    </div>
+                <div class="actions" style="margin-top:10px">
+                  <button id="llmProfileSave" class="primary small" type="button">完成配置</button>
+                  <button id="llmProfileCancel" class="ghost small" type="button">取消</button>
+                  <button id="llmProfileTest" class="ghost small" type="button">测试连通</button>
+                </div>
+                <div id="llmProfileTestResult" class="meta" style="margin-top:6px"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -472,27 +488,13 @@
               <button id="closeSettings" class="ghost small" type="button" aria-label="关闭">✕</button>
             </div>
             <div class="settings-modal-body">
-              <div class="group">
+              <div class="group settings-info-group">
                 <label>任务信息</label>
                 <div id="taskUsage" class="meta task-meta"></div>
                 <div id="taskParams" class="meta task-meta"></div>
               </div>
-              <div class="group">
-                <label>转录热词词表（所有新任务自动带上）</label>
-                <div id="hotwordsGlossaryView" class="llm-profile-list"></div>
-                <div class="actions" style="margin-top:8px">
-                  <button id="hotwordsGlossaryEdit" class="ghost small" type="button">编辑词表</button>
-                </div>
-                <div id="hotwordsGlossaryEditor" class="llm-profile-editor is-hidden">
-                  <textarea id="hotwordsGlossaryText" class="prompt-input" rows="3" placeholder="每行一个或空格分隔"></textarea>
-                  <div class="meta" style="margin-top:4px">校对时应用的术语会自动加入此词表。</div>
-                  <div class="actions" style="margin-top:8px">
-                    <button id="hotwordsGlossarySave" class="primary small" type="button">保存</button>
-                    <button id="hotwordsGlossaryCancel" class="ghost small" type="button">取消</button>
-                  </div>
-                </div>
-              </div>
-              <div class="group">
+              <div class="group settings-style-group">
+                <label>字幕样式</label>
                 <div class="row">
                   <div>
                     <label for="fontName">字体</label>
@@ -545,12 +547,12 @@
                 </div>
                 <div class="meta" style="margin-top:6px">"说话人前缀=显示"时，预览、SRT 导出与烧录视频会在每条字幕前加 "名称: "（名称在下方设置）；"按说话人"配色会覆盖统一颜色。</div>
               </div>
-              <div class="group">
+              <div class="group settings-speaker-group">
                 <label>说话人名称</label>
                 <div id="speakerMap" class="speaker-map"></div>
                 <div class="meta" style="margin-top:6px">配合上方"说话人前缀=显示"使用；烧录和 SRT 中显示为 "名称: 字幕"。</div>
               </div>
-              <div class="group">
+              <div class="group settings-mask-group">
                 <label for="maskEnabled">原字幕遮挡</label>
                 <select id="maskEnabled">
                   <option value="false">关闭</option>

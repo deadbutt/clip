@@ -2,7 +2,7 @@
 """LLM API 配置管理（ccswitch 式多 profile 切换）。
 
 存储: {config_dir}/llm_profiles.json
-结构: {"active_id": "...", "profiles": [{"id", "name", "base_url", "api_key", "model", "provider", "disable_thinking"}]}
+结构: {"active_id": "...", "profiles": [{"id", "name", "remark", "website", "base_url", "api_key", "model", "provider"}]}
 """
 from __future__ import annotations
 
@@ -58,11 +58,12 @@ class LlmProfileStore:
         return {
             "id": str(profile.get("id") or uuid.uuid4().hex[:12]),
             "name": str(profile.get("name") or "未命名").strip()[:40],
+            "remark": str(profile.get("remark") or "").strip()[:120],
+            "website": str(profile.get("website") or "").strip()[:300],
             "base_url": base_url,
             "api_key": str(profile.get("api_key") or "").strip(),
             "model": str(profile.get("model") or "").strip()[:80],
             "provider": provider,
-            "disable_thinking": bool(profile.get("disable_thinking")),
             "created_at": float(profile.get("created_at") or time.time()),
         }
 

@@ -1136,7 +1136,15 @@ class JobManager(ClipOperationsMixin):
         job = self.get_job(job_id)
         segments = coerce_subtitle_segments(payload)
         self._backfill_items_from_disk(job, segments)
-        style = SubtitleStyle.from_dict(style_payload) if style_payload is not None else None
+        style = None
+        if style_payload is not None:
+            # Style updates may come from older clients or a temporarily
+            # incomplete settings panel. Merge with the persisted style first
+            # so omitted fields (especially speaker_names) are not reset.
+            merged_style = {**(job.subtitle_style or {}), **dict(style_payload)}
+            if "speaker_names" not in style_payload and job.subtitle_style.get("speaker_names"):
+                merged_style["speaker_names"] = job.subtitle_style["speaker_names"]
+            style = SubtitleStyle.from_dict(merged_style)
         if style is not None:
             job.subtitle_style = style.to_dict()
         self._write_subtitle_files(job, segments, style=style)
@@ -2214,14 +2222,18 @@ class JobManager(ClipOperationsMixin):
             # 缺口恢复/无 VAD 重试会对小片段从 0.1 重新计进度，导致进度条
             # 反复跳回开头；转录阶段进度单调只升不降。
             last_transcribe_progress = 0.0
+            last_generated_tokens = int(job.generated_tokens or 0)
 
             def update(status: str, progress: float | None, generated_tokens: int | None = None) -> None:
-                nonlocal last_transcribe_progress
+                nonlocal last_transcribe_progress, last_generated_tokens
                 self._raise_if_cancelled(job.id)
                 if status == "transcribing" and job.generated_tokens is None:
                     job.generated_tokens = 0
                 if generated_tokens is not None:
-                    job.generated_tokens = generated_tokens
+                    # Retry/chunk callbacks may report a local count. Never
+                    # expose a lower count after a later chunk has completed.
+                    last_generated_tokens = max(last_generated_tokens, int(generated_tokens))
+                    job.generated_tokens = last_generated_tokens
                 if status == "transcribing" and progress is not None:
                     progress = max(progress, last_transcribe_progress)
                     last_transcribe_progress = progress
@@ -2312,7 +2324,7 @@ class JobManager(ClipOperationsMixin):
                     status_callback=update,
                 )
                 self._raise_if_cancelled(job.id)
-                job.generated_tokens = result.generated_tokens
+                job.generated_tokens = max(last_generated_tokens, int(result.generated_tokens or 0))
                 self.job_log(
                     job,
                     f"转录完成: {len(result.text)} 字符, generated_tokens={result.generated_tokens}, "

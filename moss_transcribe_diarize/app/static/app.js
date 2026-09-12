@@ -42,6 +42,9 @@ const backToTasksBtn = document.querySelector('#backToTasks');
 const openSettingsBtn = document.querySelector('#openSettings');
 const closeSettingsBtn = document.querySelector('#closeSettings');
 const settingsModal = document.querySelector('#settingsModal');
+const openAiSettingsBtn = document.querySelector('#openAiSettings');
+const backFromAiSettingsBtn = document.querySelector('#backFromAiSettings');
+const aiSettingsView = document.querySelector('#aiSettingsView');
 const openTranslateBtn = document.querySelector('#openTranslate');
 const closeTranslateBtn = document.querySelector('#closeTranslate');
 const translateModal = document.querySelector('#translateModal');
@@ -180,12 +183,14 @@ const proofreadAlignmentAllEl = document.querySelector('#proofreadAlignmentAll')
 const llmProfileListEl = document.querySelector('#llmProfileList');
 const llmProfileAddBtn = document.querySelector('#llmProfileAdd');
 const llmProfileEditorEl = document.querySelector('#llmProfileEditor');
+const llmProfileCloseBtn = document.querySelector('#llmProfileClose');
 const llmProfileNameInput = document.querySelector('#llmProfileName');
+const llmProfileRemarkInput = document.querySelector('#llmProfileRemark');
+const llmProfileWebsiteInput = document.querySelector('#llmProfileWebsite');
 const llmProfileProviderSelect = document.querySelector('#llmProfileProvider');
 const llmProfileBaseUrlInput = document.querySelector('#llmProfileBaseUrl');
 const llmProfileModelInput = document.querySelector('#llmProfileModel');
 const llmProfileApiKeyInput = document.querySelector('#llmProfileApiKey');
-const llmProfileDisableThinkingSelect = document.querySelector('#llmProfileDisableThinking');
 const llmProfileSaveBtn = document.querySelector('#llmProfileSave');
 const llmProfileCancelBtn = document.querySelector('#llmProfileCancel');
 const llmProfileTestBtn = document.querySelector('#llmProfileTest');
@@ -194,13 +199,6 @@ let llmProfiles = [];
 let llmEditingProfileId = null;
 let proofreadResult = null;
 let proofreadPollTimer = null;
-const hotwordsGlossaryViewEl = document.querySelector('#hotwordsGlossaryView');
-const hotwordsGlossaryEditBtn = document.querySelector('#hotwordsGlossaryEdit');
-const hotwordsGlossaryEditorEl = document.querySelector('#hotwordsGlossaryEditor');
-const hotwordsGlossaryTextEl = document.querySelector('#hotwordsGlossaryText');
-const hotwordsGlossarySaveBtn = document.querySelector('#hotwordsGlossarySave');
-const hotwordsGlossaryCancelBtn = document.querySelector('#hotwordsGlossaryCancel');
-let hotwordsGlossary = [];
 let jobs = [];
 let currentJob = null;
 let rerunDraftJob = null;
@@ -236,6 +234,10 @@ let undoJobId = null;
 const MAX_UNDO = 50;
 let cachedTimelineSegments = [];
 let cachedTimelineLayout = { lanes: new Map(), count: 1 };
+// Keep timeline segment buttons stable while the viewport moves. Replacing the
+// whole lane on every scroll frame causes visible blank frames and can detach
+// a pointer-captured node during fast seeks.
+let timelineSegmentElements = new Map();
 let syncActiveFrame = 0;
 let lastSyncedTime = -1;
 let tableRenderFrame = 0;
@@ -272,6 +274,20 @@ function setPreviewSource(src) {
   preview.src = src;
   maskPreviewVideo.removeAttribute('src');
   maskPreviewVideo.load();
+}
+
+function stopPreviewPlayback({ unload = false } = {}) {
+  // Hiding the workbench does not pause HTMLMediaElement, so explicitly stop
+  // both preview layers whenever the user leaves a task.
+  try { preview.pause(); } catch (err) {}
+  try { maskPreviewVideo.pause(); } catch (err) {}
+  if (unload) {
+    preview.removeAttribute('src');
+    preview.removeAttribute('data-job-id');
+    maskPreviewVideo.removeAttribute('src');
+    try { preview.load(); } catch (err) {}
+    try { maskPreviewVideo.load(); } catch (err) {}
+  }
 }
 
 async function refreshRuntime() {
@@ -353,6 +369,18 @@ function scheduleLayoutFit() {
 
 function openSettings() { settingsModal.classList.remove('is-hidden'); }
 function closeSettings() { settingsModal.classList.add('is-hidden'); }
+function openAiSettings() {
+  closeSettings();
+  closeTranslate();
+  closeClips();
+  proofreadModal.classList.add('is-hidden');
+  setVisible(aiSettingsView);
+  loadLlmProfiles();
+}
+function closeAiSettings() {
+  if (currentJob) renderCurrentJob(currentJob, { skipSegments: true });
+  else showImportView({ clearDraft: false });
+}
 function openTranslate() {
   loadLlmProfiles();
   updateTranslateAction();
@@ -630,7 +658,9 @@ openNewBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) s
 backFromProcessingBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
 backToTasksBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
-openSettingsBtn.addEventListener('click', () => { openSettings(); loadHotwordsGlossary(); });
+openSettingsBtn.addEventListener('click', openSettings);
+openAiSettingsBtn.addEventListener('click', openAiSettings);
+backFromAiSettingsBtn.addEventListener('click', closeAiSettings);
 closeSettingsBtn.addEventListener('click', closeSettings);
 openTranslateBtn.addEventListener('click', openTranslate);
 closeTranslateBtn.addEventListener('click', closeTranslate);
@@ -641,49 +671,19 @@ proofreadApplyBtn.addEventListener('click', applyProofread);
 proofreadTermsAllEl.addEventListener('change', () => toggleProofreadGroup('term'));
 proofreadTyposAllEl.addEventListener('change', () => toggleProofreadGroup('typo'));
 llmProfileAddBtn.addEventListener('click', () => showLlmProfileEditor(null));
+llmProfileCloseBtn.addEventListener('click', hideLlmProfileEditor);
 llmProfileSaveBtn.addEventListener('click', saveLlmProfile);
 llmProfileCancelBtn.addEventListener('click', hideLlmProfileEditor);
 llmProfileTestBtn.addEventListener('click', testLlmProfile);
-hotwordsGlossaryEditBtn.addEventListener('click', () => {
-  hotwordsGlossaryTextEl.value = (hotwordsGlossary || []).join(' ');
-  hotwordsGlossaryEditorEl.classList.remove('is-hidden');
+llmProfileEditorEl.addEventListener('click', (event) => {
+  if (event.target === llmProfileEditorEl) hideLlmProfileEditor();
 });
-hotwordsGlossaryCancelBtn.addEventListener('click', () => hotwordsGlossaryEditorEl.classList.add('is-hidden'));
-hotwordsGlossarySaveBtn.addEventListener('click', async () => {
-  const terms = hotwordsGlossaryTextEl.value.split(/[\\s,，;；\\n]+/).map((s) => s.trim()).filter(Boolean);
-  try {
-    const res = await fetch(apiUrl('api/hotwords'), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ terms })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || '保存失败');
-    hotwordsGlossary = data.terms || [];
-    renderHotwordsGlossary();
-    hotwordsGlossaryEditorEl.classList.add('is-hidden');
-  } catch (err) {
-    alert('保存失败：' + (err.message || err));
-  }
+document.querySelectorAll('[data-provider-choice]').forEach((choice) => {
+  choice.addEventListener('click', () => {
+    llmProfileProviderSelect.value = choice.dataset.providerChoice || 'openai';
+    syncLlmProviderChoices();
+  });
 });
-
-async function loadHotwordsGlossary() {
-  try {
-    const res = await fetch(apiUrl('api/hotwords'));
-    if (!res.ok) return;
-    const data = await res.json();
-    hotwordsGlossary = data.terms || [];
-    renderHotwordsGlossary();
-  } catch (err) { /* ignore */ }
-}
-
-function renderHotwordsGlossary() {
-  if (!hotwordsGlossary || !hotwordsGlossary.length) {
-    hotwordsGlossaryViewEl.innerHTML = '<div class="meta">词表为空。可手动添加，或在校对应用术语时自动积累。</div>';
-    return;
-  }
-  hotwordsGlossaryViewEl.innerHTML = `<div class="llm-profile-item"><div class="llm-profile-item-info"><div class="llm-profile-item-meta" style="white-space:normal">${hotwordsGlossary.map(escapeHtml).join(' · ')}</div></div><div class="llm-profile-item-meta">${hotwordsGlossary.length} 个热词</div></div>`;
-}
 openClipsBtn.addEventListener('click', openClips);
 closeClipsBtn.addEventListener('click', closeClips);
 settingsModal.addEventListener('click', (event) => {
@@ -1038,7 +1038,11 @@ timelineScroll.addEventListener('pointerup', (event) => {
   event.preventDefault();
   seekTimelineFromPointer(event);
   timelineDragging = false;
-  timelineFollowHoldUntil = Number.POSITIVE_INFINITY;
+  // A seek drag should briefly yield to the user's new position, but it must
+  // not permanently disable playback follow.  The old Infinity sentinel made
+  // the red playhead stop auto-following forever when playback was already in
+  // progress (the subsequent `play` event does not fire again).
+  timelineFollowHoldUntil = performance.now() + 600;
   stopTimelineEdgeAutoScroll();
   hideTimelineGuide();
   try {
@@ -1047,7 +1051,7 @@ timelineScroll.addEventListener('pointerup', (event) => {
 });
 timelineScroll.addEventListener('pointercancel', () => {
   timelineDragging = false;
-  timelineFollowHoldUntil = Number.POSITIVE_INFINITY;
+  timelineFollowHoldUntil = performance.now() + 600;
   stopTimelineEdgeAutoScroll();
   hideTimelineGuide();
 });
@@ -1164,11 +1168,41 @@ for (const id of ['fontName', 'primaryColor', 'outlineColor', 'fontSize', 'margi
   });
 }
 
+function mergeJobSnapshots(incoming) {
+  const known = new Map(jobs.map((job) => [job.id, job]));
+  return incoming.map((job) => {
+    const listed = known.get(job.id);
+    const live = currentJob && currentJob.id === job.id ? currentJob : null;
+    const previous = listed && live
+      && Number(live.updated_at || 0) > Number(listed.updated_at || 0)
+      ? live
+      : listed || live;
+    if (!previous) return job;
+    const incomingUpdated = Number(job.updated_at || 0);
+    const previousUpdated = Number(previous.updated_at || 0);
+    // /api/jobs is disk-backed while SSE carries the live object. A throttled
+    // disk write can lag behind the event stream, so an older snapshot must
+    // never move a task back to an earlier phase or progress.
+    if (incomingUpdated > 0 && previousUpdated > incomingUpdated) return previous;
+    if (previousUpdated >= incomingUpdated) {
+      const previousProgress = Number(previous.progress || 0);
+      const incomingProgress = Number(job.progress || 0);
+      const previousTokens = Number(previous.generated_tokens ?? previous.usage?.generated_tokens);
+      const incomingTokens = Number(job.generated_tokens ?? job.usage?.generated_tokens);
+      if (previousProgress > incomingProgress) job = { ...job, progress: previousProgress };
+      if (Number.isFinite(previousTokens) && previousTokens > (Number.isFinite(incomingTokens) ? incomingTokens : -1)) {
+        job = { ...job, generated_tokens: previousTokens, usage: { ...(job.usage || {}), generated_tokens: previousTokens } };
+      }
+    }
+    return job;
+  });
+}
+
 async function refreshJobs(options = {}) {
   const res = await fetch(apiUrl('api/jobs'), { cache: 'no-store' });
   if (!res.ok) return;
   const data = await res.json();
-  jobs = data.jobs || [];
+  jobs = mergeJobSnapshots(data.jobs || []);
   renderJobList();
   if (currentJob) {
     const fresh = jobs.find((job) => job.id === currentJob.id);
@@ -1234,6 +1268,7 @@ function renderJobList() {
 }
 
 async function selectJob(jobId) {
+  if (currentJob && currentJob.id !== jobId) stopPreviewPlayback({ unload: true });
   const local = jobs.find((job) => job.id === jobId);
   currentJob = local || currentJob;
   renderJobList();
@@ -1263,6 +1298,7 @@ function renderCurrentJob(job, options = {}) {
 
 function showImportView(options = {}) {
   if (options.clearDraft !== false) resetImportMode();
+  stopPreviewPlayback({ unload: true });
   currentJob = null;
   stopSubtitleSyncPolling();
   closeJobEvents();
@@ -1301,6 +1337,7 @@ function resetImportMode() {
 }
 
 function showProcessingPlaceholder(name) {
+  stopPreviewPlayback({ unload: true });
   currentJob = null;
   closeSettings();
   closeTranslate();
@@ -1537,6 +1574,7 @@ function updateRerunAction(job) {
 
 function showRerunDraft(job) {
   const inference = job.inference || {};
+  stopPreviewPlayback({ unload: true });
   rerunDraftJob = job;
   currentJob = null;
   importTitleEl.textContent = '重跑转写';
@@ -1588,6 +1626,7 @@ function setVisible(view) {
   importView.classList.toggle('is-hidden', view !== importView);
   processingView.classList.toggle('is-hidden', view !== processingView);
   workbench.classList.toggle('is-hidden', view !== workbench);
+  aiSettingsView.classList.toggle('is-hidden', view !== aiSettingsView);
 }
 
 async function cancelJobById(jobId) {
@@ -1762,7 +1801,27 @@ function openJobEvents(jobId) {
 function applyJobUpdate(job) {
   if (!job || !job.id) return;
   const index = jobs.findIndex((item) => item.id === job.id);
-  if (index >= 0) jobs[index] = job;
+  const knownJob = index >= 0
+    ? jobs[index]
+    : currentJob && currentJob.id === job.id
+      ? currentJob
+      : null;
+  const incomingUpdated = Number(job.updated_at || 0);
+  const knownUpdated = Number(knownJob?.updated_at || 0);
+  if (incomingUpdated > 0 && knownUpdated > incomingUpdated) return;
+  if (knownJob && knownUpdated >= incomingUpdated) {
+    const previousProgress = Number(knownJob.progress || 0);
+    const incomingProgress = Number(job.progress || 0);
+    const previousTokens = Number(knownJob.generated_tokens ?? knownJob.usage?.generated_tokens);
+    const incomingTokens = Number(job.generated_tokens ?? job.usage?.generated_tokens);
+    if (previousProgress > incomingProgress) job = { ...job, progress: previousProgress };
+    if (Number.isFinite(previousTokens) && previousTokens > (Number.isFinite(incomingTokens) ? incomingTokens : -1)) {
+      job = { ...job, generated_tokens: previousTokens, usage: { ...(job.usage || {}), generated_tokens: previousTokens } };
+    }
+  }
+  if (index >= 0) {
+    jobs[index] = job;
+  }
   else jobs.unshift(job);
   renderJobList();
   ensurePolling();
@@ -1852,7 +1911,9 @@ function applySubtitleStyle(style) {
 }
 
 function collectSpeakerNames() {
-  const names = {};
+  // The map can be temporarily empty while segments are being reloaded. Keep
+  // the cached values as a base so an async refresh cannot save them as {}.
+  const names = { ...speakerNameMap };
   for (const input of speakerMapEl.querySelectorAll('input.speaker-name[data-speaker]')) {
     const speaker = input.dataset.speaker || '';
     const name = input.value.trim();
@@ -2038,6 +2099,7 @@ function renderTimeline(segments) {
   timelineMeta.textContent = segments.length + ' 段' + (duration ? ' · ' + formatTimelineTime(duration) : '') + (laneCount > 1 ? ' · ' + laneCount + ' 层' : '');
   timelineRuler.innerHTML = '';
   timelineLane.innerHTML = '';
+  timelineSegmentElements = new Map();
   renderTimelineTicks(duration, pixelsPerSecond);
   renderVisibleTimelineSegments();
   timelineTrack.appendChild(timelinePlayhead);
@@ -2067,15 +2129,32 @@ function renderVisibleTimelineSegments() {
   const laneTop = 42;
   const leftTime = Math.max(0, (timelineScroll.scrollLeft - TIMELINE_BUFFER_PX) / pixelsPerSecond);
   const rightTime = (timelineScroll.scrollLeft + timelineScroll.clientWidth + TIMELINE_BUFFER_PX) / pixelsPerSecond;
-  timelineLane.innerHTML = '';
+  const visibleIndexes = new Set();
   for (const [index, segment] of segments.entries()) {
     const start = Math.max(0, Number(segment.start) || 0);
     const end = Math.max(start + 0.01, Number(segment.end) || start + 0.01);
     if (end < leftTime || start > rightTime) continue;
-    const item = document.createElement('button');
-    item.type = 'button';
+    visibleIndexes.add(index);
+    let item = timelineSegmentElements.get(index);
+    if (!item) {
+      item = document.createElement('button');
+      item.type = 'button';
+      item.dataset.index = String(index);
+      item.addEventListener('pointerdown', (event) => onSegmentPointerDown(event, index, item));
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (segmentDragState && segmentDragState.moved) return;
+        const current = cachedTimelineSegments[index];
+        const seekStart = Number(current?.start);
+        if (!Number.isFinite(seekStart)) return;
+        preview.currentTime = seekStart;
+        setActiveSegment(index, true, { align: 'center' });
+        updateSubtitlePreview();
+        updateTimelinePlayhead();
+      });
+      timelineSegmentElements.set(index, item);
+    }
     item.className = 'timeline-segment' + (index === activeSegmentIndex ? ' active' : '');
-    item.dataset.index = String(index);
     item.style.left = Math.max(0, start * pixelsPerSecond) + 'px';
     item.style.top = (laneTop + (layout.lanes.get(index) || 0) * laneHeight) + 'px';
     item.style.width = Math.max(8, (end - start) * pixelsPerSecond) + 'px';
@@ -2084,18 +2163,13 @@ function renderVisibleTimelineSegments() {
       <span class="timeline-segment-speaker">${escapeHtml(segment.speaker || 'S--')}</span>
       <span class="timeline-segment-text">${escapeHtml(segment.text || '')}</span>
     `;
-    item.addEventListener('pointerdown', (event) => onSegmentPointerDown(event, index, item));
-    item.addEventListener('click', (event) => {
-      event.preventDefault();
-      if (segmentDragState && segmentDragState.moved) {
-        return;
-      }
-      preview.currentTime = start;
-      setActiveSegment(index, true, { align: 'center' });
-      updateSubtitlePreview();
-      updateTimelinePlayhead();
-    });
-    timelineLane.appendChild(item);
+    if (item.parentElement !== timelineLane) timelineLane.appendChild(item);
+  }
+  for (const [index, item] of timelineSegmentElements) {
+    const isDragged = segmentDragState && segmentDragState.moved && segmentDragState.index === index;
+    if (!visibleIndexes.has(index) && !isDragged && item.parentElement === timelineLane) {
+      item.remove();
+    }
   }
 }
 
@@ -3902,23 +3976,33 @@ function renderLlmProfiles() {
       </div>
       <div class="llm-profile-item-actions">
         ${p.id === activeId ? '' : `<button class="ghost small" type="button" data-llm-action="activate">设为当前</button>`}
+        <button class="ghost small" type="button" data-llm-action="test">测试联调</button>
         <button class="icon-action" type="button" data-llm-action="edit" title="编辑服务" aria-label="编辑服务">✎</button>
         <button class="icon-action danger" type="button" data-llm-action="delete" title="删除服务" aria-label="删除服务">×</button>
       </div>
+      <span class="llm-profile-test-state" data-llm-test-result></span>
     </div>`).join('');
 }
 
 function showLlmProfileEditor(profile) {
   llmEditingProfileId = profile ? profile.id : null;
   llmProfileNameInput.value = profile ? profile.name : '';
+  llmProfileRemarkInput.value = profile ? (profile.remark || '') : '';
+  llmProfileWebsiteInput.value = profile ? (profile.website || '') : '';
   llmProfileProviderSelect.value = profile ? (profile.provider || 'openai') : 'openai';
   llmProfileBaseUrlInput.value = profile ? profile.base_url : '';
   llmProfileModelInput.value = profile ? (profile.model || '') : '';
   llmProfileApiKeyInput.value = '';
   llmProfileApiKeyInput.placeholder = profile && profile.api_key_masked ? `当前 ${profile.api_key_masked}，留空不修改` : 'sk-...';
-  llmProfileDisableThinkingSelect.value = profile && profile.disable_thinking ? 'true' : 'false';
+  syncLlmProviderChoices();
   llmProfileTestResultEl.textContent = '';
   llmProfileEditorEl.classList.remove('is-hidden');
+}
+
+function syncLlmProviderChoices() {
+  document.querySelectorAll('[data-provider-choice]').forEach((choice) => {
+    choice.classList.toggle('active', choice.dataset.providerChoice === llmProfileProviderSelect.value);
+  });
 }
 
 function hideLlmProfileEditor() {
@@ -3933,11 +4017,12 @@ async function saveLlmProfile() {
   if (!baseUrl) { llmProfileTestResultEl.textContent = '请填写 Base URL。'; return; }
   const payload = {
     name,
+    remark: llmProfileRemarkInput.value.trim(),
+    website: llmProfileWebsiteInput.value.trim(),
     base_url: baseUrl,
     model: llmProfileModelInput.value.trim(),
     provider: llmProfileProviderSelect.value,
     api_key: llmProfileApiKeyInput.value.trim(),
-    disable_thinking: llmProfileDisableThinkingSelect.value === 'true',
   };
   try {
     const res = await fetch(llmEditingProfileId
@@ -3975,6 +4060,8 @@ llmProfileListEl.addEventListener('click', async (event) => {
       updateTranslateAction();
       updateProofreadAction();
       updateClipActions();
+    } else if (action === 'test') {
+      await testSavedLlmProfile(profileId, btn);
     } else if (action === 'edit') {
       const profile = (llmProfiles.profiles || []).find((p) => p.id === profileId);
       if (profile) showLlmProfileEditor(profile);
@@ -4000,11 +4087,12 @@ async function testLlmProfile() {
   if (!baseUrl) { llmProfileTestResultEl.textContent = '请先填写 Base URL。'; return; }
   const payload = {
     name: llmProfileNameInput.value.trim() || '未命名',
+    remark: llmProfileRemarkInput.value.trim(),
+    website: llmProfileWebsiteInput.value.trim(),
     base_url: baseUrl,
     model: llmProfileModelInput.value.trim(),
     provider: llmProfileProviderSelect.value,
     api_key: llmProfileApiKeyInput.value.trim(),
-    disable_thinking: llmProfileDisableThinkingSelect.value === 'true',
   };
   try {
     // 临时保存后测试（编辑态的 key 可能来自存储）
@@ -4043,6 +4131,36 @@ async function testLlmProfile() {
   }
 }
 
+async function testSavedLlmProfile(profileId, button) {
+  const item = button.closest('[data-profile-id]');
+  const resultEl = item?.querySelector('[data-llm-test-result]');
+  button.disabled = true;
+  if (resultEl) {
+    resultEl.textContent = '联调中...';
+    resultEl.className = 'llm-profile-test-state pending';
+  }
+  try {
+    const res = await fetch(apiUrl('api/llm/test'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '测试失败');
+    if (resultEl) {
+      resultEl.textContent = data.message || (data.ok ? '连接成功' : '连接失败');
+      resultEl.className = 'llm-profile-test-state ' + (data.ok ? 'success' : 'failure');
+    }
+  } catch (err) {
+    if (resultEl) {
+      resultEl.textContent = '失败：' + (err.message || err);
+      resultEl.className = 'llm-profile-test-state failure';
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function translateCurrentSubtitles() {
   const engine = translateEngineSelect?.value || 'local';
   const active = activeLlmProfile();
@@ -4055,7 +4173,7 @@ async function translateCurrentSubtitles() {
     return;
   }
   if (engine === 'ai' && !active) {
-    translateStatusEl.textContent = '还没有启用 AI 服务，请先在首页 AI 服务中添加并启用一个配置。';
+    translateStatusEl.textContent = '还没有启用 AI 服务，请先打开顶部的 AI 服务页面添加并启用一个配置。';
     return;
   }
   const saved = await saveSegments();
@@ -4129,7 +4247,7 @@ function updateTranslateAction() {
   if (engine === 'ai') {
     translateModelStatusEl.textContent = active
       ? `当前 AI 服务：${active.name || '未命名'} · ${active.model || '默认模型'}。翻译前会自动保留原字幕。`
-      : '尚未启用 AI 服务。请在首页 AI 服务中添加配置。';
+      : '尚未启用 AI 服务。请打开顶部的 AI 服务页面添加配置。';
     if (translateAiHintEl) {
       translateAiHintEl.textContent = active
         ? `已连接 ${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'} · ${active.model || '默认模型'}，可翻译成任意目标语言。`
@@ -4348,7 +4466,7 @@ function selectClipSource(source) {
 async function findClipCandidates(strategy = 'model') {
   if (!currentJob) return;
   if (strategy === 'model' && !activeLlmProfile()) {
-    clipStatusEl.textContent = 'AI 精选需要先在首页配置并启用一个 AI 服务；也可以先用规则粗筛。';
+    clipStatusEl.textContent = 'AI 精选需要先在顶部的 AI 服务页面配置并启用一个服务；也可以先用规则粗筛。';
     return;
   }
   const saved = await saveSegments();
@@ -4393,7 +4511,7 @@ function updateClipActions() {
   const active = activeLlmProfile();
   clipModelStatusEl.textContent = active
     ? `AI 精选使用 ${active.model || '默认模型'}（${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'}）；候选会显示在主时间轴。`
-    : 'AI 精选未启用（首页未配置 AI 服务）；当前只能规则粗筛。';
+    : 'AI 精选未启用（尚未配置 AI 服务）；当前只能规则粗筛。';
   syncClipSourceTabs();
 }
 
@@ -4712,6 +4830,11 @@ function tokenUsageSummary(job) {
     const elapsed = job.elapsed_sec == null ? elapsedJobSeconds(job) : Number(job.elapsed_sec || 0);
     const elapsedText = elapsed > 0 ? ' · ' + formatDuration(elapsed) : '';
     if (usage.generated_tokens == null) return 'Whisper 转写' + elapsedText;
+    if (Number(usage.generated_tokens) === 0) {
+      if (job.status === 'transcribing') return 'Whisper 转写中…' + elapsedText;
+      if (job.status === 'postprocessing') return '转录已完成，正在整理字幕…' + elapsedText;
+      if (job.status === 'labeling_speakers') return '正在标记说话人…' + elapsedText;
+    }
     return 'Whisper 已返回 ' + usage.generated_tokens + ' 段' + elapsedText + speakerLabelSummary(job);
   }
   const maxNewTokens = usage.max_new_tokens || inference.max_new_tokens || 0;
@@ -4773,7 +4896,6 @@ function statusLabel(status) {
 refreshRuntime();
 refreshJobs();
 loadLlmProfiles();
-loadHotwordsGlossary();
 
 // 撤销/重做快捷键：Ctrl+Z 撤销，Ctrl+Y 或 Ctrl+Shift+Z 重做
 // 在 textarea/input 内不拦截，让浏览器原生文本撤销工作
