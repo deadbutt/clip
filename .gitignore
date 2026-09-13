@@ -8,6 +8,7 @@ __pycache__/
 # Local model artifacts.
 pretrained/
 outputs/
+output/
 examples/*
 !examples/*.md
 runs/
