@@ -64,8 +64,8 @@ demucs（htdemucs）与 Opus-MT 翻译模型首次运行自动下载。
 
 ### 外部工具
 
-- **ffmpeg**：放 `tools/ffmpeg/ffmpeg.exe`（项目强制使用该路径，不依赖 PATH）
-- **yt-dlp**：放 `tools/yt-dlp/yt-dlp.exe`
+- **ffmpeg / ffprobe**：优先使用 `tools/` 下的便携版（依次查找 `tools/ffmpeg/bin`、`tools/ffmpeg`，以及 `tools/` 下任何同时包含 `ffmpeg.exe` 与 `ffprobe.exe` 的子目录）；没有便携版时回退到系统 PATH。推荐便携版，避免和系统全局环境互相干扰
+- **yt-dlp**：优先使用 `tools/yt-dlp/yt-dlp.exe`（依次尝试当前运行目录、项目根目录、启动文件所在目录）；都没有时回退到系统 PATH 中的 `yt-dlp`
 
 ---
 
@@ -80,7 +80,50 @@ mtd-subtitle-web                # 默认 http://127.0.0.1:7860
 mtd-subtitle-web --port 8080    # 自定义端口
 ```
 
-常用参数：`--model`（whisper 模型路径）、`--device`、`--dtype`、`--language`（固定语言跳过检测）、`--beam-size`、`--diarization-backend`、`--speaker-count`、`--hf-token`、翻译相关 `--translator-*`。
+`start.bat` 已自动附加常用参数（本地 `large-v3-turbo`、CUDA + float16、HF 镜像、检测到本地 OPUS-MT 时启用本地翻译）。手动启动时按需传参，完整列表见 `mtd-subtitle-web --help`，常用参数如下：
+
+**转录**
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--model` | `small` | Whisper 模型：HF 名称（如 `large-v3-turbo`）或本地模型目录 |
+| `--device` / `--dtype` | `auto` / `auto` | 计算设备与精度；N 卡一般 `cuda` + `float16`，纯 CPU 用 `cpu` + `int8` |
+| `--language` | 自动检测 | 固定语言代码（`en` / `zh` / `ja`…），设置后跳过检测 |
+| `--beam-size` | `5` | 束宽；长视频 3 是速度/质量折中，1 只适合草稿 |
+| `--decoding` / `--temperature` | `greedy` / `1.0` | 解码策略与采样温度 |
+| `--prompt` | 内置 | Whisper 初始提示词（可放领域词引导） |
+| `--max-new-tokens` / `--max-len` | `8192` / `131072` | 生成长度与上下文上限 |
+
+**说话人分离**
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--diarization-backend` | `none` | `auto`（自由聚类+杂簇收编）/ `pyannote` / `cluster` / `none` |
+| `--pyannote-model` | `pyannote/speaker-diarization-3.1` | 可指向 `models/` 下的本地化目录 |
+| `--speaker-count` | 自动 | 指定目标人数；先放宽上限自由聚类，再按嵌入质心收编到目标人数 |
+| `--hf-token` | 读 `HF_TOKEN` | pyannote gated 模型下载凭据 |
+| `--diarization-device` | `auto` | 说话人模型计算设备 |
+
+**服务**
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--host` / `--port` | `127.0.0.1` / `7860` | 监听地址与端口 |
+| `--runs-dir` | `runs` | 任务产物根目录 |
+
+**翻译**（`--translator-provider`：`openai` / `ollama` / `opus-mt`，默认 `openai`）：Web 端在首页"AI 服务"面板配置多份 profile 随时切换；CLI 直跑时用 `--translator-base-url` / `--translator-model` / `--translator-api-key` / `--translator-timeout`。本地 OPUS-MT 传 `--translator-provider opus-mt --translator-model <CT2模型目录> --translator-tokenizer-dir <tokenizer目录>`（默认 `models/opus-mt-en-zh`），`--translator-device` / `--translator-compute-type` 默认 `auto`。
+
+### 环境变量
+
+项目代码只直接读取 `HF_HUB_OFFLINE`；下表其余项由 huggingface_hub 库消费。`start.bat` 已预设好镜像与超时，手动跑 CLI 时按需自设：
+
+| 变量 | 作用 |
+| --- | --- |
+| `HF_ENDPOINT` | HuggingFace 下载镜像；`start.bat` 默认 `https://hf-mirror.com`（国内加速） |
+| `HF_TOKEN` | pyannote gated 模型下载凭据（等价于 `--hf-token`） |
+| `HF_HUB_OFFLINE` | 设为 `1` 强制离线，全部使用本地模型 |
+| `HF_HUB_ETAG_TIMEOUT` / `HF_HUB_DOWNLOAD_TIMEOUT` | 下载超时；`start.bat` 调大到 300s / 1800s |
+| `HF_HUB_DISABLE_XET` | `start.bat` 设 `1`，规避 Xet 传输在部分网络下卡住的问题 |
 
 ### 命令行
 
@@ -93,6 +136,15 @@ mtd-subtitle --help
 ---
 
 ## Web 界面指南
+
+第一次完整跑通一个任务的流程：
+
+1. **建任务**：首页上传本地音视频（多文件自动排队），或贴 URL 由 yt-dlp 下载（进度实时显示）
+2. **等待处理**：转录与 demucs 人声分离并行执行，说话人分离吃人声轨；完成后任务进入待审状态
+3. **校对**：编辑器里手动改，或跑 LLM 两遍校对（Pass1 自动替换 + Pass2 人工审核）
+4. **翻译**（可选）：整片翻译；之后拆分/合并过的段落会标记"需重译"
+5. **样式与命名**：设置页调字体/颜色/遮罩，给说话人起名
+6. **产出**：导出 SRT/ASS，整片烧录或选段切片；所有产物在 `runs/<job_id>/`，重启服务不丢
 
 ### 首页（上传）
 
@@ -146,7 +198,7 @@ mtd-subtitle --help
 │   │   └── llm_profiles.py      # LLM 配置存储
 │   ├── subtitle/                # 数据模型、SRT/ASS/文本导出、后处理
 │   └── transcript_parser.py     # whisper 原始输出解析
-├── tests/                       # pytest 测试（142 个）
+├── tests/                       # pytest 测试（239 个）
 ├── config/                      # 运行时配置（不入库）
 ├── models/                      # 本地模型（不入库）
 ├── tools/                       # ffmpeg / yt-dlp 可执行（不入库）
@@ -176,9 +228,20 @@ mtd-subtitle --help
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests -q
+.venv\Scripts\python.exe -m ruff check moss_transcribe_diarize tests
 ```
 
-前端改动直接编辑 `moss_transcribe_diarize/app/static/` 下的文件（服务端 no-store，刷新即生效）。
+前端改动直接编辑 `moss_transcribe_diarize/app/static/` 下的文件（服务端 no-store，刷新即生效）。CI（GitHub Actions）跑 ruff + pytest。
+
+## 常见问题
+
+- **GPU 没用上 / 想纯 CPU 跑**：手动启动传 `--device cuda --dtype float16`（N 卡）或 `--device cpu --dtype int8`（CPU）；`auto` 会自动探测。CPU 能跑但慢很多。
+- **pyannote 报 401/403**：`speaker-diarization-3.1` 是 gated 模型——先在 HuggingFace 模型页登录并同意协议，再通过 `--hf-token` 或 `HF_TOKEN` 提供令牌；也可以把模型本地化到 `models/pyannote-speaker-diarization-local`，用 `--pyannote-model` 指向本地目录。
+- **URL 下载失败 / 读不到浏览器 cookies**：默认使用 Firefox 的 cookies（Chrome/Edge 的 App-Bound Encryption 会导致 yt-dlp 读不到），可在首页"下载 Cookie"处换浏览器来源。
+- **报 ffmpeg 不可用**：按"外部工具"一节放置便携版到 `tools/ffmpeg/`，或把 `ffmpeg` / `ffprobe` 装进系统 PATH。
+- **模型下载慢 / 失败**：`start.bat` 已默认走 `hf-mirror.com` 镜像并调大超时；手动启动时自行设置 `HF_ENDPOINT` 等环境变量（见上表）。
+- **端口被占用**：`mtd-subtitle-web --port 8080` 换端口启动。
+- **想完全离线使用**：把用到的模型全部本地化到 `models/`，设 `HF_HUB_OFFLINE=1`。
 
 ## 已知限制
 
@@ -186,6 +249,8 @@ mtd-subtitle --help
 - 热词只对近音错听有效（如 Nero→Neuro），远距错听救不回来
 - Windows 优先；其他平台未测试
 
-## License
+## 致谢与许可
 
-参见 [LICENSE](LICENSE)。
+本项目基于 [OpenMOSS/MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize) 二次开发（包名 `moss_transcribe_diarize` 保留上游命名），在其转录/字幕骨架上重构并扩展了本地字幕工作台的大部分功能。遵循 [Apache-2.0](LICENSE) 协议开源。
+
+依赖的关键开源组件：[faster-whisper](https://github.com/SYSTRAN/faster-whisper)（转录）、[pyannote.audio](https://github.com/pyannote/pyannote-audio)（说话人分离）、[demucs](https://github.com/adefossez/demucs)（人声分离）、[yt-dlp](https://github.com/yt-dlp/yt-dlp)（下载）、[FFmpeg](https://ffmpeg.org)（切片/烧录）。
