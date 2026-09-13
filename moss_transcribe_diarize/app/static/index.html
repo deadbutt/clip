@@ -267,7 +267,8 @@
           <button id="syncSubtitles" class="ghost" type="button">Sync SRT</button>
           <span id="saveStatus" class="save-status saved">已保存</span>
           <button id="save" class="primary is-hidden">保存修改</button>
-          <button id="openProofread" class="ghost" type="button">AI 校对</button>
+          <button id="openProofread" class="ghost" type="button">校对原稿</button>
+          <button id="openAlignment" class="ghost" type="button">校对译文</button>
           <button id="openTranslate" class="ghost" type="button">翻译</button>
           <button id="openClips" class="ghost" type="button">精华切片</button>
           <button id="render" class="warn" disabled>检测 FFmpeg...</button>
@@ -345,7 +346,7 @@
         <div id="proofreadModal" class="settings-modal is-hidden">
           <div class="settings-modal-card wide">
             <div class="settings-modal-head">
-              <strong>AI 校对</strong>
+              <strong>校对原稿</strong>
               <button id="closeProofread" class="ghost small" type="button" aria-label="关闭">✕</button>
             </div>
             <div class="settings-modal-body">
@@ -372,6 +373,25 @@
                 </div>
                 <div id="proofreadTyposList" class="proofread-list"></div>
               </div>
+            </div>
+          </div>
+        </div>
+        <div id="alignmentModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card wide">
+            <div class="settings-modal-head">
+              <strong>校对译文</strong>
+              <button id="closeAlignment" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body">
+              <div id="alignmentModelStatus" class="meta model-state"></div>
+              <div id="alignmentProgressMeta" class="render-progress-meta is-hidden" style="margin-top:10px"><span>译文校对进度</span><strong id="alignmentProgressText">0%</strong></div>
+              <div id="alignmentProgress" class="progress is-hidden"><div id="alignmentProgressBar" class="bar"></div></div>
+              <div class="actions" style="margin-top:12px">
+                <button id="alignmentRun" class="primary small" type="button">开始校对译文</button>
+                <button id="alignmentApply" class="warn small" type="button" disabled>一键应用选中修正</button>
+                <span id="alignmentSelectionMeta" class="meta"></span>
+              </div>
+              <div id="alignmentStatus" class="export-status"></div>
               <div id="proofreadAlignmentSection" class="proofread-section is-hidden">
                 <div class="proofread-section-head">
                   <label class="proofread-check"><input type="checkbox" id="proofreadAlignmentAll" checked /> <strong>译文对照修正</strong></label>

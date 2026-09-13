@@ -159,6 +159,18 @@ const clipContextMenu = document.querySelector('#clipContextMenu');
 const openProofreadBtn = document.querySelector('#openProofread');
 const closeProofreadBtn = document.querySelector('#closeProofread');
 const proofreadModal = document.querySelector('#proofreadModal');
+const openAlignmentBtn = document.querySelector('#openAlignment');
+const closeAlignmentBtn = document.querySelector('#closeAlignment');
+const alignmentModal = document.querySelector('#alignmentModal');
+const alignmentModelStatusEl = document.querySelector('#alignmentModelStatus');
+const alignmentRunBtn = document.querySelector('#alignmentRun');
+const alignmentApplyBtn = document.querySelector('#alignmentApply');
+const alignmentStatusEl = document.querySelector('#alignmentStatus');
+const alignmentSelectionMetaEl = document.querySelector('#alignmentSelectionMeta');
+const alignmentProgressMetaEl = document.querySelector('#alignmentProgressMeta');
+const alignmentProgressTextEl = document.querySelector('#alignmentProgressText');
+const alignmentProgressEl = document.querySelector('#alignmentProgress');
+const alignmentProgressBarEl = document.querySelector('#alignmentProgressBar');
 const proofreadModelStatusEl = document.querySelector('#proofreadModelStatus');
 const proofreadRunBtn = document.querySelector('#proofreadRun');
 const proofreadApplyBtn = document.querySelector('#proofreadApply');
@@ -199,6 +211,8 @@ let llmProfiles = [];
 let llmEditingProfileId = null;
 let proofreadResult = null;
 let proofreadPollTimer = null;
+let alignmentResult = null;
+let alignmentPollTimer = null;
 let jobs = [];
 let currentJob = null;
 let rerunDraftJob = null;
@@ -374,6 +388,8 @@ function openAiSettings() {
   closeTranslate();
   closeClips();
   proofreadModal.classList.add('is-hidden');
+  stopAlignmentPolling();
+  alignmentModal.classList.add('is-hidden');
   setVisible(aiSettingsView);
   loadLlmProfiles();
 }
@@ -667,7 +683,11 @@ closeTranslateBtn.addEventListener('click', closeTranslate);
 openProofreadBtn.addEventListener('click', openProofreadModal);
 closeProofreadBtn.addEventListener('click', () => { stopProofreadPolling(); proofreadModal.classList.add('is-hidden'); });
 proofreadRunBtn.addEventListener('click', runProofread);
-proofreadApplyBtn.addEventListener('click', applyProofread);
+proofreadApplyBtn.addEventListener('click', () => applyProofreadSelection());
+openAlignmentBtn.addEventListener('click', openAlignmentModal);
+closeAlignmentBtn.addEventListener('click', () => { stopAlignmentPolling(); alignmentModal.classList.add('is-hidden'); });
+alignmentRunBtn.addEventListener('click', runAlignmentCheck);
+alignmentApplyBtn.addEventListener('click', () => applyAlignmentFixes());
 proofreadTermsAllEl.addEventListener('change', () => toggleProofreadGroup('term'));
 proofreadTyposAllEl.addEventListener('change', () => toggleProofreadGroup('typo'));
 llmProfileAddBtn.addEventListener('click', () => showLlmProfileEditor(null));
@@ -691,6 +711,12 @@ settingsModal.addEventListener('click', (event) => {
 });
 translateModal.addEventListener('click', (event) => {
   if (event.target === translateModal) closeTranslate();
+});
+alignmentModal.addEventListener('click', (event) => {
+  if (event.target === alignmentModal) {
+    stopAlignmentPolling();
+    alignmentModal.classList.add('is-hidden');
+  }
 });
 clipsModal.addEventListener('click', (event) => {
   if (event.target === clipsModal) closeClips();
@@ -935,20 +961,30 @@ translationReviewListEl.addEventListener('click', (event) => {
 proofreadAlignmentListEl.addEventListener('click', (event) => {
   const button = event.target.closest('[data-alignment-action]');
   if (!button) return;
-  const item = button.closest('.translation-review-item');
+  const item = button.closest('.proofread-item');
   if (!item) return;
   const index = Number(item.dataset.index);
   const start = Number(item.dataset.start || 0);
   const key = item.dataset.key || '';
+  if (button.dataset.alignmentAction === 'apply') {
+    const alignmentId = item.dataset.alignmentId || '';
+    if (alignmentId) applyAlignmentFixes([alignmentId]);
+    return;
+  }
+  if (button.dataset.alignmentAction === 'undo') {
+    const alignmentId = item.dataset.alignmentId || '';
+    if (alignmentId) undoAlignmentFixes([alignmentId]);
+    return;
+  }
   if (button.dataset.alignmentAction === 'dismiss') {
     if (key) dismissedAlignmentItems.add(key);
-    renderProofreadResult(proofreadResult);
+    renderAlignmentIssues(alignmentResult);
     return;
   }
   if (Number.isFinite(index) && index >= 0) setActiveSegment(index, true);
   if (Number.isFinite(start)) preview.currentTime = Math.max(0, start);
   if (button.dataset.alignmentAction === 'play') preview.play().catch(() => {});
-  proofreadModal.classList.add('is-hidden');
+  alignmentModal.classList.add('is-hidden');
   updateSubtitlePreview();
 });
 
@@ -1287,6 +1323,8 @@ function renderCurrentJob(job, options = {}) {
     translationReviewJobId = job.id;
     dismissedTranslationReviewItems = new Set();
     dismissedAlignmentItems = new Set();
+    alignmentResult = null;
+    proofreadResult = null;
   }
   ensureClipQueueForJob();
   renderJobList();
@@ -1309,6 +1347,8 @@ function showImportView(options = {}) {
   closeSettings();
   closeTranslate();
   proofreadModal.classList.add('is-hidden');
+  stopAlignmentPolling();
+  alignmentModal.classList.add('is-hidden');
   closeClips();
   setEditorDirty(false);
   fileInput.value = '';
@@ -1389,6 +1429,7 @@ async function showEditor(job, options = {}) {
   closeTranslate();
   // Post-processing runs in place; the workbench toolbar owns its progress.
   proofreadModal.classList.add('is-hidden');
+  alignmentModal.classList.add('is-hidden');
   closeClips();
   const mediaUrl = apiUrl(`api/jobs/${job.id}/media`);
   if (preview.dataset.jobId !== job.id) {
@@ -1416,6 +1457,7 @@ function updateEditorChrome(job) {
   updateRenderAction(job);
   updateTranslateAction();
   updateProofreadAction();
+  updateAlignmentAction();
   updateClipActions();
   updateRerunAction(job);
   if (syncSubtitlesBtn) syncSubtitlesBtn.disabled = editorDirty || !EDIT_STATES.has(job.status);
@@ -3475,14 +3517,17 @@ function updateOperationProgress(job) {
   operationProgressMetaEl.classList.toggle('is-hidden', !active);
   operationProgressEl.classList.toggle('is-hidden', !active);
   if (!active) return;
-  const info = status === 'translating' ? (job.translation || {}) : (job.proofread || {});
+  const alignmentActive = status === 'proofreading' && job.alignment && job.alignment.in_progress;
+  const info = status === 'translating'
+    ? (job.translation || {})
+    : alignmentActive ? job.alignment : (job.proofread || {});
   const done = Number(info.done || 0);
   const total = Number(info.total || 0);
   const rawPercent = info.percent == null
     ? (total > 0 ? done * 100 / total : 0)
     : Number(info.percent || 0);
   const percent = Math.max(0, Math.min(100, rawPercent));
-  operationProgressLabelEl.textContent = status === 'translating' ? '翻译进度' : '校对进度';
+  operationProgressLabelEl.textContent = status === 'translating' ? '翻译进度' : alignmentActive ? '译文校对进度' : '源稿校对进度';
   operationProgressTextEl.textContent = total > 0
     ? `${done}/${total} (${Math.round(percent)}%)`
     : `${Math.round(percent)}%`;
@@ -3659,9 +3704,10 @@ function activeLlmProfile() {
 
 function updateProofreadAction() {
   const busy = currentJob && RUNNING_STATES.has(currentJob.status);
+  const proofBusy = busy && currentJob && currentJob.proofread && currentJob.proofread.in_progress;
   const active = activeLlmProfile();
   proofreadRunBtn.disabled = !currentJob || busy || !active;
-  proofreadRunBtn.textContent = busy && currentJob && currentJob.status === 'proofreading' ? '校对中...' : (active ? '开始校对' : '未配置 AI 服务');
+  proofreadRunBtn.textContent = proofBusy ? '校对中...' : (active ? '开始校对' : '未配置 AI 服务');
   openProofreadBtn.disabled = !currentJob;
   const target = currentJob && currentJob.translation && currentJob.translation.source_available ? '英文源稿（译文不受影响，应用后需重新翻译）' : '当前字幕稿';
   proofreadModelStatusEl.textContent = active
@@ -3669,17 +3715,46 @@ function updateProofreadAction() {
     : '未配置 AI 服务。请到 设置 → AI 服务 添加并激活一个 API 配置。';
 }
 
+function updateAlignmentAction() {
+  const busy = currentJob && RUNNING_STATES.has(currentJob.status);
+  const alignmentBusy = busy && currentJob && currentJob.alignment && currentJob.alignment.in_progress;
+  const active = activeLlmProfile();
+  const translation = (currentJob && currentJob.translation) || {};
+  const translated = !!(translation.source_available || (translation.applied && !translation.in_progress));
+  openAlignmentBtn.disabled = !currentJob || !translated;
+  alignmentRunBtn.disabled = !currentJob || busy || !translated || !active;
+  alignmentRunBtn.textContent = alignmentBusy
+    ? '校对中...' : (active ? '开始校对译文' : '未配置 AI 服务');
+  alignmentModelStatusEl.textContent = !translated
+    ? '当前任务尚未翻译，完成翻译后才能校对译文。'
+    : active
+      ? `已激活：${active.name} · ${active.model || '默认模型'}。将源稿与当前译文逐段对照。`
+      : '未配置 AI 服务。请到 设置 → AI 服务 添加并激活一个 API 配置。';
+  updateAlignmentSelection();
+}
+
+function clearProofreadPanel(message) {
+  // 弹窗 DOM 在关闭时只是隐藏, 切换任务后必须显式清空, 否则上一个任务的渲染残留。
+  proofreadResult = null;
+  proofreadTyposListEl.innerHTML = '';
+  proofreadTermsListEl.innerHTML = '';
+  proofreadTypoSectionEl.classList.add('is-hidden');
+  proofreadTermSectionEl.classList.add('is-hidden');
+  proofreadTyposMetaEl.textContent = '';
+  proofreadTermsMetaEl.textContent = '';
+  proofreadStatusEl.textContent = message;
+  updateProofreadAction();
+}
+
 function openProofreadModal() {
   updateProofreadAction();
   proofreadModal.classList.remove('is-hidden');
   if (!currentJob) return;
-  const proof = (currentJob && currentJob.proofread) || {};
-  if (proof.result_available && !proofreadResult) {
+  const proof = currentJob.proofread || {};
+  if (proof.result_available) {
     loadProofreadResult();
-  } else if (!proof.read_result && proofreadResult) {
-    renderProofreadResult(proofreadResult);
   } else {
-    updateProofreadAction();
+    clearProofreadPanel('本任务还没有校对结果，点击"开始校对"生成。');
   }
 }
 
@@ -3687,10 +3762,48 @@ async function loadProofreadResult() {
   if (!currentJob) return;
   try {
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/proofread`));
-    if (!res.ok) return;
+    if (!res.ok) {
+      clearProofreadPanel('本任务还没有校对结果，点击"开始校对"生成。');
+      return;
+    }
     const data = await res.json();
     proofreadResult = data;
     renderProofreadResult(data);
+  } catch (err) { /* ignore */ }
+}
+
+function clearAlignmentPanel(message) {
+  // 同 clearProofreadPanel: 弹窗 DOM 残留必须显式清理。
+  alignmentResult = null;
+  proofreadAlignmentListEl.innerHTML = '';
+  proofreadAlignmentSectionEl.classList.add('is-hidden');
+  proofreadAlignmentMetaEl.textContent = '';
+  alignmentStatusEl.textContent = message;
+  updateAlignmentSelection();
+}
+
+function openAlignmentModal() {
+  updateAlignmentAction();
+  alignmentModal.classList.remove('is-hidden');
+  if (!currentJob) return;
+  const info = currentJob.alignment || {};
+  if (info.result_available) {
+    loadAlignmentResult();
+  } else {
+    clearAlignmentPanel('还没有译文校对结果，点击"开始校对译文"将源稿与译文逐段对照。');
+  }
+}
+
+async function loadAlignmentResult() {
+  if (!currentJob) return;
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/alignment`));
+    if (!res.ok) {
+      clearAlignmentPanel('还没有译文校对结果，点击"开始校对译文"将源稿与译文逐段对照。');
+      return;
+    }
+    alignmentResult = await res.json();
+    renderAlignmentIssues(alignmentResult);
   } catch (err) { /* ignore */ }
 }
 
@@ -3698,6 +3811,13 @@ function stopProofreadPolling() {
   if (proofreadPollTimer) {
     clearInterval(proofreadPollTimer);
     proofreadPollTimer = null;
+  }
+}
+
+function stopAlignmentPolling() {
+  if (alignmentPollTimer) {
+    clearInterval(alignmentPollTimer);
+    alignmentPollTimer = null;
   }
 }
 
@@ -3738,21 +3858,15 @@ async function runProofread() {
   const saved = await saveSegments();
   if (!saved) return;
   proofreadRunBtn.disabled = true;
-  const translated = !!(currentJob.translation && currentJob.translation.source_available);
-  const needsAlignment = translated && currentJob.translation.engine !== 'local';
-  proofreadStatusEl.textContent = needsAlignment
-    ? '校对中...（源稿错字修正 + 术语分析 + 译文对照检查）'
-    : translated
-      ? '校对中...（源稿错字修正 + 术语分析；本地译文不做 AI 对照）'
-      : '校对中...（错字修正 + 全片术语分析）';
+  proofreadStatusEl.textContent = '校对中...（源稿错字修正 + 术语分析）';
   proofreadProgressMetaEl.classList.remove('is-hidden');
   proofreadProgressEl.classList.remove('is-hidden');
   proofreadProgressTextEl.textContent = '0%';
   proofreadProgressBarEl.style.width = '2%';
-  dismissedAlignmentItems = new Set();
   currentJob = { ...currentJob, status: 'proofreading' };
   jobs = jobs.map((job) => job.id === currentJob.id ? currentJob : job);
   renderCurrentJob(currentJob, { skipSegments: true });
+  proofreadModal.classList.remove('is-hidden');
   ensurePolling();
   startProofreadPolling();
   try {
@@ -3765,8 +3879,9 @@ async function runProofread() {
     proofreadResult = data;
     renderProofreadResult(data);
     await refreshJobs({ keepSelection: true, skipSegments: true });
+    proofreadModal.classList.remove('is-hidden');
     const proofCount = (data.suggestions || []).length + (data.term_corrections || []).length;
-    setTaskNotice(`校对完成：发现 ${proofCount} 处可处理项，点击“AI 校对”查看详情。`, '');
+    setTaskNotice(`源稿校对完成：发现 ${proofCount} 处可处理项，点击“校对原稿”查看详情。`, '');
   } catch (err) {
     stopProofreadPolling();
     proofreadStatusEl.textContent = '校对失败：' + (err.message || err);
@@ -3779,45 +3894,62 @@ function renderProofreadResult(data) {
   if (!data) return;
   const suggestions = data.suggestions || [];
   const terms = data.term_corrections || [];
-  const alignment = data.alignment || null;
   const applied = !!data.applied;
+  const appliedIds = new Set((data.applied_ids || []).map(String));
+  const appliedTermKeys = new Set((data.applied_terms || []).map((t) => `${t.wrong}|${t.right}`));
 
-  const alignmentCount = alignment ? (alignment.issue_count || (alignment.issues || []).length) : 0;
   const parts = [`${suggestions.length} 处错字修正`, `${terms.length} 条术语`];
-  if (alignment) parts.push(`译文对照 ${alignmentCount} 处疑似`);
   proofreadStatusEl.textContent = applied
-    ? '以下为最近一次校对结果（已应用过一次，可重新勾选应用其余项）。'
+    ? '以下为最近一次校对结果；带"已应用"标记的条目已写入字幕，可继续勾选其余项。'
     : `校对完成，耗时 ${data.elapsed_sec || 0}s：${parts.join('、')}。`;
 
   // ---- terms
   proofreadTermSectionEl.classList.toggle('is-hidden', !terms.length);
   proofreadTermsMetaEl.textContent = terms.length ? `${terms.length} 条，共命中 ${terms.reduce((sum, t) => sum + Number(t.hits || 0), 0)} 处` : '';
-  proofreadTermsListEl.innerHTML = terms.map((t, i) => `
+  proofreadTermsListEl.innerHTML = terms.map((t, i) => {
+    const isApplied = !!t.applied || appliedTermKeys.has(`${t.wrong}|${t.right}`);
+    const headLeft = isApplied
+      ? `<span class="pill ok">已应用</span> <span class="id">${escapeHtml(t.wrong || '')}</span> → <span class="id">${escapeHtml(t.right || '')}</span>`
+      : `<label class="proofread-check"><input type="checkbox" data-term-check="${i}" checked /> <span class="id">${escapeHtml(t.wrong || '')}</span> → <span class="id">${escapeHtml(t.right || '')}</span></label>`;
+    return `
     <div class="proofread-item" data-term-index="${i}">
       <div class="proofread-item-head">
-        <label class="proofread-check"><input type="checkbox" data-term-check="${i}" ${applied ? '' : 'checked'} /> <span class="id">${escapeHtml(t.wrong || '')}</span> → <span class="id">${escapeHtml(t.right || '')}</span></label>
+        ${headLeft}
         <span>命中 ${Number(t.hits || 0)} 处</span>
       </div>
       ${(t.previews || []).slice(0, 2).map((p) => `
         <div class="proofread-diff"><span class="before">${escapeHtml(p.original || '')}</span><br />→ <span class="after">${escapeHtml(p.corrected || '')}</span></div>`).join('')}
-    </div>`).join('');
+      ${isApplied ? '' : `
+      <div class="translation-review-actions">
+        <button class="primary small" type="button" data-proofread-action="apply">应用这条</button>
+      </div>`}
+    </div>`;
+  }).join('');
 
   // ---- typos
   proofreadTypoSectionEl.classList.toggle('is-hidden', !suggestions.length);
   proofreadTyposMetaEl.textContent = suggestions.length ? `${suggestions.length} 处` : '';
-  proofreadTyposListEl.innerHTML = suggestions.map((s, i) => `
+  proofreadTyposListEl.innerHTML = suggestions.map((s, i) => {
+    const isApplied = !!s.applied || appliedIds.has(String(s.id || ''));
+    const headLeft = isApplied
+      ? `<span class="pill ok">已应用</span> <span class="id">${escapeHtml(s.id || '')}</span>`
+      : `<label class="proofread-check"><input type="checkbox" data-typo-check="${i}" checked /> <span class="id">${escapeHtml(s.id || '')}</span></label>`;
+    return `
     <div class="proofread-item" data-typo-index="${i}">
       <div class="proofread-item-head">
-        <label class="proofread-check"><input type="checkbox" data-typo-check="${i}" ${applied ? '' : 'checked'} /> <span class="id">${escapeHtml(s.id || '')}</span></label>
+        ${headLeft}
         <span>${s.type === 'typo' ? '错字/标点' : s.type}</span>
       </div>
       <div class="proofread-diff"><span class="before">${escapeHtml(s.original || '')}</span><br />→ <span class="after">${escapeHtml(s.corrected || '')}</span></div>
-    </div>`).join('');
+      <div class="translation-review-actions">
+        ${isApplied
+          ? '<button class="ghost small" type="button" data-proofread-action="undo">撤回修正</button>'
+          : '<button class="primary small" type="button" data-proofread-action="apply">应用这条</button>'}
+      </div>
+    </div>`;
+  }).join('');
 
-  // ---- alignment（只读标注，仅已翻译任务有）
-  renderAlignmentIssues(alignment);
-
-  if (!terms.length && !suggestions.length && !alignmentCount) {
+  if (!terms.length && !suggestions.length) {
     proofreadStatusEl.textContent = '校对完成：没有发现需要修改的地方。';
   }
   updateProofreadSelection();
@@ -3836,20 +3968,17 @@ function toggleProofreadGroup(group) {
 function updateProofreadSelection() {
   const typoBoxes = Array.from(document.querySelectorAll('[data-typo-check]'));
   const termBoxes = Array.from(document.querySelectorAll('[data-term-check]'));
-  const alignmentBoxes = Array.from(document.querySelectorAll('[data-alignment-check]'));
   const typoCount = typoBoxes.filter((b) => b.checked).length;
   const termCount = termBoxes.filter((b) => b.checked).length;
-  const alignmentCount = alignmentBoxes.filter((b) => b.checked).length;
-  const total = typoCount + termCount + alignmentCount;
+  const total = typoCount + termCount;
   const parts = [];
   if (typoCount) parts.push(`${typoCount} 处修正`);
   if (termCount) parts.push(`${termCount} 条术语`);
-  if (alignmentCount) parts.push(`${alignmentCount} 处译文`);
   proofreadSelectionMetaEl.textContent = total ? `已选 ${parts.join(' + ')}` : '未选择任何修改';
   proofreadApplyBtn.disabled = !currentJob || total === 0;
 }
 
-[proofreadTermsListEl, proofreadTyposListEl, proofreadAlignmentListEl].forEach((listEl) => {
+[proofreadTermsListEl, proofreadTyposListEl].forEach((listEl) => {
   listEl.addEventListener('change', (event) => {
     const box = event.target;
     if (!box || box.type !== 'checkbox') return;
@@ -3857,6 +3986,33 @@ function updateProofreadSelection() {
     if (item) item.classList.toggle('unchecked', !box.checked);
     updateProofreadSelection();
   });
+  listEl.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-proofread-action]');
+    if (!button) return;
+    const item = button.closest('.proofread-item');
+    if (!item || !proofreadResult) return;
+    if (item.dataset.termIndex != null) {
+      if (button.dataset.proofreadAction !== 'apply') return;
+      const term = proofreadResult.term_corrections[Number(item.dataset.termIndex)];
+      if (term) applyProofreadSelection([], [{ wrong: term.wrong, right: term.right }]);
+    } else if (item.dataset.typoIndex != null) {
+      const suggestion = proofreadResult.suggestions[Number(item.dataset.typoIndex)];
+      if (!suggestion) return;
+      if (button.dataset.proofreadAction === 'apply') {
+        applyProofreadSelection([suggestion.id], []);
+      } else if (button.dataset.proofreadAction === 'undo') {
+        undoProofreadFixes([suggestion.id]);
+      }
+    }
+  });
+});
+
+proofreadAlignmentListEl.addEventListener('change', (event) => {
+  const box = event.target;
+  if (!box || box.type !== 'checkbox') return;
+  const item = box.closest('.proofread-item');
+  if (item) item.classList.toggle('unchecked', !box.checked);
+  updateAlignmentSelection();
 });
 
 proofreadAlignmentAllEl.addEventListener('change', () => {
@@ -3864,25 +4020,25 @@ proofreadAlignmentAllEl.addEventListener('change', () => {
   document.querySelectorAll('[data-alignment-id]').forEach((item) => {
     item.classList.toggle('unchecked', !proofreadAlignmentAllEl.checked);
   });
-  updateProofreadSelection();
+  updateAlignmentSelection();
 });
 
-async function applyProofread() {
+async function applyProofreadSelection(ids, terms) {
   if (!currentJob || !proofreadResult) return;
-  const ids = Array.from(document.querySelectorAll('[data-typo-check]'))
-    .filter((b) => b.checked)
-    .map((b) => proofreadResult.suggestions[Number(b.dataset.typoCheck)].id);
-  const terms = Array.from(document.querySelectorAll('[data-term-check]'))
-    .filter((b) => b.checked)
-    .map((b) => {
-      const t = proofreadResult.term_corrections[Number(b.dataset.termCheck)];
-      return { wrong: t.wrong, right: t.right };
-    });
-  const alignmentIds = Array.from(document.querySelectorAll('[data-alignment-check]'))
-    .filter((b) => b.checked)
-    .map((b) => b.dataset.alignmentCheck)
-    .filter(Boolean);
-  if (!ids.length && !terms.length && !alignmentIds.length) return;
+  if (!Array.isArray(ids)) {
+    ids = Array.from(document.querySelectorAll('[data-typo-check]'))
+      .filter((b) => b.checked)
+      .map((b) => proofreadResult.suggestions[Number(b.dataset.typoCheck)].id);
+  }
+  if (!Array.isArray(terms)) {
+    terms = Array.from(document.querySelectorAll('[data-term-check]'))
+      .filter((b) => b.checked)
+      .map((b) => {
+        const t = proofreadResult.term_corrections[Number(b.dataset.termCheck)];
+        return { wrong: t.wrong, right: t.right };
+      });
+  }
+  if (!ids.length && !terms.length) return;
   proofreadApplyBtn.disabled = true;
   proofreadStatusEl.textContent = '正在应用修改...';
   try {
@@ -3895,41 +4051,68 @@ async function applyProofread() {
     if (!res.ok) throw new Error(data.detail || '应用失败');
     let message = `已应用 ${data.applied_count || 0} 处修正`;
     if (data.term_hits) message += `、术语替换 ${data.term_hits} 处`;
-    if (alignmentIds.length) {
-      try {
-        const alignmentRes = await fetch(apiUrl(`api/jobs/${currentJob.id}/alignment/apply`), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: alignmentIds })
-        });
-        const alignmentData = await alignmentRes.json();
-        if (!alignmentRes.ok) throw new Error(alignmentData.detail || '译文修正应用失败');
-        if (alignmentData.applied_count) {
-          message += `、译文修正 ${alignmentData.applied_count} 处`;
-        }
-        if (Array.isArray(alignmentData.segments) && alignmentData.segments.length) {
-          renderSegments(alignmentData.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
-          setEditorDirty(false);
-        }
-        // 应用成功的条目从结果中移除,重渲染弹窗
-        if (proofreadResult.alignment && Array.isArray(proofreadResult.alignment.issues)) {
-          const appliedSet = new Set(alignmentData.applied_ids || []);
-          proofreadResult.alignment.issues = proofreadResult.alignment.issues
-            .filter((item) => !appliedSet.has(item.id));
-          proofreadResult.alignment.issue_count = proofreadResult.alignment.issues.length;
-        }
-      } catch (alignmentErr) {
-        message += `；译文修正应用失败：${alignmentErr.message || alignmentErr}`;
-      }
-    }
     message += '。';
     if (data.needs_retranslate) message += '本次修改写入了英文源稿，请重新翻译以同步译文。';
     proofreadStatusEl.textContent = message;
-    proofreadResult = { ...proofreadResult, applied: true };
+    const appliedIdSet = new Set((data.applied_ids || []).map(String));
+    const appliedTermKeys = new Set((data.applied_terms || []).map((t) => `${t.wrong}|${t.right}`));
+    proofreadResult = {
+      ...proofreadResult,
+      applied: true,
+      applied_ids: [...new Set([...(proofreadResult.applied_ids || []), ...appliedIdSet])].map(String),
+      applied_terms: [
+        ...(proofreadResult.applied_terms || []),
+        ...(data.applied_terms || []),
+      ],
+      suggestions: (proofreadResult.suggestions || []).map((s) =>
+        appliedIdSet.has(String(s.id || '')) ? { ...s, applied: true } : s
+      ),
+      term_corrections: (proofreadResult.term_corrections || []).map((t) =>
+        appliedTermKeys.has(`${t.wrong}|${t.right}`) ? { ...t, applied: true } : t
+      ),
+    };
     renderProofreadResult(proofreadResult);
     await refreshJobs({ keepSelection: true, skipSegments: false });
   } catch (err) {
     proofreadStatusEl.textContent = '应用失败：' + (err.message || err);
+  } finally {
+    updateProofreadSelection();
+    updateProofreadAction();
+  }
+}
+
+async function undoProofreadFixes(ids) {
+  if (!currentJob || !proofreadResult || !Array.isArray(ids) || !ids.length) return;
+  proofreadStatusEl.textContent = '正在撤回修正...';
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/proofread/undo`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '撤回失败');
+    const undone = new Set(data.undone_ids || []);
+    proofreadResult = {
+      ...proofreadResult,
+      applied_ids: (proofreadResult.applied_ids || []).filter((id) => !undone.has(String(id))),
+      suggestions: (proofreadResult.suggestions || []).map((s) =>
+        undone.has(String(s.id || '')) ? { ...s, applied: false } : s
+      ),
+    };
+    renderProofreadResult(proofreadResult);
+    if (Array.isArray(data.segments) && data.segments.length) {
+      renderSegments(data.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
+      setEditorDirty(false);
+    }
+    let message = `已撤回 ${data.undone_count || 0} 处修正。`;
+    const skippedCount = (data.skipped || []).length;
+    if (skippedCount) message += `另有 ${skippedCount} 处因段落已被手动修改而跳过。`;
+    if (data.needs_retranslate) message += '源稿已变动，请重新翻译以同步译文。';
+    proofreadStatusEl.textContent = message;
+    await refreshJobs({ keepSelection: true, skipSegments: false });
+  } catch (err) {
+    proofreadStatusEl.textContent = '撤回失败：' + (err.message || err);
   } finally {
     updateProofreadSelection();
     updateProofreadAction();
@@ -3947,6 +4130,7 @@ async function loadLlmProfiles() {
     renderLlmProfiles();
     updateTranslateAction();
     updateProofreadAction();
+    updateAlignmentAction();
     updateClipActions();
   } catch (err) { /* ignore */ }
 }
@@ -4059,6 +4243,7 @@ llmProfileListEl.addEventListener('click', async (event) => {
       renderLlmProfiles();
       updateTranslateAction();
       updateProofreadAction();
+      updateAlignmentAction();
       updateClipActions();
     } else if (action === 'test') {
       await testSavedLlmProfile(profileId, btn);
@@ -4074,6 +4259,7 @@ llmProfileListEl.addEventListener('click', async (event) => {
       renderLlmProfiles();
       updateTranslateAction();
       updateProofreadAction();
+      updateAlignmentAction();
       updateClipActions();
     }
   } catch (err) {
@@ -4220,6 +4406,9 @@ async function translateCurrentSubtitles() {
         pretranslation_skips: data.pretranslation_skips || [],
         engine: data.translation_engine || engine,
         service: data.translation_service || null,
+        applied: true,
+        in_progress: false,
+        source_available: true,
       }
     };
     renderSegments(data.segments || [], activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
@@ -4330,10 +4519,15 @@ function alignmentItemKey(item) {
 function renderAlignmentIssues(alignment) {
   const items = (alignment && Array.isArray(alignment.issues) ? alignment.issues : [])
     .filter((item) => !dismissedAlignmentItems.has(alignmentItemKey(item)));
+  const historicalApplied = new Set((alignment.applied_ids || []).map(String));
   proofreadAlignmentSectionEl.classList.toggle('is-hidden', !items.length);
   if (!items.length) {
     proofreadAlignmentMetaEl.textContent = '';
     proofreadAlignmentListEl.innerHTML = '';
+    const historical = (alignment.applied_ids || []).length;
+    if (historical) {
+      alignmentStatusEl.textContent = `本轮清单已全部处理完：历史共应用过 ${historical} 处修正（修正已写入字幕）。旧版本应用的明细未保留，新版本起会保留完整的"已应用"记录。`;
+    }
     return;
   }
   const selectable = items.filter((item) => item.suggested && item.suggested !== item.translated_text);
@@ -4342,8 +4536,9 @@ function renderAlignmentIssues(alignment) {
     const index = Number(item.index);
     const start = Number(item.start || 0);
     const key = alignmentItemKey(item);
+    const applied = !!item.applied || historicalApplied.has(String(item.id || ''));
     const severity = item.type === 'addition' || item.type === 'terminology' ? 'info' : 'warning';
-    const canApply = item.suggested && item.suggested !== item.translated_text;
+    const canApply = !applied && item.suggested && item.suggested !== item.translated_text;
     const checkRow = canApply
       ? `<label class="proofread-check"><input type="checkbox" data-alignment-check="${escapeHtml(item.id || '')}" checked /></label>`
       : '';
@@ -4355,6 +4550,7 @@ function renderAlignmentIssues(alignment) {
         <div class="proofread-item-head">
           ${checkRow}
           <span class="id">${escapeHtml(alignmentTypeLabel(item.type))} · ${Number.isFinite(index) ? '#' + (index + 1) : '?'} · ${formatTimelineTime(start)}</span>
+          ${applied ? '<span class="pill ok">已应用</span>' : ''}
           <strong>${escapeHtml(item.note || '')}</strong>
         </div>
         <div class="translation-review-text">SRC ${escapeHtml(item.source_text || '')}</div>
@@ -4362,11 +4558,164 @@ function renderAlignmentIssues(alignment) {
         <div class="translation-review-actions">
           <button class="ghost small" type="button" data-alignment-action="jump">跳到字幕</button>
           <button class="ghost small" type="button" data-alignment-action="play">回看原片</button>
-          <button class="primary small" type="button" data-alignment-action="dismiss">标为已处理</button>
+          ${canApply ? '<button class="primary small" type="button" data-alignment-action="apply">应用这条</button>' : ''}
+          ${applied
+            ? '<button class="ghost small" type="button" data-alignment-action="undo">撤回修正</button>'
+            : '<button class="ghost small" type="button" data-alignment-action="dismiss">标为已处理</button>'}
         </div>
       </div>`;
   }).join('');
-  updateProofreadSelection();
+  updateAlignmentSelection();
+}
+
+function updateAlignmentSelection() {
+  const boxes = Array.from(document.querySelectorAll('[data-alignment-check]'));
+  const count = boxes.filter((box) => box.checked).length;
+  const total = boxes.length;
+  alignmentSelectionMetaEl.textContent = count ? `已选 ${count} / ${total} 处修正` : '未选择任何修正';
+  alignmentApplyBtn.disabled = !currentJob || count === 0;
+}
+
+async function runAlignmentCheck() {
+  if (!currentJob) return;
+  const active = activeLlmProfile();
+  if (!active) {
+    alignmentStatusEl.textContent = '未配置 AI 服务。请到 设置 → AI 服务 添加并激活一个 API 配置。';
+    return;
+  }
+  const translation = currentJob.translation || {};
+  if (!(translation.source_available || (translation.applied && !translation.in_progress))) {
+    alignmentStatusEl.textContent = '请先完成翻译，再校对译文。';
+    return;
+  }
+  const saved = await saveSegments();
+  if (!saved) return;
+  alignmentRunBtn.disabled = true;
+  alignmentStatusEl.textContent = '校对译文中...（源稿与译文逐段对照）';
+  alignmentProgressMetaEl.classList.remove('is-hidden');
+  alignmentProgressEl.classList.remove('is-hidden');
+  alignmentProgressTextEl.textContent = '0%';
+  alignmentProgressBarEl.style.width = '2%';
+  dismissedAlignmentItems = new Set();
+  currentJob = { ...currentJob, status: 'proofreading' };
+  jobs = jobs.map((job) => job.id === currentJob.id ? currentJob : job);
+  renderCurrentJob(currentJob, { skipSegments: true });
+  alignmentModal.classList.remove('is-hidden');
+  ensurePolling();
+  stopAlignmentPolling();
+  alignmentPollTimer = setInterval(async () => {
+    if (!currentJob || currentJob.status !== 'proofreading') {
+      stopAlignmentPolling();
+      return;
+    }
+    try {
+      const res = await fetch(apiUrl(`api/jobs/${currentJob.id}`));
+      if (!res.ok) return;
+      const job = await res.json();
+      const info = job.alignment || {};
+      const percent = Number(info.percent || 0);
+      alignmentProgressTextEl.textContent = `${Math.round(percent)}%`;
+      alignmentProgressBarEl.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+      if (job.status !== 'proofreading') stopAlignmentPolling();
+    } catch (err) { /* ignore */ }
+  }, 2000);
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/alignment`), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '译文校对失败');
+    stopAlignmentPolling();
+    alignmentProgressTextEl.textContent = '100%';
+    alignmentProgressBarEl.style.width = '100%';
+    alignmentResult = data;
+    renderAlignmentIssues(data);
+    const count = Number(data.issue_count || (data.issues || []).length);
+    alignmentStatusEl.textContent = count ? `校对完成：发现 ${count} 处疑似问题。` : '校对完成：没有发现需要修改的地方。';
+    await refreshJobs({ keepSelection: true, skipSegments: true });
+    alignmentModal.classList.remove('is-hidden');
+  } catch (err) {
+    stopAlignmentPolling();
+    alignmentStatusEl.textContent = '译文校对失败：' + (err.message || err);
+  } finally {
+    updateAlignmentAction();
+  }
+}
+
+async function applyAlignmentFixes(ids) {
+  if (!currentJob || !alignmentResult) return;
+  if (!Array.isArray(ids)) {
+    ids = Array.from(document.querySelectorAll('[data-alignment-check]'))
+      .filter((box) => box.checked)
+      .map((box) => box.dataset.alignmentCheck)
+      .filter(Boolean);
+  }
+  if (!ids.length) return;
+  alignmentApplyBtn.disabled = true;
+  alignmentStatusEl.textContent = '正在应用译文修正...';
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/alignment/apply`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '译文修正应用失败');
+    const applied = new Set(data.applied_ids || []);
+    alignmentResult = {
+      ...alignmentResult,
+      issues: (alignmentResult.issues || []).map((item) =>
+        applied.has(item.id) ? { ...item, applied: true } : item
+      ),
+    };
+    renderAlignmentIssues(alignmentResult);
+    if (Array.isArray(data.segments) && data.segments.length) {
+      renderSegments(data.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
+      setEditorDirty(false);
+    }
+    alignmentStatusEl.textContent = `已一键应用 ${data.applied_count || 0} 处译文修正。`;
+    await refreshJobs({ keepSelection: true, skipSegments: false });
+    alignmentModal.classList.remove('is-hidden');
+  } catch (err) {
+    alignmentStatusEl.textContent = '应用失败：' + (err.message || err);
+  } finally {
+    updateAlignmentSelection();
+    updateAlignmentAction();
+  }
+}
+
+async function undoAlignmentFixes(ids) {
+  if (!currentJob || !alignmentResult || !Array.isArray(ids) || !ids.length) return;
+  alignmentStatusEl.textContent = '正在撤回修正...';
+  try {
+    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/alignment/undo`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '撤回失败');
+    const undone = new Set(data.undone_ids || []);
+    alignmentResult = {
+      ...alignmentResult,
+      applied_ids: (alignmentResult.applied_ids || []).filter((id) => !undone.has(String(id))),
+      issues: (alignmentResult.issues || []).map((item) =>
+        undone.has(item.id) ? { ...item, applied: false } : item
+      ),
+    };
+    renderAlignmentIssues(alignmentResult);
+    if (Array.isArray(data.segments) && data.segments.length) {
+      renderSegments(data.segments, activeSegmentIndex >= 0 ? activeSegmentIndex : 0);
+      setEditorDirty(false);
+    }
+    const skippedCount = (data.skipped || []).length;
+    alignmentStatusEl.textContent = `已撤回 ${data.undone_count || 0} 处修正。` +
+      (skippedCount ? `另有 ${skippedCount} 处因段落已被手动修改而跳过。` : '');
+    await refreshJobs({ keepSelection: true, skipSegments: false });
+  } catch (err) {
+    alignmentStatusEl.textContent = '撤回失败：' + (err.message || err);
+  } finally {
+    updateAlignmentSelection();
+    updateAlignmentAction();
+  }
 }
 
 function useActiveSegmentAsClipRange() {
@@ -4882,7 +5231,7 @@ function statusLabel(status) {
     postprocessing: '处理中',
     labeling_speakers: '标记说话人',
     translating: '翻译中',
-    proofreading: 'AI 校对中',
+    proofreading: '校对中',
     waiting_review: '待校对',
     rendering: '烧录中',
     done: '已完成',

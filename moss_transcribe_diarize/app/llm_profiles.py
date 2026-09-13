@@ -64,6 +64,8 @@ class LlmProfileStore:
             "api_key": str(profile.get("api_key") or "").strip(),
             "model": str(profile.get("model") or "").strip()[:80],
             "provider": provider,
+            # 关思考模式必须通过 _clean 传递, 否则 UI 开关和配置文件永远到不了 LLM 调用侧。
+            "disable_thinking": bool(profile.get("disable_thinking")),
             "created_at": float(profile.get("created_at") or time.time()),
         }
 

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from moss_transcribe_diarize.subtitle import SubtitleSegment
+
+logger = logging.getLogger(__name__)
 
 
 class _RetryableTranslationError(RuntimeError):
@@ -106,6 +109,17 @@ class TextTranslator:
     timeout: float = 600.0
     provider: str = "openai"
     protected_terms: tuple[str, ...] = tuple(PROTECTED_TERMS)
+    disable_thinking: bool = False
+    usage_totals: dict[str, int] = field(
+        default_factory=lambda: {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cache_hit_tokens": 0,
+        },
+        init=False,
+        repr=False,
+    )
 
     def runtime_info(self) -> dict[str, Any]:
         return {
@@ -121,7 +135,7 @@ class TextTranslator:
         segments: Iterable[SubtitleSegment],
         *,
         target_language: str = "简体中文",
-        batch_size: int = 18,
+        batch_size: int = 32,
         context_window: int = 2,
         semantic_units: bool = True,
         progress_callback: Callable[[int, int, int, int], None] | None = None,
@@ -130,13 +144,23 @@ class TextTranslator:
         skipped = {index: item.text for index, item in enumerate(items) if translation_skip_reason(item.text)}
         if skipped:
             translatable = [item for index, item in enumerate(items) if index not in skipped]
+            total_count = len(items)
+
+            def scaled_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
+                # 存在跳过段时把可翻译子集的进度缩放回全量口径;
+                # 否则 progress_callback 被置 None,前端在整次翻译期间收不到任何进度。
+                if progress_callback is None:
+                    return
+                scaled = round(done * total_count / total) if total else total_count
+                progress_callback(min(scaled, total_count), total_count, batch_start, batch_count)
+
             translated = self._translate_segments_core(
                 translatable,
                 target_language=target_language,
                 batch_size=batch_size,
                 context_window=context_window,
                 semantic_units=semantic_units,
-                progress_callback=None,
+                progress_callback=scaled_progress if progress_callback else None,
             )
             translated_iter = iter(translated)
             output = [
@@ -160,12 +184,12 @@ class TextTranslator:
         items: list[SubtitleSegment],
         *,
         target_language: str = "简体中文",
-        batch_size: int = 18,
+        batch_size: int = 32,
         context_window: int = 2,
         semantic_units: bool = True,
         progress_callback: Callable[[int, int, int, int], None] | None = None,
     ) -> list[str]:
-        if self.provider == "ollama" and batch_size == 18:
+        if self.provider == "ollama" and batch_size == 32:
             batch_size = 6
         batch_size = max(1, int(batch_size))
         context_window = max(0, int(context_window))
@@ -528,6 +552,9 @@ class TextTranslator:
         return base + "/api/chat"
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # 结构化任务(翻译/排序)不需要推理链; 思考 token 按输出计费, 是账单大头。
+        if self.disable_thinking and self.provider == "openai":
+            payload.setdefault("thinking", {"type": "disabled"})
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -536,7 +563,20 @@ class TextTranslator:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8", errors="replace")
-                return json.loads(raw)
+                data = json.loads(raw)
+                usage = data.get("usage") or {}
+                if isinstance(usage, dict):
+                    self.usage_totals["requests"] += 1
+                    self.usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+                    self.usage_totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+                    self.usage_totals["cache_hit_tokens"] += int(usage.get("prompt_cache_hit_tokens") or 0)
+                    logger.info(
+                        "LLM usage: prompt=%s (cache_hit=%s), completion=%s",
+                        usage.get("prompt_tokens"),
+                        usage.get("prompt_cache_hit_tokens"),
+                        usage.get("completion_tokens"),
+                    )
+                return data
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             message = f"Text model request failed with HTTP {exc.code}: {detail}"

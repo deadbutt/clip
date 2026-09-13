@@ -23,7 +23,7 @@ from moss_transcribe_diarize.subtitle import SubtitleSegment
 logger = logging.getLogger(__name__)
 
 MAX_TEXT_RATIO = 1.5
-WINDOW_TARGETS = 10
+WINDOW_TARGETS = 25
 WINDOW_CONTEXT = 2
 MAX_WORKERS = 4
 
@@ -125,6 +125,16 @@ class Proofreader:
     timeout: float = 300.0
     disable_thinking: bool = False
     last_clip_filter: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    usage_totals: dict[str, int] = field(
+        default_factory=lambda: {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cache_hit_tokens": 0,
+        },
+        init=False,
+        repr=False,
+    )
 
     def runtime_info(self) -> dict[str, Any]:
         return {
@@ -159,7 +169,20 @@ class Proofreader:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8", errors="replace")
-                return json.loads(raw)
+                data = json.loads(raw)
+                usage = data.get("usage") or {}
+                if isinstance(usage, dict):
+                    self.usage_totals["requests"] += 1
+                    self.usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+                    self.usage_totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+                    self.usage_totals["cache_hit_tokens"] += int(usage.get("prompt_cache_hit_tokens") or 0)
+                    logger.info(
+                        "LLM usage: prompt=%s (cache_hit=%s), completion=%s",
+                        usage.get("prompt_tokens"),
+                        usage.get("prompt_cache_hit_tokens"),
+                        usage.get("completion_tokens"),
+                    )
+                return data
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"LLM request failed with HTTP {exc.code}: {detail[:300]}") from exc

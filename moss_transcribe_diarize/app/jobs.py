@@ -1136,6 +1136,14 @@ class JobManager(ClipOperationsMixin):
         job = self.get_job(job_id)
         segments = coerce_subtitle_segments(payload)
         self._backfill_items_from_disk(job, segments)
+        if job.alignment_path.exists() and job.segments_path.exists():
+            try:
+                previous = json.loads(job.segments_path.read_text(encoding="utf-8"))
+                previous_text = {str(item.get("id")): str(item.get("text") or "") for item in previous}
+                if any(previous_text.get(segment.id) != segment.text for segment in segments):
+                    self._invalidate_alignment(job)
+            except (OSError, json.JSONDecodeError):
+                self._invalidate_alignment(job)
         style = None
         if style_payload is not None:
             # Style updates may come from older clients or a temporarily
@@ -1543,6 +1551,7 @@ class JobManager(ClipOperationsMixin):
         with self._translate_lock:
             self._set_status(job, "translating", max(job.progress, 0.95), error=None)
             try:
+                self._invalidate_alignment(job)
                 if not job.source_segments_path.exists():
                     shutil.copyfile(job.segments_path, job.source_segments_path)
                 source_payload = json.loads(job.source_segments_path.read_text(encoding="utf-8"))
@@ -1556,7 +1565,7 @@ class JobManager(ClipOperationsMixin):
 
                 def update_translation_progress(done: int, total: int, batch_start: int, batch_count: int) -> None:
                     ratio = 1.0 if total <= 0 else max(0.0, min(1.0, done / total))
-                    self.job_log(job, f"翻译进度 {done}/{total}（批 {batch_start + 1}/{batch_count}）")
+                    self.job_log(job, f"翻译进度 {done}/{total}（本批 {batch_count} 段，自第 {batch_start + 1} 段起）")
                     job.translation_info = {
                         **translation_details,
                         "applied": False,
@@ -1596,6 +1605,13 @@ class JobManager(ClipOperationsMixin):
                     translate_kwargs["batch_size"] = batch_size
                 translations = translator.translate_segments(segments, **translate_kwargs)
                 elapsed = time.time() - started
+                usage = getattr(translator, "usage_totals", None)
+                if usage and usage.get("requests"):
+                    self.job_log(
+                        job,
+                        f"翻译 token 用量: 输入 {usage['prompt_tokens']} (缓存命中 {usage['cache_hit_tokens']}), "
+                        f"输出 {usage['completion_tokens']}, 共 {usage['requests']} 次请求",
+                    )
                 validation_issues = validate_translation_outputs(segments, translations)
                 translated = apply_translations(segments, translations, mode=mode)
                 self._write_subtitle_files(job, translated)
@@ -1614,6 +1630,7 @@ class JobManager(ClipOperationsMixin):
                     "pretranslation_skips": pretranslation_skips[:50],
                     "validation_issue_count": len(validation_issues),
                     "validation_issues": validation_issues[:20],
+                    "token_usage": dict(usage) if usage and usage.get("requests") else None,
                 }
                 job.status = "waiting_review"
                 job.progress = 0.95
@@ -1667,6 +1684,15 @@ class JobManager(ClipOperationsMixin):
             return job.source_segments_path, "source"
         return job.segments_path, "segments"
 
+    @staticmethod
+    def _invalidate_alignment(job: JobRecord) -> None:
+        """译文或源稿发生变化后,旧的对照结果不能继续应用。"""
+        try:
+            job.alignment_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("alignment result cleanup failed: %s", job.alignment_path, exc_info=True)
+        job.alignment_info = {}
+
     def proofread(
         self,
         job_id: str,
@@ -1687,19 +1713,14 @@ class JobManager(ClipOperationsMixin):
                     for item in json.loads(target_path.read_text(encoding="utf-8"))
                 ]
                 started = time.time()
-                has_translation = target_kind == "source"
-                # 本地 Opus-MT 已经是确定性机器翻译，不再额外调用 LLM 做译文对照；
-                # AI 翻译仍保留这一步，用于检查漏译、错译和术语不一致。
-                needs_alignment = has_translation and job.translation_info.get("engine") != "local"
 
                 def update_proofread_progress(phase: str, done: int, total: int) -> None:
                     if phase == "pass1":
-                        if needs_alignment:
-                            ratio = 0.5 * (done / total) if total else 0.5
-                        else:
-                            ratio = 0.7 * (done / total) if total else 0.7
+                        ratio = 0.7 * (done / total) if total else 0.7
                     else:
-                        ratio = 0.6 if needs_alignment else 1.0
+                        # pass2 是单次大请求: 开始时停在 70%, 完成才到 100%。
+                        # 直接映射 1.0 会让进度条在 pass2 运行期间谎报 100%。
+                        ratio = 0.7 + 0.3 * ((done / total) if total else 1.0)
                     self.job_log(job, f"校对进度 phase={phase} {done}/{total}")
                     job.proofread_info = {
                         **job.proofread_info,
@@ -1725,51 +1746,17 @@ class JobManager(ClipOperationsMixin):
                 }
                 self._touch(job, error=None)
                 result = proofreader.proofread(segments, progress_callback=update_proofread_progress)
-                # 一键校对: 已翻译任务在校对源稿之后追加译文对照检查(只读标注)。
-                alignment_payload: dict[str, Any] | None = None
-                if needs_alignment:
-                    try:
-                        pairs = self._alignment_pairs(job)
-                        if pairs:
-                            def update_alignment_progress(done: int, total: int) -> None:
-                                if job.id in self._cancelled_jobs:
-                                    raise JobCancelled()
-                                ratio = (done / total) if total else 1.0
-                                self.job_log(job, f"对照检查进度 {done}/{total}")
-                                job.proofread_info = {
-                                    **job.proofread_info,
-                                    "phase": "alignment",
-                                    "done": done,
-                                    "total": total,
-                                    "percent": round((0.6 + 0.39 * ratio) * 100, 1),
-                                }
-                                self._set_status(job, "proofreading", 0.95 + 0.04 * (0.6 + 0.39 * ratio), error=None)
-
-                            issues = proofreader.check_alignment(pairs, progress_callback=update_alignment_progress)
-                            alignment_payload = {
-                                "issues": issues,
-                                "issue_count": len(issues),
-                                "pair_count": len(pairs),
-                            }
-                    except JobCancelled:
-                        raise
-                    except Exception:
-                        # 对照检查是附加质检,失败不作废主校对已产出的修正。
-                        logger.exception("Alignment check after proofread failed")
+                usage = getattr(proofreader, "usage_totals", None)
+                if usage and usage.get("requests"):
+                    result["token_usage"] = dict(usage)
+                    self.job_log(
+                        job,
+                        f"校对 token 用量: 输入 {usage['prompt_tokens']} (缓存命中 {usage['cache_hit_tokens']}), "
+                        f"输出 {usage['completion_tokens']}, 共 {usage['requests']} 次请求",
+                    )
                 result["target"] = target_kind
                 result["created_at"] = time.time()
                 result["elapsed_sec"] = round(time.time() - started, 1)
-                if alignment_payload is not None:
-                    result["alignment"] = alignment_payload
-                    write_text(
-                        job.alignment_path,
-                        json.dumps({**alignment_payload, "created_at": time.time()}, ensure_ascii=False, indent=2),
-                    )
-                    job.alignment_info = {
-                        "in_progress": False,
-                        "issue_count": alignment_payload["issue_count"],
-                        "pair_count": alignment_payload["pair_count"],
-                    }
                 write_text(job.proofread_path, json.dumps(result, ensure_ascii=False, indent=2))
                 job.proofread_info = {
                     "in_progress": False,
@@ -1777,7 +1764,7 @@ class JobManager(ClipOperationsMixin):
                     "target": target_kind,
                     "typo_count": len(result.get("suggestions") or []),
                     "term_count": len(result.get("term_corrections") or []),
-                    "alignment_count": (result.get("alignment") or {}).get("issue_count", 0),
+                    "alignment_count": 0,
                     "elapsed_sec": result["elapsed_sec"],
                 }
                 job.status = "waiting_review"
@@ -1790,7 +1777,7 @@ class JobManager(ClipOperationsMixin):
                 job.status = "waiting_review"
                 job.progress = max(job.progress, 0.95)
                 self._touch(job, error=None)
-                self.job_log(job, "AI 校对已取消，回到待校对")
+                self.job_log(job, "源稿校对已取消，回到待校对")
                 return {"cancelled": True}
             except Exception as exc:
                 job.proofread_info = {
@@ -1807,6 +1794,8 @@ class JobManager(ClipOperationsMixin):
             raise FileNotFoundError("No proofread result is available for this job.")
         result = json.loads(job.proofread_path.read_text(encoding="utf-8"))
         result["applied"] = bool(job.proofread_info.get("applied"))
+        result["applied_ids"] = list(job.proofread_info.get("applied_ids") or [])
+        result["applied_terms"] = list(job.proofread_info.get("applied_terms") or [])
         return result
 
     def apply_proofread(self, job_id: str, ids: list[str], terms: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1886,7 +1875,23 @@ class JobManager(ClipOperationsMixin):
             self._write_subtitle_files(job, segments)
         else:
             write_text(target_path, export_json(segments))
+            self._invalidate_alignment(job)
             needs_retranslate = True
+        # 应用过的建议/术语在结果文件里逐条打 applied 标记(而非清除), 便于回看。
+        applied_id_set = {str(item) for item in applied_ids}
+        for suggestion in result.get("suggestions") or []:
+            if isinstance(suggestion, dict) and str(suggestion.get("id") or "") in applied_id_set:
+                suggestion["applied"] = True
+        applied_term_pairs = {
+            (str(t.get("wrong") or ""), str(t.get("right") or "")) for t in applied_terms
+        }
+        for term in result.get("term_corrections") or []:
+            if isinstance(term, dict) and (
+                str(term.get("wrong") or ""),
+                str(term.get("right") or ""),
+            ) in applied_term_pairs:
+                term["applied"] = True
+        write_text(job.proofread_path, json.dumps(result, ensure_ascii=False, indent=2))
         # 应用的术语自动沉淀进全局热词词表，下次转录 whisper 直接带进去
         glossary_terms = self.add_hotwords_to_glossary(
             [t.get("right") for t in applied_terms]
@@ -1894,7 +1899,7 @@ class JobManager(ClipOperationsMixin):
         job.proofread_info = {
             **job.proofread_info,
             "applied": True,
-            "applied_ids": sorted(applied_ids),
+            "applied_ids": sorted({*job.proofread_info.get("applied_ids", []), *applied_id_set}),
             "applied_terms": applied_terms,
             "term_hits": term_hits,
             "needs_retranslate": needs_retranslate,
@@ -1908,6 +1913,86 @@ class JobManager(ClipOperationsMixin):
             "needs_retranslate": needs_retranslate,
             "glossary_terms": glossary_terms,
             "segments": [segment.to_dict() for segment in segments] if target_kind == "segments" else None,
+        }
+
+    def undo_proofread(self, job_id: str, ids: list[str]) -> dict[str, Any]:
+        """撤回已应用的错字修正: 把建议应用前的原文写回校对目标。
+
+        安全护栏: 若该段文本在应用后又被手动改过(当前文本 != 修正后文本),
+        拒绝撤回该段。术语替换不支持撤回(全片正则替换, 无法区分哪些命中
+        出自本条术语、哪些是正文本身的字样)。"""
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot undo proofread fixes while the job is running.")
+        if not job.proofread_path.exists():
+            raise FileNotFoundError("No proofread result is available for this job.")
+        result = json.loads(job.proofread_path.read_text(encoding="utf-8"))
+        wanted = {str(item) for item in ids or []}
+        by_id = {
+            str(s.get("id") or ""): s
+            for s in result.get("suggestions") or []
+            if isinstance(s, dict) and s.get("applied") and s.get("original")
+        }
+        if not wanted:
+            return {"undone_count": 0, "undone_ids": [], "skipped": [], "needs_retranslate": False, "segments": None}
+
+        target_path, target_kind = self._proofread_target(job)
+        segments = [
+            SubtitleSegment.from_dict(item)
+            for item in json.loads(target_path.read_text(encoding="utf-8"))
+        ]
+        undone_ids: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for index, segment in enumerate(segments):
+            suggestion = by_id.get(segment.id)
+            if suggestion is None or segment.id not in wanted:
+                continue
+            if segment.text != str(suggestion.get("corrected") or ""):
+                skipped.append({"id": segment.id, "reason": "该段文本在应用后又被修改过，已跳过撤回。"})
+                continue
+            original = str(suggestion.get("original") or "")
+            new_items = segment.items
+            if segment.items:
+                items_norm = _normalize_words(
+                    " ".join(i.text.strip() for i in segment.items if i.text.strip())
+                )
+                if items_norm == _normalize_words(segment.text) and items_norm != _normalize_words(original):
+                    new_items = align_items_to_text(segment.text, segment.items, original)
+            segments[index] = SubtitleSegment(
+                id=segment.id,
+                start=segment.start,
+                end=segment.end,
+                speaker=segment.speaker,
+                text=original,
+                items=new_items,
+            )
+            suggestion["applied"] = False
+            undone_ids.append(segment.id)
+
+        if undone_ids:
+            needs_retranslate = False
+            if target_kind == "segments":
+                self._write_subtitle_files(job, segments)
+            else:
+                write_text(target_path, export_json(segments))
+                self._invalidate_alignment(job)
+                needs_retranslate = True
+            result["applied_ids"] = sorted(set(result.get("applied_ids") or []) - set(undone_ids))
+            if not result["applied_ids"]:
+                result["applied"] = False
+            write_text(job.proofread_path, json.dumps(result, ensure_ascii=False, indent=2))
+            job.proofread_info = {
+                **job.proofread_info,
+                "applied_ids": sorted(set(job.proofread_info.get("applied_ids") or []) - set(undone_ids)),
+                "needs_retranslate": needs_retranslate,
+            }
+            self._touch(job, error=None)
+        return {
+            "undone_count": len(undone_ids),
+            "undone_ids": undone_ids,
+            "skipped": skipped,
+            "needs_retranslate": needs_retranslate if undone_ids else False,
+            "segments": [segment.to_dict() for segment in segments] if undone_ids and target_kind == "segments" else None,
         }
 
     # ------------------------------------------------------------ 对照检查
@@ -1993,6 +2078,14 @@ class JobManager(ClipOperationsMixin):
                     "elapsed_sec": round(time.time() - started, 1),
                     "created_at": time.time(),
                 }
+                usage = getattr(proofreader, "usage_totals", None)
+                if usage and usage.get("requests"):
+                    result["token_usage"] = dict(usage)
+                    self.job_log(
+                        job,
+                        f"对照检查 token 用量: 输入 {usage['prompt_tokens']} (缓存命中 {usage['cache_hit_tokens']}), "
+                        f"输出 {usage['completion_tokens']}, 共 {usage['requests']} 次请求",
+                    )
                 write_text(job.alignment_path, json.dumps(result, ensure_ascii=False, indent=2))
                 job.alignment_info = {
                     "in_progress": False,
@@ -2036,7 +2129,11 @@ class JobManager(ClipOperationsMixin):
             raise FileNotFoundError("No alignment check result is available for this job.")
         result = json.loads(job.alignment_path.read_text(encoding="utf-8"))
         issues = [item for item in result.get("issues") or [] if isinstance(item, dict)]
-        by_id = {str(item.get("id") or ""): item for item in issues if item.get("suggested")}
+        by_id = {
+            str(item.get("id") or ""): item
+            for item in issues
+            if item.get("suggested") and not item.get("applied")
+        }
         wanted = {str(item) for item in ids or []}
         if not wanted:
             return {"applied_count": 0, "applied_ids": [], "segments": None}
@@ -2074,9 +2171,11 @@ class JobManager(ClipOperationsMixin):
 
         if applied_ids:
             self._write_subtitle_files(job, segments)
-            result["issues"] = [
-                item for item in issues if str(item.get("id")) not in set(applied_ids)
-            ]
+            # 应用过的条目保留在清单里打标记(而非删除), 便于回看本轮改了什么。
+            applied_set = set(applied_ids)
+            for item in result["issues"]:
+                if str(item.get("id")) in applied_set:
+                    item["applied"] = True
             result["issue_count"] = len(result["issues"])
             result["applied_ids"] = sorted({*result.get("applied_ids", []), *applied_ids})
             write_text(job.alignment_path, json.dumps(result, ensure_ascii=False, indent=2))
@@ -2090,6 +2189,75 @@ class JobManager(ClipOperationsMixin):
             "applied_count": len(applied_ids),
             "applied_ids": sorted(applied_ids),
             "segments": [segment.to_dict() for segment in segments] if applied_ids else None,
+        }
+
+    def undo_alignment(self, job_id: str, ids: list[str]) -> dict[str, Any]:
+        """撤回已应用的译文修正: 把建议应用前的译文写回当前稿。
+
+        安全护栏: 若该段译文在应用后又被手动改过(当前译文 != 建议文本),
+        拒绝撤回该段, 避免覆盖人工修改。"""
+        job = self.get_job(job_id)
+        if job.status in RUNNING_STATES:
+            raise RuntimeError("Cannot undo alignment fixes while the job is running.")
+        if not job.alignment_path.exists():
+            raise FileNotFoundError("No alignment check result is available for this job.")
+        result = json.loads(job.alignment_path.read_text(encoding="utf-8"))
+        issues = [item for item in result.get("issues") or [] if isinstance(item, dict)]
+        wanted = {str(item) for item in ids or []}
+        by_id = {
+            str(item.get("id") or ""): item
+            for item in issues
+            if item.get("applied") and item.get("translated_text")
+        }
+        if not wanted:
+            return {"undone_count": 0, "undone_ids": [], "skipped": [], "segments": None}
+
+        segments = [
+            SubtitleSegment.from_dict(item)
+            for item in json.loads(job.segments_path.read_text(encoding="utf-8"))
+        ]
+        undone_ids: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for index, segment in enumerate(segments):
+            issue = by_id.get(segment.id)
+            if issue is None or segment.id not in wanted:
+                continue
+            current = segment.text
+            first_line = current.split("\n", 1)[0].strip() if "\n" in current else current.strip()
+            if first_line != str(issue["suggested"]).strip():
+                skipped.append({"id": segment.id, "reason": "该段译文在应用后又被修改过，已跳过撤回。"})
+                continue
+            restored = str(issue["translated_text"])
+            if "\n" in current:
+                parts = current.split("\n", 1)
+                new_text = restored + "\n" + parts[1]
+            else:
+                new_text = restored
+            segments[index] = SubtitleSegment(
+                id=segment.id,
+                start=segment.start,
+                end=segment.end,
+                speaker=segment.speaker,
+                text=new_text,
+                items=segment.items,
+            )
+            issue["applied"] = False
+            undone_ids.append(segment.id)
+
+        if undone_ids:
+            self._write_subtitle_files(job, segments)
+            result["applied_ids"] = sorted(set(result.get("applied_ids") or []) - set(undone_ids))
+            write_text(job.alignment_path, json.dumps(result, ensure_ascii=False, indent=2))
+            job.alignment_info = {
+                **job.alignment_info,
+                "applied_count": len(result.get("applied_ids") or []),
+            }
+            self._touch(job, error=None)
+        return {
+            "undone_count": len(undone_ids),
+            "undone_ids": undone_ids,
+            "skipped": skipped,
+            "segments": [segment.to_dict() for segment in segments] if undone_ids else None,
         }
 
     def clip_download_path(self, job_id: str, filename: str) -> Path:

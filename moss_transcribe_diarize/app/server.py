@@ -153,6 +153,7 @@ def create_app(
             timeout=600.0,
             provider=str(profile.get("provider") or "openai"),
             protected_terms=protected_terms or tuple(PROTECTED_TERMS),
+            disable_thinking=bool(profile.get("disable_thinking")),
         ), profile
 
     def _fail(exc: Exception, status: int | None = None) -> HTTPException:
@@ -815,6 +816,7 @@ def create_app(
             model=str(profile.get("model") or ""),
             api_key=str(profile.get("api_key") or "EMPTY"),
             provider=str(profile.get("provider") or "openai"),
+            disable_thinking=bool(profile.get("disable_thinking")),
         )
 
     @app.post("/api/jobs/{job_id}/proofread")
@@ -865,6 +867,24 @@ def create_app(
         except RuntimeError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=409)
 
+    @app.post("/api/jobs/{job_id}/proofread/undo")
+    async def undo_proofread(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+        ids = payload.get("ids") if isinstance(payload, dict) else None
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise HTTPException(status_code=400, detail="ids must be a list of segment ids.")
+        try:
+            return await asyncio.to_thread(manager.undo_proofread, job_id, ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
+
     @app.get("/api/jobs/{job_id}/alignment")
     def get_alignment(job_id: str):
         try:
@@ -873,6 +893,21 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/alignment")
+    async def run_alignment(job_id: str):
+        try:
+            proofreader = _active_proofreader()
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        try:
+            return await asyncio.to_thread(manager.alignment_check, job_id, proofreader)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        except Exception as exc:
+            raise _fail(exc) from exc
 
     @app.post("/api/jobs/{job_id}/alignment/apply")
     async def apply_alignment(job_id: str, request: Request):
@@ -891,6 +926,24 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    @app.post("/api/jobs/{job_id}/alignment/undo")
+    async def undo_alignment(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+        ids = payload.get("ids") if isinstance(payload, dict) else None
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise HTTPException(status_code=400, detail="ids must be a list of segment ids.")
+        try:
+            return await asyncio.to_thread(manager.undo_alignment, job_id, ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.get("/api/jobs/{job_id}/clips")
     def list_clips(

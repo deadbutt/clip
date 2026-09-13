@@ -82,7 +82,8 @@ class AlignmentCheckerTest(unittest.TestCase):
         with patch.object(Proofreader, "_chat", new=fake_chat):
             issues = proofreader.check_alignment(pairs)
         self.assertEqual(issues, [])
-        self.assertEqual(len(calls), 3)
+        # WINDOW_TARGETS=25: 25 对恰好单窗口单请求。
+        self.assertEqual(len(calls), 1)
 
     def test_check_alignment_empty_source_is_skipped(self):
         calls, fake_chat = self._patched_chat(["{}"])
@@ -196,8 +197,8 @@ class AlignmentManagerTest(unittest.TestCase):
             loaded = manager.get_alignment_result("align-job")
             self.assertEqual(loaded["issues"][0]["type"], "omission")
 
-    def test_proofread_translated_job_runs_alignment_in_one_click(self):
-        """一键校对:已翻译任务在校对源稿后自动追加译文对照检查,写 alignment.json。"""
+    def test_proofread_translated_job_does_not_run_alignment(self):
+        """源稿校对与译文对照职责分离,校对源稿不应自动写 alignment.json。"""
 
         class _FakeProofreader:
             def proofread(self, segments, *, progress_callback=None):
@@ -235,14 +236,12 @@ class AlignmentManagerTest(unittest.TestCase):
             manager = self._manager(runs)
             result = manager.proofread("oneclick-job", _FakeProofreader())
             self.assertEqual(result["target"], "source")
-            self.assertIn("alignment", result)
-            self.assertEqual(result["alignment"]["issue_count"], 1)
-            self.assertEqual(result["alignment"]["pair_count"], 1)
-            self.assertTrue((job_dir / "alignment.json").exists())
+            self.assertNotIn("alignment", result)
+            self.assertFalse((job_dir / "alignment.json").exists())
             job = manager.get_job("oneclick-job")
             self.assertEqual(job.status, "waiting_review")
-            self.assertEqual(job.proofread_info.get("alignment_count"), 1)
-            self.assertEqual(job.alignment_info.get("issue_count"), 1)
+            self.assertEqual(job.proofread_info.get("alignment_count"), 0)
+            self.assertFalse(job.alignment_info)
 
     def test_proofread_untranslated_job_skips_alignment(self):
         class _FakeProofreader:
@@ -325,8 +324,10 @@ class AlignmentManagerTest(unittest.TestCase):
             self.assertEqual(segments[0]["text"], "新译文\nHello world.")
             self.assertEqual(segments[1]["text"], "不受影响的段落")
             remaining = json.loads((job_dir / "alignment.json").read_text(encoding="utf-8"))
-            self.assertEqual(remaining["issue_count"], 0)
-            self.assertEqual(remaining["issues"], [])
+            # 应用过的条目保留在清单里并打 applied 标记, 不再删除。
+            self.assertEqual(remaining["issue_count"], 1)
+            self.assertEqual(len(remaining["issues"]), 1)
+            self.assertTrue(remaining["issues"][0]["applied"])
             self.assertEqual(remaining["applied_ids"], ["seg_0001"])
 
     def test_apply_alignment_skips_unknown_ids(self):
@@ -345,6 +346,76 @@ class AlignmentManagerTest(unittest.TestCase):
             manager = self._manager(runs)
             result = manager.apply_alignment("apply-job2", ["seg_9999"])
             self.assertEqual(result["applied_count"], 0)
+
+    def test_undo_alignment_restores_previous_translation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            job_dir = self._write_job(runs, "undo-job")
+            self._write_segments(
+                job_dir,
+                "segments.json",
+                [
+                    {"id": "seg_0001", "start": 0.0, "end": 2.0, "text": "新译文\nHello world.", "speaker": "S01"},
+                    {"id": "seg_0002", "start": 2.0, "end": 4.0, "text": "不受影响的段落", "speaker": "S01"},
+                ],
+            )
+            (job_dir / "alignment.json").write_text(
+                json.dumps(
+                    {
+                        "issues": [
+                            {"id": "seg_0001", "type": "mistranslation", "note": "n",
+                             "suggested": "新译文", "translated_text": "旧译文", "applied": True},
+                        ],
+                        "issue_count": 1,
+                        "pair_count": 2,
+                        "applied_ids": ["seg_0001"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            manager = self._manager(runs)
+            result = manager.undo_alignment("undo-job", ["seg_0001"])
+            self.assertEqual(result["undone_count"], 1)
+            segments = json.loads((job_dir / "segments.json").read_text(encoding="utf-8"))
+            # 双语段只撤回译文行, 源文行保留。
+            self.assertEqual(segments[0]["text"], "旧译文\nHello world.")
+            self.assertEqual(segments[1]["text"], "不受影响的段落")
+            remaining = json.loads((job_dir / "alignment.json").read_text(encoding="utf-8"))
+            self.assertFalse(remaining["issues"][0]["applied"])
+            self.assertEqual(remaining["applied_ids"], [])
+
+    def test_undo_alignment_skips_manually_edited_segment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs = Path(tmpdir)
+            job_dir = self._write_job(runs, "undo-job2")
+            # 应用之后用户又手动改过该段(不再是建议文本): 撤回必须跳过。
+            self._write_segments(
+                job_dir,
+                "segments.json",
+                [{"id": "seg_0001", "start": 0.0, "end": 2.0, "text": "我手改的译文", "speaker": "S01"}],
+            )
+            (job_dir / "alignment.json").write_text(
+                json.dumps(
+                    {
+                        "issues": [
+                            {"id": "seg_0001", "type": "mistranslation", "note": "n",
+                             "suggested": "新译文", "translated_text": "旧译文", "applied": True},
+                        ],
+                        "issue_count": 1,
+                        "pair_count": 1,
+                        "applied_ids": ["seg_0001"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            manager = self._manager(runs)
+            result = manager.undo_alignment("undo-job2", ["seg_0001"])
+            self.assertEqual(result["undone_count"], 0)
+            self.assertEqual(result["skipped"][0]["id"], "seg_0001")
+            segments = json.loads((job_dir / "segments.json").read_text(encoding="utf-8"))
+            self.assertEqual(segments[0]["text"], "我手改的译文")
 
     def test_alignment_check_requires_translation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
