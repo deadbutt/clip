@@ -110,6 +110,26 @@ def _normalize_words(text: str) -> list[str]:
     return [word.strip(".,!?;:\"'()[]") for word in str(text or "").split() if word.strip(".,!?;:\"'()[]")]
 
 
+def merge_bilingual_texts(parts: list[str]) -> str | None:
+    """把若干"译文\\n源文"结构的双语段合并成两行: 译文按序拼一起, 源文按序拼一起。
+
+    整段直接 " ".join 会把上一段的源文和下一段的译文拼到同一行,交错成乱码。
+    任一段是单行(视为未译源文)时只进源文行; 全都单行(纯源文任务)返回 None,
+    由调用方退回普通拼接。"""
+    trans: list[str] = []
+    source: list[str] = []
+    for text in parts:
+        lines = [line.strip() for line in str(text or "").split("\n") if line.strip()]
+        if len(lines) >= 2:
+            trans.append(lines[0])
+            source.append(" ".join(lines[1:]))
+        elif lines:
+            source.append(lines[0])
+    if not trans:
+        return None
+    return "\n".join([" ".join(trans), " ".join(source)])
+
+
 def _interpolate_item(text: str, start: float, end: float) -> SubtitleItem:
     return SubtitleItem(text=text, start=start, end=max(end, start + 0.01))
 
@@ -1386,12 +1406,13 @@ class JobManager(ClipOperationsMixin):
                 if all(s.items is not None for s in group)
                 else None
             )
+            merged_text = " ".join(s.text.strip() for s in group if s.text.strip())
             merged = SubtitleSegment(
                 id=first.id,
                 start=min(s.start for s in group),
                 end=max(s.end for s in group),
                 speaker=first.speaker,
-                text=" ".join(s.text.strip() for s in group if s.text.strip()),
+                text=merged_text,
                 items=items,
             )
             source[indexes[0] : indexes[0] + len(indexes)] = [merged]
@@ -1460,6 +1481,7 @@ class JobManager(ClipOperationsMixin):
 
     def merge_segments(self, job_id: str, segment_ids: list[str]) -> list[dict[str, Any]]:
         """把多条**相邻**字幕合并成一条;说话人取第一条,items 依序拼接。
+        双语段("译文\\n源文")合并时译文与源文各自拼接,译文不丢;
         翻译过的 job 会同步合并源稿备份,重译时保留新结构。"""
         job = self.get_job(job_id)
         if job.status in RUNNING_STATES:
@@ -1479,6 +1501,7 @@ class JobManager(ClipOperationsMixin):
         group = [segments[i] for i in indexes]
         first = group[0]
         text = " ".join(s.text.strip() for s in group if s.text.strip())
+        text = merge_bilingual_texts([s.text for s in group]) or text
         items = (
             [item for s in group for item in (s.items or [])]
             if all(s.items is not None for s in group)
@@ -1494,9 +1517,9 @@ class JobManager(ClipOperationsMixin):
         )
         segments[indexes[0] : indexes[0] + len(indexes)] = [merged]
 
-        source_synced = self._sync_source_merge(job, wanted)
-        if source_synced:
-            self._mark_structure_changed(job)
+        # 源稿备份同步合并,保证重译时结构一致。译文按段保留、结构不变,
+        # 因此不再标记 structure_changed(那会提示用户整篇重译)。
+        self._sync_source_merge(job, wanted)
         self._write_subtitle_files(job, segments)
         self._touch(job, error=None)
         return self._decorate_display_ends(job, [segment.to_dict() for segment in segments])

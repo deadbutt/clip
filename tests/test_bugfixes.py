@@ -980,6 +980,41 @@ class SplitMergeSegmentsTest(unittest.TestCase):
             self.assertEqual(len(source), 2)
             self.assertEqual(len(source[0]["items"]), 4)
 
+    def test_merge_bilingual_segments_falls_back_to_source_text(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_job_manager(tmpdir)
+            job = manager.get_job("job1")
+            # 模拟已翻译(双语模式): 当前稿每段是"译文\n源文", 源稿备份是英文碎片
+            source_backup = [
+                {"id": "seg_0001", "start": 0.0, "end": 2.0, "speaker": "S01", "text": "Neuro...", "items": None},
+                {"id": "seg_0002", "start": 2.0, "end": 4.0, "speaker": "S01", "text": "Will...", "items": None},
+            ]
+            bilingual = [
+                {"id": "seg_0001", "start": 0.0, "end": 2.0, "speaker": "S01", "text": "neuro……\nNeuro...", "items": None},
+                {"id": "seg_0002", "start": 2.0, "end": 4.0, "speaker": "S01", "text": "将……\nWill...", "items": None},
+            ]
+            job.source_segments_path.write_text(
+                json.dumps(source_backup, ensure_ascii=False), encoding="utf-8"
+            )
+            (Path(tmpdir) / "job1" / "segments.json").write_text(
+                json.dumps(bilingual, ensure_ascii=False), encoding="utf-8"
+            )
+            job.translation_info = {"applied": True, "mode": "bilingual"}
+
+            with patch("moss_transcribe_diarize.app.jobs.probe_video_size", return_value=(1920, 1080)):
+                merged = manager.merge_segments("job1", ["seg_0001", "seg_0002"])
+            self.assertEqual(len(merged), 1)
+            # 译文行拼一起、源文行拼一起,两行结构保留,译文不丢
+            self.assertEqual(merged[0]["text"], "neuro…… 将……\nNeuro... Will...")
+            # 译文按段保留、结构不变,不应提示整篇重译
+            self.assertFalse(manager.get_job("job1").translation_info.get("structure_changed"))
+            # 源稿备份同步合并
+            source = json.loads(job.source_segments_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(source), 1)
+            self.assertEqual(source[0]["text"], "Neuro... Will...")
+
     def test_apply_proofread_keeps_items(self):
         import tempfile
 

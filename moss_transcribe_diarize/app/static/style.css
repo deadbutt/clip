@@ -1225,8 +1225,9 @@
       min-height: 0;
       border: 0;
       border-radius: 0;
+      /* 不能加 scroll-behavior: smooth：虚拟列表按 scrollTop 计算可见窗口，
+         程序化滚动被平滑动画化后会从顶部一路滑过来，且动画期间读到中间值扰乱窗口计算 */
     }
-    .table-column .table-wrap { scroll-behavior: smooth; }
     .subtitle-table {
       width: 100%;
       border-collapse: separate;

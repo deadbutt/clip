@@ -1735,13 +1735,18 @@ async function saveSegments(force = false) {
       return false;
     }
     setTaskNotice('', '');
-    renderSegments(data.segments);
+    renderSegments(data.segments, null, { preserveScroll: true });
     setEditorDirty(false);
     saveStatusEl.textContent = '已保存';
     saveStatusTimer = setTimeout(() => {
       if (!editorDirty) saveStatusEl.textContent = '已保存';
     }, 1200);
-    await selectJob(currentJob.id);
+    // 只刷新任务状态（进度/状态灯），不重走 showEditor 整页重建，
+    // 否则保存一次就等于把编辑器整个重载一遍。
+    try {
+      const jobRes = await fetch(apiUrl(`api/jobs/${currentJob.id}`), { cache: 'no-store' });
+      if (jobRes.ok) applyJobUpdate(await jobRes.json());
+    } catch (err) { /* 状态刷新失败不影响保存结果 */ }
     return true;
   } catch (err) {
     setTaskNotice('保存失败：' + err.message, 'error');
@@ -1778,7 +1783,7 @@ async function loadSegments(jobId, options = {}) {
       return true;
     }
     const preferredIndex = options.preserveSelection && activeSegmentIndex >= 0 ? activeSegmentIndex : null;
-    renderSegments(segments, preferredIndex);
+    renderSegments(segments, preferredIndex, { preserveScroll: true });
     setEditorDirty(false);
     return true;
   } finally {
@@ -2002,7 +2007,11 @@ function speakerDisplayName(speaker) {
   return names[speaker] || speakerNameMap[speaker] || speaker;
 }
 
-function renderSegments(segments, preferredIndex = null) {
+function renderSegments(segments, preferredIndex = null, options = {}) {
+  const container = tableWrap || tbody.closest('.table-wrap');
+  // 局部变更(保存/合并/替换)走 preserveScroll：清空 tbody 会把 scrollTop 夹到 0，
+  // 必须先记下位置、重建后立刻还原，否则整个视图会跳回表头再被播放跟随拉走。
+  const restoreTop = options.preserveScroll && container ? container.scrollTop : null;
   tbody.innerHTML = '';
   activeSegmentIndex = -1;
   cachedSegments = (segments || []).map((segment) => ({
@@ -2020,10 +2029,27 @@ function renderSegments(segments, preferredIndex = null) {
   renderSpeakerMap(segments);
   renderTimeline(segments);
   refreshSpeakerDots();
-  if (preferredIndex != null && cachedSegments[preferredIndex] && tableWrap) {
-    tableWrap.scrollTop = Math.max(0, preferredIndex * TABLE_ROW_HEIGHT - tableWrap.clientHeight * 0.35);
+  if (restoreTop != null) {
+    // 顺序很关键: tbody 清空时 scrollTop 已被夹到 0,此时直接赋值 restoreTop 会被
+    // 再次夹回 0(内容还没建出来)。先按记住的位置渲染窗口,再还原滚动位置。
+    renderVisibleSegmentRows(restoreTop);
+    container.scrollTop = restoreTop;
+    if (preferredIndex != null && cachedSegments[preferredIndex]) {
+      setActiveSegment(preferredIndex, false);
+      updateSubtitlePreview(segments);
+    } else {
+      // 短暂抑制播放跟随，避免重建后视图被强行拉回视频指针位置。
+      tableUserScrollUntil = performance.now() + TABLE_USER_SCROLL_HOLD_MS;
+      syncActiveSegment();
+    }
+    return;
   }
-  renderVisibleSegmentRows();
+  let targetTop = null;
+  if (preferredIndex != null && cachedSegments[preferredIndex] && tableWrap) {
+    targetTop = Math.max(0, preferredIndex * TABLE_ROW_HEIGHT - tableWrap.clientHeight * 0.35);
+  }
+  renderVisibleSegmentRows(targetTop);
+  if (targetTop != null) tableWrap.scrollTop = targetTop;
   if (preferredIndex != null && segments[preferredIndex]) {
     setActiveSegment(preferredIndex, false);
     updateSubtitlePreview(segments);
@@ -2074,11 +2100,13 @@ function createSegmentRow(segment, index) {
   return tr;
 }
 
-function renderVisibleSegmentRows() {
+function renderVisibleSegmentRows(scrollTopOverride = null) {
   if (!cachedSegments) return;
   const total = cachedSegments.length;
   const container = tableWrap || tbody.closest('.table-wrap');
-  const scrollTop = container ? container.scrollTop : 0;
+  // 整表重建期间 tbody 被清空、scrollTop 被浏览器夹到 0,
+  // 此时必须用调用方记住的位置来算可见窗口,不能读当前 scrollTop。
+  const scrollTop = scrollTopOverride != null ? scrollTopOverride : (container ? container.scrollTop : 0);
   const viewportHeight = container ? container.clientHeight : 600;
   const start = Math.max(0, Math.floor(scrollTop / TABLE_ROW_HEIGHT) - TABLE_BUFFER_ROWS);
   const visibleCount = Math.ceil(viewportHeight / TABLE_ROW_HEIGHT) + TABLE_BUFFER_ROWS * 2;
@@ -3009,7 +3037,7 @@ function deleteSegmentAtIndex(index) {
   if (!segments[index]) return;
   segments.splice(index, 1);
   const nextIndex = Math.min(index, segments.length - 1);
-  renderSegments(segments, nextIndex >= 0 ? nextIndex : null);
+  renderSegments(segments, nextIndex >= 0 ? nextIndex : null, { preserveScroll: true });
   markEditorDirty();
 }
 
@@ -3091,10 +3119,8 @@ async function mergeSegmentWithNext(index) {
       return;
     }
     setTaskNotice('', '');
-    renderSegments(data.segments, index);
+    renderSegments(data.segments, index, { preserveScroll: true });
     setEditorDirty(false);
-    updateSubtitlePreview(data.segments);
-    if (data.needs_retranslate) setTaskNotice('已合并：源稿已同步，重新翻译时将保留新结构', 'warn');
   } catch (err) {
     setTaskNotice('合并失败：' + err.message, 'error');
   }
@@ -3190,7 +3216,7 @@ replaceAllBtn.addEventListener('click', async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '替换失败');
     pushUndoSnapshot();
-    renderSegments(data.segments);
+    renderSegments(data.segments, null, { preserveScroll: true });
     setEditorDirty(false);
     updateSubtitlePreview(data.segments);
     setTaskNotice(`已替换 ${data.replacements} 处`);
@@ -3473,7 +3499,7 @@ function updateTimelinePlayhead(segments) {
   }
 }
 
-function scrollSegmentIndexIntoView(index, options = {}) {
+function scrollSegmentIndexIntoView(index, options = {}, attempt = 0) {
   const container = tableWrap || tbody.closest('.table-wrap');
   if (!container) return;
   index = Number(index);
@@ -3505,8 +3531,10 @@ function scrollSegmentIndexIntoView(index, options = {}) {
   if (Math.abs(nextScrollTop - container.scrollTop) > 1) {
     container.scrollTop = nextScrollTop;
     renderVisibleSegmentRows();
-    if (!renderedRow) {
-      requestAnimationFrame(() => scrollSegmentIndexIntoView(index, options));
+    // 兜底上限：估算位置与真实行高偏差过大或被滚动边界夹住时，
+    // 不能无限重试（每轮都会整窗重建 DOM，直接把页面卡死）。
+    if (!renderedRow && attempt < 4) {
+      requestAnimationFrame(() => scrollSegmentIndexIntoView(index, options, attempt + 1));
     }
   }
 }
