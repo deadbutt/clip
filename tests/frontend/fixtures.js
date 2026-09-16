@@ -88,7 +88,11 @@ async function installApiFixture(page, options = {}) {
     if (path === '/api/jobs/job-1' && method === 'GET') return json(200, clone(state.job));
     if (path === '/api/jobs/job-1/media') return route.fulfill({ status: 200, contentType: 'video/mp4', body: '' });
     if (path === '/api/jobs/job-1/segments' && method === 'GET') {
-      return json(200, { segments: clone(state.segments) }, { ETag: `"fixture-${state.saveRequests}"` });
+      const etag = `"fixture-${state.saveRequests}"`;
+      if (options.conditionalSegments && request.headers()['if-none-match'] === etag) {
+        return route.fulfill({ status: 304, headers: { ETag: etag }, body: '' });
+      }
+      return json(200, { segments: clone(state.segments) }, { ETag: etag });
     }
     if (path === '/api/jobs/job-1/segments' && method === 'PUT') {
       state.saveRequests += 1;

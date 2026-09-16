@@ -84,6 +84,31 @@ test('Chinese split maps to source word order and keeps both languages', async (
   ]);
 });
 
+test('Chinese split skips untranslated source chunks in a mixed segment', async ({ page }) => {
+  const segments = [{
+    id: 'seg_0001', start: 0, end: 4, speaker: 'S01', text: '你好\nhello friend world again',
+    items: [
+      { text: 'hello', start: 0, end: 1 },
+      { text: 'friend', start: 1, end: 2 },
+      { text: 'world', start: 2, end: 3 },
+      { text: 'again', start: 3, end: 4 },
+    ],
+    bilingual_chunks: [
+      { translation: '', source: 'hello friend', start: 0, end: 2, item_count: 2 },
+      { translation: '你好', source: 'world again', start: 2, end: 4, item_count: 2 },
+    ],
+  }];
+  const state = await installApiFixture(page, { segments });
+  await openEditor(page);
+  const text = page.locator('#segments tr[data-index="0"] textarea.text');
+  await text.focus();
+  await text.evaluate((element) => element.setSelectionRange(0, 0));
+  await text.press('Control+Enter');
+  await expect.poll(() => state.splitRequests.length).toBe(1);
+  expect(state.splitRequests[0].time).toBe(2);
+  expect(state.splitRequests[0].translation_ratio).toBe(0);
+});
+
 test('timeline drag snaps and playback activates the matching subtitle', async ({ page }) => {
   await installApiFixture(page);
   await openEditor(page);
@@ -135,6 +160,29 @@ test('virtual list can select the final subtitle in a long task', async ({ page 
   await expect(last).toHaveClass(/active/);
   const currentTime = await page.locator('#preview').evaluate((video) => video.currentTime);
   expect(currentTime).toBeCloseTo(239 * 2.5, 1);
+});
+
+test('returning from a late timeline position reloads the full virtual list', async ({ page }) => {
+  await installApiFixture(page, { segmentCount: 240, conditionalSegments: true });
+  await openEditor(page);
+
+  await page.evaluate(() => {
+    timelineScroll.scrollLeft = 200 * 2.5 * currentPixelsPerSecond;
+    renderVisibleTimelineSegments();
+  });
+  await page.locator('.timeline-segment[data-index="200"]').click();
+  await expect(page.locator('#segments tr[data-index="200"]')).toBeVisible();
+
+  await page.locator('#backToTasks').click();
+  await page.locator('.task-item[data-job-id="job-1"]').click();
+  await expect(page.locator('#workbench')).toBeVisible();
+
+  await page.locator('.table-wrap').evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.locator('#segments tr[data-index="0"]')).toBeVisible();
+  expect(await page.evaluate(() => cachedSegments?.length)).toBe(240);
 });
 
 test('unsaved changes require confirmation before leaving the editor', async ({ page }) => {

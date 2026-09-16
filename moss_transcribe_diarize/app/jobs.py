@@ -158,7 +158,13 @@ def bilingual_chunks_for_segment(segment: SubtitleSegment) -> list[dict[str, Any
         return [dict(chunk) for chunk in segment.bilingual_chunks]
     lines = [line.strip() for line in str(segment.text or "").split("\n") if line.strip()]
     if len(lines) < 2:
-        return []
+        return [{
+            "translation": "",
+            "source": lines[0] if lines else "",
+            "start": segment.start,
+            "end": segment.end,
+            "item_count": len(segment.items or []),
+        }]
     return [{
         "translation": lines[0],
         "source": " ".join(lines[1:]),
@@ -166,6 +172,105 @@ def bilingual_chunks_for_segment(segment: SubtitleSegment) -> list[dict[str, Any
         "end": segment.end,
         "item_count": len(segment.items or []),
     }]
+
+
+def split_bilingual_chunks(
+    segment: SubtitleSegment,
+    left_source: str,
+    right_source: str,
+    left_item_count: int,
+    split_time: float,
+    ratio: float | None,
+) -> tuple[str, str, list[dict[str, Any]] | None, list[dict[str, Any]] | None] | None:
+    """Split mixed translated/untranslated provenance without losing either side."""
+    chunks = bilingual_chunks_for_segment(segment)
+    if not chunks or not any(str(chunk.get("translation") or "") for chunk in chunks):
+        return None
+    counts = [max(0, int(chunk.get("item_count") or 0)) for chunk in chunks]
+    total_count = sum(counts)
+    use_item_counts = segment.items is not None and total_count > 0 and total_count == len(segment.items)
+    translated = " ".join(
+        str(chunk.get("translation") or "")
+        for chunk in chunks
+        if str(chunk.get("translation") or "")
+    )
+    requested_cut = (
+        round(len(translated) * min(1.0, max(0.0, ratio)))
+        if ratio is not None
+        else None
+    )
+    left_chunks: list[dict[str, Any]] = []
+    right_chunks: list[dict[str, Any]] = []
+    remaining = max(0, min(total_count, int(left_item_count)))
+    translated_offset = 0
+
+    for chunk, count in zip(chunks, counts):
+        trans = str(chunk.get("translation") or "")
+        try:
+            chunk_start = float(chunk.get("start", segment.start))
+            chunk_end = float(chunk.get("end", segment.end))
+        except (TypeError, ValueError):
+            chunk_start, chunk_end = segment.start, segment.end
+
+        if use_item_counts and count > 0:
+            left_count = min(count, remaining)
+            remaining -= left_count
+            fraction = left_count / count
+        else:
+            duration = max(0.0, chunk_end - chunk_start)
+            if split_time <= chunk_start:
+                fraction = 0.0
+            elif split_time >= chunk_end:
+                fraction = 1.0
+            elif duration > 0:
+                fraction = (split_time - chunk_start) / duration
+            else:
+                fraction = 1.0 if split_time >= chunk_end else 0.0
+            left_count = round(count * fraction)
+        right_count = count - left_count
+
+        if fraction <= 0:
+            right_chunks.append(dict(chunk))
+        elif fraction >= 1:
+            left_chunks.append(dict(chunk))
+        else:
+            local_cut = round(len(trans) * fraction)
+            if requested_cut is not None and translated_offset <= requested_cut <= translated_offset + len(trans):
+                local_cut = requested_cut - translated_offset
+            local_cut = max(0, min(len(trans), local_cut))
+            left_trans = trans[:local_cut].rstrip()
+            right_trans = trans[local_cut:].lstrip()
+
+            source_words = str(chunk.get("source") or "").split()
+            source_cut = max(0, min(len(source_words), round(len(source_words) * fraction)))
+            boundary = min(max(float(split_time), chunk_start), chunk_end)
+            left_chunks.append({
+                **chunk,
+                "translation": left_trans,
+                "source": " ".join(source_words[:source_cut]),
+                "end": boundary,
+                "item_count": left_count,
+            })
+            right_chunks.append({
+                **chunk,
+                "translation": right_trans,
+                "source": " ".join(source_words[source_cut:]),
+                "start": boundary,
+                "item_count": right_count,
+            })
+        if trans:
+            translated_offset += len(trans) + 1
+
+    def compose(parts: list[dict[str, Any]], source: str) -> str:
+        translation = " ".join(str(part.get("translation") or "") for part in parts if str(part.get("translation") or ""))
+        return f"{translation}\n{source}" if translation else source
+
+    return (
+        compose(left_chunks, left_source),
+        compose(right_chunks, right_source),
+        left_chunks or None,
+        right_chunks or None,
+    )
 
 
 def _interpolate_item(text: str, start: float, end: float) -> SubtitleItem:
@@ -1541,32 +1646,27 @@ class JobManager(ClipOperationsMixin):
                 left_source = source_by_id.get(left.id)
                 right_source = source_by_id.get(right.id)
                 is_bilingual = str((job.translation_info or {}).get("mode") or "") == "bilingual"
-                bilingual_text = None
+                bilingual_split = None
                 if is_bilingual and left_source is not None and right_source is not None:
-                    snapped_ratio = (left.end - seg.start) / duration
-                    requested_ratio = translation_ratio if translation_ratio is not None else snapped_ratio
-                    bilingual_text = split_bilingual_text(
-                        seg.text,
+                    bilingual_split = split_bilingual_chunks(
+                        seg,
                         str(left_source.get("text") or left.text),
                         str(right_source.get("text") or right.text),
-                        requested_ratio,
+                        len(left.items or []),
+                        left.end,
+                        translation_ratio,
                     )
-                if bilingual_text is not None:
-                    for pos, piece_text in zip((index, index + 1), bilingual_text):
+                if bilingual_split is not None:
+                    split_texts = bilingual_split[:2]
+                    split_chunks = bilingual_split[2:]
+                    for pos, piece_text, piece_chunks in zip((index, index + 1), split_texts, split_chunks):
                         piece = segments[pos]
-                        piece_lines = piece_text.split("\n", 1)
                         segments[pos] = SubtitleSegment(
                             id=piece.id, start=piece.start, end=piece.end,
                             speaker=piece.speaker, text=piece_text, items=piece.items,
                             confidence=piece.confidence, quality_flags=piece.quality_flags,
                             quality_reasons=piece.quality_reasons,
-                            bilingual_chunks=([{
-                                "translation": piece_lines[0],
-                                "source": piece_lines[1],
-                                "start": piece.start,
-                                "end": piece.end,
-                                "item_count": len(piece.items or []),
-                            }] if len(piece_lines) == 2 else None),
+                            bilingual_chunks=piece_chunks,
                         )
                 else:
                     # Replace mode has no separate source line to preserve. Revert both
@@ -1614,11 +1714,14 @@ class JobManager(ClipOperationsMixin):
             if all(s.items is not None for s in group)
             else None
         )
-        bilingual_chunks = [
+        all_bilingual_chunks = [
             chunk
             for segment in group
             for chunk in bilingual_chunks_for_segment(segment)
-        ] or None
+        ]
+        bilingual_chunks = all_bilingual_chunks if any(
+            str(chunk.get("translation") or "") for chunk in all_bilingual_chunks
+        ) else None
         merged = SubtitleSegment(
             id=first.id,
             start=min(s.start for s in group),

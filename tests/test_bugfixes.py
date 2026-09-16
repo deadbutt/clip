@@ -1083,6 +1083,142 @@ class SplitMergeSegmentsTest(unittest.TestCase):
                 "戊\ntwo three four five",
             ])
 
+    def test_merge_and_split_mixed_bilingual_segments_in_both_orders(self):
+        import tempfile
+
+        cases = [
+            (
+                [
+                    {
+                        "id": "seg_0001", "start": 0.0, "end": 2.0, "speaker": "S01",
+                        "text": "hello friend", "items": [
+                            {"text": "hello", "start": 0.0, "end": 1.0},
+                            {"text": "friend", "start": 1.0, "end": 2.0},
+                        ],
+                    },
+                    {
+                        "id": "seg_0002", "start": 2.0, "end": 4.0, "speaker": "S01",
+                        "text": "world again", "items": [
+                            {"text": "world", "start": 2.0, "end": 3.0},
+                            {"text": "again", "start": 3.0, "end": 4.0},
+                        ],
+                    },
+                ],
+                ["hello friend", "你好\nworld again"],
+                2.0,
+                0.0,
+            ),
+            (
+                [
+                    {
+                        "id": "seg_0001", "start": 0.0, "end": 2.0, "speaker": "S01",
+                        "text": "hello friend", "items": [
+                            {"text": "hello", "start": 0.0, "end": 1.0},
+                            {"text": "friend", "start": 1.0, "end": 2.0},
+                        ],
+                    },
+                    {
+                        "id": "seg_0002", "start": 2.0, "end": 4.0, "speaker": "S01",
+                        "text": "world again", "items": [
+                            {"text": "world", "start": 2.0, "end": 3.0},
+                            {"text": "again", "start": 3.0, "end": 4.0},
+                        ],
+                    },
+                ],
+                ["你好\nhello friend", "world again"],
+                2.0,
+                1.0,
+            ),
+        ]
+
+        for source, texts, split_time, translation_ratio in cases:
+            with self.subTest(texts=texts), tempfile.TemporaryDirectory() as tmpdir:
+                manager = self._make_job_manager(tmpdir)
+                job = manager.get_job("job1")
+                current = [{**segment, "text": text} for segment, text in zip(source, texts)]
+                job.source_segments_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+                job.segments_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+                job.translation_info = {"applied": True, "mode": "bilingual"}
+
+                with patch("moss_transcribe_diarize.app.jobs.probe_video_size", return_value=(1920, 1080)):
+                    merged = manager.merge_segments("job1", ["seg_0001", "seg_0002"])
+                    out = manager.split_segment(
+                        "job1", merged[0]["id"], split_time, translation_ratio
+                    )
+
+                self.assertEqual([chunk["translation"] for chunk in merged[0]["bilingual_chunks"]], [
+                    "" if "\n" not in texts[0] else "你好",
+                    "" if "\n" not in texts[1] else "你好",
+                ])
+                self.assertEqual([segment["text"] for segment in out], texts)
+
+    def test_english_cursor_splits_translation_within_its_matching_chunk(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_job_manager(tmpdir)
+            job = manager.get_job("job1")
+            source = [
+                {
+                    "id": "seg_0001", "start": 0.0, "end": 2.0, "speaker": "S01",
+                    "text": "hello friend", "items": [
+                        {"text": "hello", "start": 0.0, "end": 1.0},
+                        {"text": "friend", "start": 1.0, "end": 2.0},
+                    ],
+                },
+                {
+                    "id": "seg_0002", "start": 2.0, "end": 4.0, "speaker": "S01",
+                    "text": "world again", "items": [
+                        {"text": "world", "start": 2.0, "end": 3.0},
+                        {"text": "again", "start": 3.0, "end": 4.0},
+                    ],
+                },
+            ]
+            current = [{**source[0]}, {**source[1], "text": "你好\nworld again"}]
+            job.source_segments_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+            job.segments_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+            job.translation_info = {"applied": True, "mode": "bilingual"}
+
+            with patch("moss_transcribe_diarize.app.jobs.probe_video_size", return_value=(1920, 1080)):
+                merged = manager.merge_segments("job1", ["seg_0001", "seg_0002"])
+                out = manager.split_segment("job1", merged[0]["id"], 3.0)
+
+            self.assertEqual([segment["text"] for segment in out], [
+                "你\nhello friend world",
+                "好\nagain",
+            ])
+
+    def test_mixed_bilingual_split_uses_chunk_times_without_complete_items(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_job_manager(tmpdir)
+            job = manager.get_job("job1")
+            source = [
+                {
+                    "id": "seg_0001", "start": 0.0, "end": 1.0, "speaker": "S01",
+                    "text": "hello", "items": None,
+                },
+                {
+                    "id": "seg_0002", "start": 1.0, "end": 3.0, "speaker": "S01",
+                    "text": "world again", "items": [
+                        {"text": "world", "start": 1.0, "end": 2.0},
+                        {"text": "again", "start": 2.0, "end": 3.0},
+                    ],
+                },
+            ]
+            current = [{**source[0]}, {**source[1], "text": "你好\nworld again"}]
+            job.source_segments_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+            job.segments_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+            job.translation_info = {"applied": True, "mode": "bilingual"}
+
+            with patch("moss_transcribe_diarize.app.jobs.probe_video_size", return_value=(1920, 1080)):
+                merged = manager.merge_segments("job1", ["seg_0001", "seg_0002"])
+                out = manager.split_segment("job1", merged[0]["id"], 1.0, 0.0)
+
+            self.assertIsNone(merged[0]["items"])
+            self.assertEqual([segment["text"] for segment in out], ["hello", "你好\nworld again"])
+
     def test_apply_proofread_keeps_items(self):
         import tempfile
 

@@ -241,12 +241,19 @@ let subtitleSyncInFlight = false;
 // 切换任务或本地写操作(保存/拆分/合并/替换等走 renderSegments)时置空,下次轮询全量拉一次再续上。
 let segmentsEtag = null;
 let cachedSegments = null;
+let cachedSegmentDuration = 0;
+let cachedSpeakers = [];
+let cachedSpeakerCount = 0;
 let undoStack = [];
 let redoStack = [];
 // 撤销栈所属的任务 id：切换任务时据此清空，防止 A 任务的历史快照被撤销进 B 任务
 let undoJobId = null;
 const MAX_UNDO = 50;
 let cachedTimelineSegments = [];
+let cachedTimelineDuration = 0;
+let cachedTimelineStarts = [];
+let cachedTimelinePrefixEnds = [];
+let cachedTimelineSearchable = true;
 let cachedTimelineLayout = { lanes: new Map(), count: 1 };
 // Keep timeline segment buttons stable while the viewport moves. Replacing the
 // whole lane on every scroll frame causes visible blank frames and can detach
@@ -1110,6 +1117,9 @@ tbody.addEventListener('input', (event) => {
   // 首次修改时推快照（保存改之前的状态），用于撤销文本编辑
   if (!editorDirty) pushUndoSnapshot();
   updateCachedSegmentFromRow(tr);
+  if (event.target.classList.contains('start') || event.target.classList.contains('end') || event.target.classList.contains('speaker')) {
+    refreshCachedSegmentStats();
+  }
   markEditorDirty();
   if (event.target.classList.contains('text')) {
     resizeSegmentTextarea(event.target, tr && tr.classList.contains('active'));
@@ -1132,6 +1142,9 @@ tbody.addEventListener('change', (event) => {
   // change 可能不经过 input（自动填充等）：先把变更前状态推入撤销栈再更新缓存
   if (!editorDirty) pushUndoSnapshot();
   updateCachedSegmentFromRow(event.target.closest('tr[data-index]'));
+  if (event.target.classList.contains('start') || event.target.classList.contains('end') || event.target.classList.contains('speaker')) {
+    refreshCachedSegmentStats();
+  }
   markEditorDirty();
 });
 tbody.addEventListener('click', (event) => {
@@ -1341,7 +1354,15 @@ function showImportView(options = {}) {
   stopSubtitleSyncPolling();
   closeJobEvents();
   cachedSegments = null;
+  cachedSegmentDuration = 0;
+  cachedSpeakers = [];
+  cachedSpeakerCount = 0;
   cachedTimelineSegments = [];
+  cachedTimelineDuration = 0;
+  cachedTimelineStarts = [];
+  cachedTimelinePrefixEnds = [];
+  cachedTimelineSearchable = true;
+  segmentsEtag = null;
   resetUndoHistory();
   ensureClipQueueForJob();
   closeSettings();
@@ -1707,7 +1728,14 @@ async function deleteJob(jobId) {
     maskPreviewVideo.load();
     tbody.innerHTML = '';
     cachedSegments = null;
+    cachedSegmentDuration = 0;
+    cachedSpeakers = [];
+    cachedSpeakerCount = 0;
     cachedTimelineSegments = [];
+    cachedTimelineDuration = 0;
+    cachedTimelineStarts = [];
+    cachedTimelinePrefixEnds = [];
+    cachedTimelineSearchable = true;
     clipListEl.innerHTML = '';
     clipStatusEl.textContent = '';
     setEditorDirty(false);
@@ -1765,7 +1793,11 @@ async function loadSegments(jobId, options = {}) {
   subtitleSyncInFlight = true;
   try {
     const headers = {};
-    if (segmentsEtag && segmentsEtag.jobId === jobId) headers['If-None-Match'] = segmentsEtag.etag;
+    // A 304 is only useful while the matching complete in-memory dataset exists.
+    // The virtualized DOM contains just the current window and cannot replace that cache.
+    if (cachedSegments && segmentsEtag && segmentsEtag.jobId === jobId) {
+      headers['If-None-Match'] = segmentsEtag.etag;
+    }
     const res = await fetch(apiUrl(`api/jobs/${jobId}/segments`), { cache: 'no-store', headers });
     if (res.status === 304) {
       // 服务器侧 segments.json 没变：不解析、不深比较、不重渲染。
@@ -2003,8 +2035,19 @@ function renderSpeakerMap(segments) {
 }
 
 function speakerDisplayName(speaker) {
-  const names = collectSpeakerNames();
-  return names[speaker] || speakerNameMap[speaker] || speaker;
+  return speakerNameMap[speaker] || speaker;
+}
+
+function refreshCachedSegmentStats() {
+  let duration = 0;
+  const speakers = new Set();
+  for (const segment of cachedSegments || []) {
+    duration = Math.max(duration, Number(segment.end) || 0);
+    if (segment.speaker) speakers.add(segment.speaker);
+  }
+  cachedSegmentDuration = duration;
+  cachedSpeakers = [...speakers].sort();
+  cachedSpeakerCount = cachedSpeakers.length;
 }
 
 function renderSegments(segments, preferredIndex = null, options = {}) {
@@ -2027,6 +2070,7 @@ function renderSegments(segments, preferredIndex = null, options = {}) {
     quality_reasons: segment.quality_reasons || null,
     bilingual_chunks: segment.bilingual_chunks || null
   }));
+  refreshCachedSegmentStats();
   renderSpeakerMap(segments);
   renderTimeline(segments);
   refreshSpeakerDots();
@@ -2063,10 +2107,9 @@ function createSegmentRow(segment, index) {
   const tr = document.createElement('tr');
   tr.dataset.id = segment.id;
   tr.dataset.index = String(index);
-  const speakerList = (cachedSegments || []).map((item) => item.speaker);
   const dotColor = document.querySelector('#speakerColors').value === 'true'
-    && new Set(speakerList.filter(Boolean)).size > 1 && segment.speaker
-    ? speakerColorOf(segment.speaker, speakerList)
+    && cachedSpeakerCount > 1 && segment.speaker
+    ? speakerColorOf(segment.speaker, cachedSpeakers)
     : 'transparent';
   const qualityReasons = (segment.quality_reasons || []).join('；');
   const qualityMarkup = segment.confidence != null
@@ -2146,7 +2189,9 @@ function updateRenderedActiveRows() {
 }
 
 function renderTimeline(segments) {
-  const duration = timelineDuration(segments);
+  cachedTimelineDuration = maxSegmentEnd(segments);
+  refreshTimelineSearchIndex(segments);
+  const duration = Math.max(Number(preview.duration || 0), cachedTimelineDuration);
   const scrollWidth = timelineScroll.clientWidth || 1;
   const pixelsPerSecond = timelinePixelsPerSecond(duration, scrollWidth);
   currentPixelsPerSecond = pixelsPerSecond;
@@ -2201,7 +2246,14 @@ function renderVisibleTimelineSegments() {
   const leftTime = Math.max(0, (timelineScroll.scrollLeft - TIMELINE_BUFFER_PX) / pixelsPerSecond);
   const rightTime = (timelineScroll.scrollLeft + timelineScroll.clientWidth + TIMELINE_BUFFER_PX) / pixelsPerSecond;
   const visibleIndexes = new Set();
-  for (const [index, segment] of segments.entries()) {
+  let firstIndex = 0;
+  let lastIndex = segments.length;
+  if (cachedTimelineSearchable) {
+    firstIndex = lowerBound(cachedTimelinePrefixEnds, leftTime);
+    lastIndex = upperBound(cachedTimelineStarts, rightTime);
+  }
+  for (let index = firstIndex; index < lastIndex; index++) {
+    const segment = segments[index];
     const start = Math.max(0, Number(segment.start) || 0);
     const end = Math.max(start + 0.01, Number(segment.end) || start + 0.01);
     if (end < leftTime || start > rightTime) continue;
@@ -2242,6 +2294,45 @@ function renderVisibleTimelineSegments() {
       item.remove();
     }
   }
+}
+
+function refreshTimelineSearchIndex(segments) {
+  cachedTimelineStarts = [];
+  cachedTimelinePrefixEnds = [];
+  cachedTimelineSearchable = true;
+  let lastStart = -Infinity;
+  let maxEnd = 0;
+  for (const segment of segments || []) {
+    const start = Math.max(0, Number(segment.start) || 0);
+    const end = Math.max(start + 0.01, Number(segment.end) || start + 0.01);
+    if (start < lastStart) cachedTimelineSearchable = false;
+    lastStart = start;
+    maxEnd = Math.max(maxEnd, end);
+    cachedTimelineStarts.push(start);
+    cachedTimelinePrefixEnds.push(maxEnd);
+  }
+}
+
+function lowerBound(values, target) {
+  let lo = 0;
+  let hi = values.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (values[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function upperBound(values, target) {
+  let lo = 0;
+  let hi = values.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (values[mid] <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 function scheduleVisibleTimelineRender() {
@@ -2801,8 +2892,17 @@ function timelineTickInterval(pixelsPerSecond) {
 
 function timelineDuration(segments) {
   const mediaDuration = Number(preview.duration || 0);
-  const segmentDuration = Math.max(0, ...segments.map((segment) => Number(segment.end) || 0));
+  let segmentDuration;
+  if (segments === cachedSegments) segmentDuration = cachedSegmentDuration;
+  else if (segments === cachedTimelineSegments) segmentDuration = cachedTimelineDuration;
+  else segmentDuration = maxSegmentEnd(segments);
   return Math.max(mediaDuration, segmentDuration);
+}
+
+function maxSegmentEnd(segments) {
+  let duration = 0;
+  for (const segment of segments || []) duration = Math.max(duration, Number(segment.end) || 0);
+  return duration;
 }
 
 function resizeSegmentTextarea(textarea, expanded) {
@@ -3068,7 +3168,10 @@ async function splitSegmentAtCursor(index, textarea) {
     if (items && items.length > 1) {
       let boundaryIndex = Math.round(items.length * translationRatio);
       const chunks = Array.isArray(fresh.bilingual_chunks) ? fresh.bilingual_chunks : [];
-      const reconstructed = chunks.map((chunk) => String(chunk.translation || '')).join(' ');
+      const reconstructed = chunks
+        .map((chunk) => String(chunk.translation || ''))
+        .filter(Boolean)
+        .join(' ');
       const translatedText = text.slice(0, newlineIndex);
       if (chunks.length && reconstructed === translatedText) {
         let charOffset = 0;
@@ -3076,6 +3179,10 @@ async function splitSegmentAtCursor(index, textarea) {
         for (const chunk of chunks) {
           const chunkText = String(chunk.translation || '');
           const itemCount = Math.max(0, Number(chunk.item_count) || 0);
+          if (!chunkText) {
+            itemOffset += itemCount;
+            continue;
+          }
           const chunkEnd = charOffset + chunkText.length;
           if (cursor <= chunkEnd) {
             const localRatio = chunkText.length ? (cursor - charOffset) / chunkText.length : 0;
@@ -3483,7 +3590,7 @@ function syncActiveSegment(force = false) {
   const time = Number(preview.currentTime || 0);
   if (!force && lastSyncedTime >= 0 && Math.abs(time - lastSyncedTime) < 0.08) return;
   lastSyncedTime = time;
-  const segments = collectSegments();
+  const segments = cachedSegments || collectSegments();
   const previousIndex = activeSegmentIndex;
   const previous = segments[previousIndex];
   const candidateIndex = previous && isSegmentVisibleAtTime(previous, time) ? previousIndex : findSegmentIndexAtTime(segments, time);
@@ -3525,7 +3632,7 @@ function setActiveSegment(index, shouldScroll, scrollOptions = {}) {
 }
 
 function updateTimelinePlayhead(segments) {
-  segments = segments || collectSegments();
+  segments = segments || cachedSegments || collectSegments();
   const duration = timelineDuration(segments);
   const trackWidth = Number.parseFloat(timelineTrack.style.width) || timelineTrack.clientWidth || timelineScroll.clientWidth || 1;
   const time = Math.max(0, Number(preview.currentTime || 0));
@@ -3606,7 +3713,7 @@ function updateOperationProgress(job) {
 }
 
 function updateSubtitlePreview(segments) {
-  segments = segments || collectSegments();
+  segments = segments || cachedSegments || collectSegments();
   updateSourceMaskPreview();
   const time = Number(preview.currentTime || 0);
   const centerIndex = activeSegmentIndex >= 0 ? activeSegmentIndex : findSegmentIndexAtTime(segments, time);
@@ -3644,7 +3751,7 @@ function updateSubtitlePreview(segments) {
   subtitleOverlay.style.bottom = Math.max(0, marginV * scale) + 'px';
   subtitleOverlay.style.webkitTextStroke = subtitleTextStroke(scale, outlineColor);
   subtitleOverlay.style.textShadow = subtitleTextShadow(scale);
-  const color = useSpeakerColors && new Set(segments.map((s) => s.speaker).filter(Boolean)).size > 1 && visibleSegments.length === 1
+  const color = useSpeakerColors && cachedSpeakerCount > 1 && visibleSegments.length === 1
     ? speakerColor(visibleSegments[0].segment.speaker, segments)
     : primaryColor;
   subtitleOverlay.style.color = color;
@@ -3727,12 +3834,17 @@ function subtitleTextShadow(scale) {
 }
 
 function speakerColor(speaker, segments) {
-  return speakerColorOf(speaker, (segments || []).map((segment) => segment.speaker));
+  const speakers = segments === cachedSegments || segments === cachedTimelineSegments
+    ? cachedSpeakers
+    : (segments || []).map((segment) => segment.speaker);
+  return speakerColorOf(speaker, speakers);
 }
 
 function speakerColorOf(speaker, speakers) {
   if (speaker && speakerColorOverrides[speaker]) return speakerColorOverrides[speaker];
-  const sorted = [...new Set((speakers || []).filter(Boolean))].sort();
+  const sorted = speakers === cachedSpeakers
+    ? cachedSpeakers
+    : [...new Set((speakers || []).filter(Boolean))].sort();
   const index = Math.max(0, sorted.indexOf(speaker || ''));
   return speakerPalette[index % speakerPalette.length];
 }
@@ -3740,12 +3852,7 @@ function speakerColorOf(speaker, speakers) {
 // 按说话人配色是否生效（需 >1 个说话人，与烧录/预览的回落规则一致）
 function speakerColorsEnabled() {
   if (document.querySelector('#speakerColors').value !== 'true') return false;
-  const rows = [...tbody.querySelectorAll('tr[data-index] .speaker')];
-  const speakers = rows.map((input) => input.value.trim()).filter(Boolean);
-  if (!speakers.length && cachedSegments) {
-    return new Set(cachedSegments.map((s) => s.speaker).filter(Boolean)).size > 1;
-  }
-  return new Set(speakers).size > 1;
+  return cachedSpeakerCount > 1;
 }
 
 // 刷新编辑表格每行的说话人颜色点（配色模式切换/说话人改名时调用）
@@ -3756,9 +3863,7 @@ function refreshSpeakerDots() {
     if (!dot) return;
     const speaker = (tr.querySelector('.speaker').value || '').trim();
     if (enabled && speaker) {
-      const speakers = [...tbody.querySelectorAll('tr[data-index] .speaker')]
-        .map((input) => input.value.trim()).filter(Boolean);
-      dot.style.background = speakerColorOf(speaker, speakers);
+      dot.style.background = speakerColorOf(speaker, cachedSpeakers);
       dot.title = '按说话人配色';
     } else {
       dot.style.background = 'transparent';
