@@ -74,6 +74,7 @@ _MIN_ALIGN_MATCH_RATIO = 0.4
 # segments 解析缓存条目上限:每条可达数 MB(词级时间戳),不设限的话
 # 长期运行的服务会随历史任务数无限增长;8 个活跃编辑任务已绰绰有余。
 _SEGMENTS_CACHE_MAX = 8
+_MEDIA_ANALYSIS_CACHE_MAX = 2
 
 # 字幕展示/导出只修正 Whisper 词级时间戳偏早的问题，工程 JSON 仍保留原始边界。
 _TAIL_FRAME_SECONDS = 0.02
@@ -128,6 +129,43 @@ def merge_bilingual_texts(parts: list[str]) -> str | None:
     if not trans:
         return None
     return "\n".join([" ".join(trans), " ".join(source)])
+
+
+def split_bilingual_text(
+    text: str,
+    left_source: str,
+    right_source: str,
+    ratio: float,
+) -> tuple[str, str] | None:
+    """Split a ``translation\nsource`` value without discarding either language."""
+    lines = [line.strip() for line in str(text or "").split("\n") if line.strip()]
+    if len(lines) < 2:
+        return None
+    translated = lines[0]
+    if not translated:
+        return None
+    cut = max(1, min(len(translated) - 1, round(len(translated) * min(1.0, max(0.0, ratio)))))
+    left_translated = translated[:cut].rstrip()
+    right_translated = translated[cut:].lstrip()
+    left_text = f"{left_translated}\n{left_source}" if left_translated else left_source
+    right_text = f"{right_translated}\n{right_source}" if right_translated else right_source
+    return left_text, right_text
+
+
+def bilingual_chunks_for_segment(segment: SubtitleSegment) -> list[dict[str, Any]]:
+    """Return merge provenance used to map translated characters back to source words."""
+    if segment.bilingual_chunks:
+        return [dict(chunk) for chunk in segment.bilingual_chunks]
+    lines = [line.strip() for line in str(segment.text or "").split("\n") if line.strip()]
+    if len(lines) < 2:
+        return []
+    return [{
+        "translation": lines[0],
+        "source": " ".join(lines[1:]),
+        "start": segment.start,
+        "end": segment.end,
+        "item_count": len(segment.items or []),
+    }]
 
 
 def _interpolate_item(text: str, start: float, end: float) -> SubtitleItem:
@@ -343,6 +381,7 @@ def _adaptive_tail_endings(
     segments: list[SubtitleSegment],
     *,
     max_extension: float = _TAIL_MAX_EXTENSION,
+    frames: list[float] | None = None,
 ) -> dict[str, float] | None:
     """Find safe sentence-tail extensions from low-rate audio energy.
 
@@ -350,7 +389,7 @@ def _adaptive_tail_endings(
     a fraction of the segment's preceding energy. This rejects long quiet gaps
     and most music/game-only tails while preserving a conservative fallback.
     """
-    frames = _rms_frames_from_audio(path)
+    frames = frames if frames is not None else _rms_frames_from_audio(path)
     if not frames:
         return None
     frame_seconds = _TAIL_FRAME_SECONDS
@@ -675,6 +714,11 @@ class JobManager(ClipOperationsMixin):
         self._clip_candidates_cache_lock = threading.Lock()
         # job_id -> (input stat, segment time signature, adaptive end map).
         self._tail_padding_cache: dict[str, tuple[tuple[int, int], tuple[tuple[str, float, float], ...], dict[str, float] | None]] = {}
+        # Media decoding and ffprobe results do not change when subtitle rows do.
+        # Keep a small LRU so repeated split/merge operations stay proportional
+        # to subtitle count instead of repeatedly scanning the whole media file.
+        self._tail_audio_cache: dict[str, tuple[tuple[int, int], list[float] | None]] = {}
+        self._video_size_cache: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {}
         self._load_existing_jobs()
         self._worker = threading.Thread(target=self._worker_loop, name="mtd-job-worker", daemon=True)
         self._worker.start()
@@ -1066,6 +1110,8 @@ class JobManager(ClipOperationsMixin):
         self._segments_cache.pop(job_id, None)
         self._invalidate_clip_candidates_cache(job_id)
         self._tail_padding_cache.pop(job_id, None)
+        self._tail_audio_cache.pop(job_id, None)
+        self._video_size_cache.pop(job_id, None)
         self._progress_save_times.pop(job_id, None)
         self._cancelled_jobs.discard(job_id)
         shutil.rmtree(job.job_dir, ignore_errors=True)
@@ -1105,9 +1151,35 @@ class JobManager(ClipOperationsMixin):
         cached = self._tail_padding_cache.get(job.id)
         if cached is not None and cached[0] == input_key and cached[1] == signature:
             return cached[2]
-        result = _adaptive_tail_endings(input_path, segments)
+        audio_cached = self._tail_audio_cache.get(job.id)
+        if audio_cached is not None and audio_cached[0] == input_key:
+            frames = audio_cached[1]
+            self._tail_audio_cache[job.id] = self._tail_audio_cache.pop(job.id)
+        else:
+            frames = _rms_frames_from_audio(input_path)
+            self._tail_audio_cache[job.id] = (input_key, frames)
+            while len(self._tail_audio_cache) > _MEDIA_ANALYSIS_CACHE_MAX:
+                self._tail_audio_cache.pop(next(iter(self._tail_audio_cache)))
+        result = _adaptive_tail_endings(input_path, segments, frames=frames) if frames else None
         self._tail_padding_cache[job.id] = (input_key, signature, result)
         return result
+
+    def _video_size_for_job(self, job: JobRecord) -> tuple[int, int]:
+        input_path = Path(job.input_path)
+        try:
+            stat = input_path.stat()
+            input_key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return 1920, 1080
+        cached = self._video_size_cache.get(job.id)
+        if cached is not None and cached[0] == input_key:
+            self._video_size_cache[job.id] = self._video_size_cache.pop(job.id)
+            return cached[1]
+        size = probe_video_size(input_path)
+        self._video_size_cache[job.id] = (input_key, size)
+        while len(self._video_size_cache) > _MEDIA_ANALYSIS_CACHE_MAX:
+            self._video_size_cache.pop(next(iter(self._video_size_cache)))
+        return size
 
     def _decorate_display_ends(self, job: JobRecord, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
         segments = [SubtitleSegment.from_dict(item) for item in data if isinstance(item, dict)]
@@ -1265,10 +1337,12 @@ class JobManager(ClipOperationsMixin):
             return
         by_id = {str(item.get("id")): item for item in existing if isinstance(item, dict)}
         for segment in segments:
-            if segment.items is not None:
-                continue
             record = by_id.get(segment.id)
             if not record:
+                continue
+            if segment.bilingual_chunks is None and isinstance(record.get("bilingual_chunks"), list):
+                segment.bilingual_chunks = [dict(v) for v in record["bilingual_chunks"] if isinstance(v, dict)] or None
+            if segment.items is not None:
                 continue
             items = coerce_subtitle_items(record.get("items"))
             if not items:
@@ -1432,6 +1506,7 @@ class JobManager(ClipOperationsMixin):
         job_id: str,
         segment_id: str,
         split_time: float | None = None,
+        translation_ratio: float | None = None,
     ) -> list[dict[str, Any]]:
         """在指定时间点(缺省取中点)把一条字幕拆成两条。
 
@@ -1458,21 +1533,53 @@ class JobManager(ClipOperationsMixin):
         source_synced = self._sync_source_split(job, segment_id, t, new_id)
         if source_synced:
             self._mark_structure_changed(job)
-            # 已翻译任务: 拆出的两条退回源文文本(译文按旧结构已失真,structure_changed 会提示重译)。
             try:
                 source_by_id = {
                     str(item.get("id")): item
                     for item in json.loads(job.source_segments_path.read_text(encoding="utf-8"))
                 }
-                for pos in (index, index + 1):
-                    piece = segments[pos]
-                    record = source_by_id.get(piece.id)
-                    if record is not None and str(record.get("text") or "") != piece.text:
+                left_source = source_by_id.get(left.id)
+                right_source = source_by_id.get(right.id)
+                is_bilingual = str((job.translation_info or {}).get("mode") or "") == "bilingual"
+                bilingual_text = None
+                if is_bilingual and left_source is not None and right_source is not None:
+                    snapped_ratio = (left.end - seg.start) / duration
+                    requested_ratio = translation_ratio if translation_ratio is not None else snapped_ratio
+                    bilingual_text = split_bilingual_text(
+                        seg.text,
+                        str(left_source.get("text") or left.text),
+                        str(right_source.get("text") or right.text),
+                        requested_ratio,
+                    )
+                if bilingual_text is not None:
+                    for pos, piece_text in zip((index, index + 1), bilingual_text):
+                        piece = segments[pos]
+                        piece_lines = piece_text.split("\n", 1)
                         segments[pos] = SubtitleSegment(
                             id=piece.id, start=piece.start, end=piece.end,
-                            speaker=piece.speaker, text=str(record.get("text") or piece.text),
-                            items=piece.items,
+                            speaker=piece.speaker, text=piece_text, items=piece.items,
+                            confidence=piece.confidence, quality_flags=piece.quality_flags,
+                            quality_reasons=piece.quality_reasons,
+                            bilingual_chunks=([{
+                                "translation": piece_lines[0],
+                                "source": piece_lines[1],
+                                "start": piece.start,
+                                "end": piece.end,
+                                "item_count": len(piece.items or []),
+                            }] if len(piece_lines) == 2 else None),
                         )
+                else:
+                    # Replace mode has no separate source line to preserve. Revert both
+                    # pieces to source text so a later retranslation uses the new structure.
+                    for pos in (index, index + 1):
+                        piece = segments[pos]
+                        record = source_by_id.get(piece.id)
+                        if record is not None and str(record.get("text") or "") != piece.text:
+                            segments[pos] = SubtitleSegment(
+                                id=piece.id, start=piece.start, end=piece.end,
+                                speaker=piece.speaker, text=str(record.get("text") or piece.text),
+                                items=piece.items,
+                            )
             except Exception:
                 logger.debug("split: fallback to source text skipped", exc_info=True)
         self._write_subtitle_files(job, segments)
@@ -1507,6 +1614,11 @@ class JobManager(ClipOperationsMixin):
             if all(s.items is not None for s in group)
             else None
         )
+        bilingual_chunks = [
+            chunk
+            for segment in group
+            for chunk in bilingual_chunks_for_segment(segment)
+        ] or None
         merged = SubtitleSegment(
             id=first.id,
             start=min(s.start for s in group),
@@ -1514,6 +1626,7 @@ class JobManager(ClipOperationsMixin):
             speaker=first.speaker,
             text=text,
             items=items,
+            bilingual_chunks=bilingual_chunks,
         )
         segments[indexes[0] : indexes[0] + len(indexes)] = [merged]
 
@@ -2755,7 +2868,7 @@ class JobManager(ClipOperationsMixin):
             try:
                 self._set_status(job, "rendering", 0.95, error=None)
                 segments = [SubtitleSegment.from_dict(item) for item in self.list_segments(job.id)]
-                width, height = probe_video_size(job.input_path)
+                width, height = self._video_size_for_job(job)
                 write_text(job.ass_path, export_ass(self._export_segments_for_job(job, segments), style=style, video_width=width, video_height=height))
                 def on_render_progress(ratio: float) -> None:
                     progress = max(job.progress, 0.95 + max(0.0, min(1.0, ratio)) * 0.049)
@@ -2810,7 +2923,7 @@ class JobManager(ClipOperationsMixin):
             export_srt(export_segments, show_speaker=style.show_speaker, speaker_names=style.speaker_names),
             encoding="utf-8-sig",
         )
-        width, height = probe_video_size(job.input_path)
+        width, height = self._video_size_for_job(job)
         write_text(
             job.ass_path,
             export_ass(export_segments, style=style, video_width=width, video_height=height),

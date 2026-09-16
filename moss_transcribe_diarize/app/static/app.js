@@ -2024,7 +2024,8 @@ function renderSegments(segments, preferredIndex = null, options = {}) {
     display_end: segment.display_end == null ? null : Number(segment.display_end),
     confidence: segment.confidence == null ? null : Number(segment.confidence),
     quality_flags: segment.quality_flags || null,
-    quality_reasons: segment.quality_reasons || null
+    quality_reasons: segment.quality_reasons || null,
+    bilingual_chunks: segment.bilingual_chunks || null
   }));
   renderSpeakerMap(segments);
   renderTimeline(segments);
@@ -2835,6 +2836,7 @@ function updateCachedSegmentFromRow(tr) {
   const index = Number(tr.dataset.index);
   if (!Number.isInteger(index) || !cachedSegments[index]) return;
   cachedSegments[index] = {
+    ...cachedSegments[index],
     id: tr.dataset.id || cachedSegments[index].id || `seg_${String(index + 1).padStart(4, '0')}`,
     start: Number(tr.querySelector('.start').value),
     end: Number(tr.querySelector('.end').value),
@@ -3051,12 +3053,47 @@ async function splitSegmentAtCursor(index, textarea) {
   const fresh = (cachedSegments || [])[index] || segment;
   const cursor = textarea.selectionStart != null ? Number(textarea.selectionStart) : 0;
   const text = textarea.value != null ? textarea.value : fresh.text;
+  const newlineIndex = text.indexOf('\n');
+  const isBilingual = currentJob.translation?.mode === 'bilingual' && newlineIndex >= 0;
+  let translationRatio = null;
 
   // 光标位置 -> 词索引 -> 精确切点时间
   let time = null;
   const items = fresh.items;
-  if (items && items.length) {
-    let pos = 0;
+  if (isBilingual && cursor <= newlineIndex) {
+    // 译文没有词级时间戳：按译文行内的光标比例映射到源文词序边界。
+    // 不能按整段音频时长映射，停顿和语速变化会让英文切点明显偏移。
+    const translatedLength = Math.max(1, newlineIndex);
+    translationRatio = Math.min(1, Math.max(0, cursor / translatedLength));
+    if (items && items.length > 1) {
+      let boundaryIndex = Math.round(items.length * translationRatio);
+      const chunks = Array.isArray(fresh.bilingual_chunks) ? fresh.bilingual_chunks : [];
+      const reconstructed = chunks.map((chunk) => String(chunk.translation || '')).join(' ');
+      const translatedText = text.slice(0, newlineIndex);
+      if (chunks.length && reconstructed === translatedText) {
+        let charOffset = 0;
+        let itemOffset = 0;
+        for (const chunk of chunks) {
+          const chunkText = String(chunk.translation || '');
+          const itemCount = Math.max(0, Number(chunk.item_count) || 0);
+          const chunkEnd = charOffset + chunkText.length;
+          if (cursor <= chunkEnd) {
+            const localRatio = chunkText.length ? (cursor - charOffset) / chunkText.length : 0;
+            boundaryIndex = itemOffset + Math.round(itemCount * Math.min(1, Math.max(0, localRatio)));
+            break;
+          }
+          charOffset = chunkEnd + 1;
+          itemOffset += itemCount;
+        }
+      }
+      boundaryIndex = Math.max(1, Math.min(items.length - 1, boundaryIndex));
+      time = Number(items[boundaryIndex].start);
+    } else {
+      time = Number(fresh.start) + (Number(fresh.end) - Number(fresh.start)) * translationRatio;
+    }
+  } else if (items && items.length) {
+    // 双语字幕的 items 对应第二行源文，跳过第一行译文，避免同名词误匹配。
+    let pos = isBilingual ? newlineIndex + 1 : 0;
     for (let k = 0; k < items.length; k++) {
       const word = String(items[k].text || '').trim();
       if (!word) continue;
@@ -3080,7 +3117,7 @@ async function splitSegmentAtCursor(index, textarea) {
     const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/segments/${encodeURIComponent(fresh.id)}/split`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ time })
+      body: JSON.stringify({ time, translation_ratio: translationRatio })
     });
     const data = await res.json();
     if (!res.ok) {
@@ -3092,7 +3129,12 @@ async function splitSegmentAtCursor(index, textarea) {
     setEditorDirty(false);
     updateSubtitlePreview(data.segments);
     focusSegmentText(index + 1);
-    if (data.needs_retranslate) setTaskNotice('已拆分：源稿已同步，译文段落将显示原文，请重新翻译', 'warn');
+    if (data.needs_retranslate) {
+      const message = isBilingual
+        ? '已拆分：中英文均已保留，译文按光标近似对齐，建议重新翻译'
+        : '已拆分：源稿已同步，当前译文需要重新翻译';
+      setTaskNotice(message, 'warn');
+    }
   } catch (err) {
     setTaskNotice('拆分失败：' + err.message, 'error');
   }
@@ -3614,7 +3656,7 @@ function isSegmentVisibleAtTime(segment, time) {
   const start = Number(segment.start);
   const end = Number(segment.end);
   // 后端按音频能量计算句尾缓冲；旧任务/离线数据仍使用固定兜底值。
-  const displayEnd = Number.isFinite(Number(segment.display_end))
+  const displayEnd = segment.display_end != null && Number.isFinite(Number(segment.display_end))
     ? Number(segment.display_end)
     : end + 0.50;
   return Number.isFinite(start) && Number.isFinite(end) && start <= time && time < displayEnd;

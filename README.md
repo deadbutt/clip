@@ -232,9 +232,11 @@ mtd-subtitle --help
 ```powershell
 .venv\Scripts\python.exe -m pytest tests -q
 .venv\Scripts\python.exe -m ruff check moss_transcribe_diarize tests
+npx playwright install chromium  # 首次运行一次
+npm run test:frontend
 ```
 
-前端改动直接编辑 `moss_transcribe_diarize/app/static/` 下的文件（服务端 no-store，刷新即生效）。CI（GitHub Actions）跑 ruff + pytest。
+前端改动直接编辑 `moss_transcribe_diarize/app/static/` 下的文件（服务端 no-store，刷新即生效）。Playwright 测试使用固定 API 夹具，不加载模型或调用外部服务。CI（GitHub Actions）跑 ruff、pytest 和 Chromium 前端流程测试。
 
 ## 常见问题
 

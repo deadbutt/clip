@@ -27,13 +27,13 @@ testmd/
 # Tooling workspace and transient eval artifacts.
 .zcode/
 node_modules/
+playwright-report/
+test-results/
 
 # Local one-off scripts / tooling leftovers (kept on disk, not part of the project).
 _test_guide.js
 analyze_diar.py
 test_full_pipeline.py
-package.json
-package-lock.json
 
 # Packaging output.
 build/

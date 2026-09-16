@@ -619,6 +619,13 @@ def apply_translations(
                 speaker=segment.speaker,
                 text=text,
                 items=segment.items,
+                bilingual_chunks=([{
+                    "translation": translation,
+                    "source": segment.text,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "item_count": len(segment.items or []),
+                }] if mode == "bilingual" and text != translation else None),
             )
         )
     return output

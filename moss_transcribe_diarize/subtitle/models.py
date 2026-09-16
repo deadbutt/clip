@@ -52,6 +52,7 @@ class SubtitleSegment:
     confidence: float | None = None
     quality_flags: list[str] | None = None
     quality_reasons: list[str] | None = None
+    bilingual_chunks: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -68,6 +69,8 @@ class SubtitleSegment:
             confidence=(None if data.get("confidence") in (None, "") else float(data.get("confidence"))),
             quality_flags=([str(v) for v in data.get("quality_flags", [])] if isinstance(data.get("quality_flags"), list) else None),
             quality_reasons=([str(v) for v in data.get("quality_reasons", [])] if isinstance(data.get("quality_reasons"), list) else None),
+            bilingual_chunks=([dict(v) for v in data.get("bilingual_chunks", []) if isinstance(v, dict)] or None
+                              if isinstance(data.get("bilingual_chunks"), list) else None),
         )
 
 

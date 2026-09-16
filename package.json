@@ -1,0 +1,10 @@
+{
+  "name": "dieshang-workbench-frontend-tests",
+  "private": true,
+  "scripts": {
+    "test:frontend": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

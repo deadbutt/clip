@@ -577,7 +577,16 @@ def create_app(
             split_time = payload.get("time") if isinstance(payload, dict) else None
             if split_time is not None:
                 split_time = float(split_time)
-            segments_out = await asyncio.to_thread(manager.split_segment, job_id, segment_id, split_time)
+            translation_ratio = payload.get("translation_ratio") if isinstance(payload, dict) else None
+            if translation_ratio is not None:
+                translation_ratio = float(translation_ratio)
+            segments_out = await asyncio.to_thread(
+                manager.split_segment,
+                job_id,
+                segment_id,
+                split_time,
+                translation_ratio,
+            )
             job_info = manager.get_job(job_id)
             needs_retranslate = bool((job_info.translation_info or {}).get("structure_changed"))
             return {"segments": segments_out, "needs_retranslate": needs_retranslate}
