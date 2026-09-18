@@ -20,7 +20,7 @@
 | 说话人分离 | pyannote speaker-diarization-3.1 | auto 模式自由聚类（上限 4 人）+ 时长占比 <10% 杂簇收编；跨说话人段用词级时间戳归属；说话人数量可指定 1-10 |
 | 字幕后处理 | 词级重组 | 从词级时间戳重新断句，逗号软切（优先标点边界，避免在动词/介词/固定短语中间硬切）；合并 ≤4 权重碎段、拆分 >11s 长段；剔除重复幻觉 |
 | 校对原稿 | 两遍架构 | Pass1 滑动窗口 1:1 局部替换（自动应用）；Pass2 全片只读标注（术语表自动应用）；只修改源稿 |
-| 翻译 | OpenAI 兼容 API / Ollama / 本地 Opus-MT | 多 profile 随时切换；校对跑在翻译前的源稿上；拆分/合并后自动标记需重译段落 |
+| 翻译 | OpenAI 兼容 API / Ollama / 本地 HY-MT2 / 本地 Opus-MT | 多 profile 随时切换；本地引擎零 token 成本；校对跑在翻译前的源稿上；拆分/合并后自动标记需重译段落 |
 | 校对译文 | LLM 源文-译文对照 | 独立检查任意翻译引擎的译文，标记漏译/错译/术语不一致；支持勾选后一键应用建议 |
 | 字幕编辑器 | Web 内置 | 视频预览实时叠加字幕；Ctrl+Enter 光标拆分（词边界对齐）；⇊ 相邻合并；校对 diff 确认弹窗；SRT/ASS 外部编辑自动检测同步 |
 | 烧录/切片 | ffmpeg（`tools/ffmpeg/ffmpeg.exe`） | ASS 字幕整片/片段烧录；音频统一重编码 AAC 192k（避免 Opus 兼容性问题） |
@@ -83,6 +83,8 @@ mtd-subtitle-web --port 8080    # 自定义端口
 
 `start.bat` 已自动附加常用参数（本地 `large-v3-turbo`、CUDA + float16、HF 镜像、检测到本地 OPUS-MT 时启用本地翻译）。手动启动时按需传参，完整列表见 `mtd-subtitle-web --help`，常用参数如下：
 
+> 本地 HY-MT2 不依赖 `--translator-provider`，只要 `tools/llama-server/` 和模型文件就位就会自动出现在翻译弹窗里。
+
 **转录**
 
 | 参数 | 默认 | 说明 |
@@ -114,9 +116,26 @@ mtd-subtitle-web --port 8080    # 自定义端口
 
 **翻译**（`--translator-provider`：`openai` / `ollama` / `opus-mt`，默认 `openai`）：Web 端在首页"AI 服务"面板配置多份 profile 随时切换；CLI 直跑时用 `--translator-base-url` / `--translator-model` / `--translator-api-key` / `--translator-timeout`。本地 OPUS-MT 传 `--translator-provider opus-mt --translator-model <CT2模型目录> --translator-tokenizer-dir <tokenizer目录>`（默认 `models/opus-mt-en-zh`），`--translator-device` / `--translator-compute-type` 默认 `auto`。
 
+Web 端翻译弹窗提供三个引擎，默认选 **本地 HY-MT2**：
+
+| 引擎 | 说明 |
+| --- | --- |
+| 本地 HY-MT2 · 推荐 | 腾讯混元 HY-MT2 1.8B（Q4_K_M），经 llama.cpp 在本机推理。约 30ms/段，不联网、不消耗 API 额度。需要手动放置 llama.cpp 与模型（见下）。 |
+| 本地 Opus-MT · 极速 | Helsinki-NLP opus-mt-en-zh（CTranslate2 int8，CPU）。约 5ms/段，质量弱于 HY-MT2。 |
+| AI 服务 | 首页"AI 服务"面板当前启用的 profile。上下文最长、质量最好，按量计费。 |
+
+**启用本地 HY-MT2**（两个文件都要就位，缺任一个前端会禁用"开始翻译"并给出提示）：
+
+1. 从 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) 下载 Windows 版并解压到 `tools/llama-server/`，确保 `llama-server.exe` 与 CUDA 运行库（`cudart64_*.dll` / `cublas64_*.dll` / `cublasLt64_*.dll`）在 `tools/llama-server/bin/`。CUDA 运行库在同页的 `cudart-llama-bin-win-cuda-*.zip` 里。GPU 驱动过旧时改用 `llama-*-bin-win-vulkan-x64.zip`（无需额外运行库）。
+2. 把 HY-MT2 的 GGUF 放到 `models/Hy-MT2-1.8B-Q4_K_M.gguf`。
+
+服务**按需启动**：首次点"开始翻译"时自动拉起 `llama-server`（实测冷启动约 1.7 秒），关闭工作台时自动回收。默认端口 `8090`，可用 `--translator-hy-port` 改。占用显存约 2.4GB，所以不做常驻，避免和 Whisper/Demucs/pyannote 抢显存。
+
+相关参数：`--translator-hy-model`（GGUF 路径）、`--translator-hy-server-dir` / `--translator-hy-server-exe`（llama-server 位置，默认自动在 `tools/` 下查找）。
+
 ### 环境变量
 
-项目代码只直接读取 `HF_HUB_OFFLINE`；下表其余项由 huggingface_hub 库消费。`start.bat` 已预设好镜像与超时，手动跑 CLI 时按需自设：
+`start.bat` 已预设好模型下载镜像与超时，手动跑 CLI 时按需自设：
 
 | 变量 | 作用 |
 | --- | --- |
@@ -125,6 +144,9 @@ mtd-subtitle-web --port 8080    # 自定义端口
 | `HF_HUB_OFFLINE` | 设为 `1` 强制离线，全部使用本地模型 |
 | `HF_HUB_ETAG_TIMEOUT` / `HF_HUB_DOWNLOAD_TIMEOUT` | 下载超时；`start.bat` 调大到 300s / 1800s |
 | `HF_HUB_DISABLE_XET` | `start.bat` 设 `1`，规避 Xet 传输在部分网络下卡住的问题 |
+| `MTD_SHARED_SPEAKER_EMBEDDING` | 默认启用同一窗口的重复声纹计算复用；设 `0` 使用原路径。仅对已验证的 pyannote.audio 4.0.7 / CUDA / WeSpeakerResNet34 推理启用，其他模型和版本保持原路径 |
+
+声纹复用保留全部音频、窗口、说话人掩码与原聚类规则；三份完整素材的轮次与最终字幕回归一致，但 CUDA 批次变化仍可能产生微小浮点差异。实测与适用范围见 [性能报告](docs/performance-audit-2026-09-17.md)。回退时在启动应用前设置环境变量，例如 PowerShell：`$env:MTD_SHARED_SPEAKER_EMBEDDING = "0"`。
 
 ### 命令行
 
@@ -196,7 +218,9 @@ mtd-subtitle --help
 │   │   ├── vocal_separator.py   # demucs 人声分离
 │   │   ├── speaker_labeler.py   # pyannote 说话人分离
 │   │   ├── proofreader.py       # LLM 两遍校对
-│   │   ├── text_translator.py   # 翻译（openai/ollama/opus-mt）
+│   │   ├── text_translator.py   # 翻译（openai/ollama）
+│   │   ├── hy_mt_translator.py  # 本地 HY-MT2（按需拉起 llama-server）
+│   │   ├── local_mt_translator.py # 本地 Opus-MT（CTranslate2）
 │   │   ├── clips.py / ffmpeg.py # 切片与烧录
 │   │   └── llm_profiles.py      # LLM 配置存储
 │   ├── subtitle/                # 数据模型、SRT/ASS/文本导出、后处理

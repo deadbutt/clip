@@ -80,6 +80,10 @@ async function installApiFixture(page, options = {}) {
       return json(200, {
         ffmpeg: { available: true },
         translator: { available: true, model: 'fixture-opus' },
+        translators: {
+          local: { available: true, model: 'fixture-opus' },
+          'hy-mt': { available: true, model: 'fixture-hy' },
+        },
         inference: {}, speaker_labeling: {}, model: {},
       });
     }

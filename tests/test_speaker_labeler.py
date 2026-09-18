@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -6,11 +8,44 @@ from moss_transcribe_diarize.app.speaker_labeler import (
     _apply_cluster_labels,
     _assign_turns_to_segments,
     _cluster_features,
+    _label_speakers_pyannote,
 )
 from moss_transcribe_diarize.subtitle import SubtitleSegment
 
 
 class SpeakerLabelerTest(unittest.TestCase):
+    def test_shared_embedding_is_installed_before_inference_and_count_retry(self):
+        pipeline = Mock()
+        events = []
+        pipeline.side_effect = lambda *args, **kwargs: events.append("infer")
+        turns = [[(0.0, 4.0, "A")], [(0.0, 2.0, "A"), (2.0, 4.0, "B")]]
+        segments = [
+            SubtitleSegment(id="first", start=0.0, end=2.0, speaker="", text="a"),
+            SubtitleSegment(id="second", start=2.0, end=4.0, speaker="", text="b"),
+        ]
+        audio = object()
+        fake_torchaudio = SimpleNamespace(load=Mock(return_value=(audio, 16000)))
+        with patch.dict("sys.modules", {"torchaudio": fake_torchaudio}), patch(
+            "moss_transcribe_diarize.app.speaker_labeler._load_pipeline_with_offline_fallback", return_value=pipeline
+        ), patch(
+            "moss_transcribe_diarize.app.speaker_labeler._resolve_torch_device", return_value=None
+        ), patch(
+            "moss_transcribe_diarize.app.speaker_embedding.enable_shared_speaker_embedding",
+            side_effect=lambda value: events.append("install"),
+        ) as install, patch(
+            "moss_transcribe_diarize.app.speaker_labeler._pyannote_turns", side_effect=turns
+        ):
+            output, info = _label_speakers_pyannote(
+                "unused.mp4", segments, work_dir="unused", target_speakers=2, max_speakers=4,
+                hf_token=None, model_name="unused", device="auto", audio_path="prepared.wav",
+            )
+        self.assertTrue(info.applied)
+        self.assertEqual([s.speaker for s in output], ["S01", "S02"])
+        self.assertEqual(events, ["install", "infer", "infer"])
+        install.assert_called_once_with(pipeline)
+        self.assertEqual(pipeline.call_args_list[0].kwargs, {"max_speakers": 4})
+        self.assertEqual(pipeline.call_args_list[1].kwargs, {"num_speakers": 2})
+
     def test_cluster_features_separates_obvious_groups(self):
         features = np.array(
             [

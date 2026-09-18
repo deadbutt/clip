@@ -186,6 +186,9 @@ def _label_speakers_pyannote(
         resolved_device = _resolve_torch_device(device)
         if resolved_device is not None:
             pipeline.to(resolved_device)
+        from .speaker_embedding import enable_shared_speaker_embedding
+
+        enable_shared_speaker_embedding(pipeline)
         options: dict[str, int] = {}
         if target_speakers and target_speakers > 0:
             # 不直接 num_speakers 强切（会把最相似的两个真人簇焊死），

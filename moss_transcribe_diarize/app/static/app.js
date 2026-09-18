@@ -223,6 +223,7 @@ let runtimeChecked = false;
 let ffmpegAvailable = false;
 let translatorAvailable = false;
 let translatorInfo = {};
+let translatorRegistry = {};
 let activeSegmentIndex = -1;
 let assPlayRes = { x: 1920, y: 1080 };
 let layoutFitFrame = 0;
@@ -320,6 +321,7 @@ async function refreshRuntime() {
     ffmpegAvailable = !!(data.ffmpeg && data.ffmpeg.available);
     translatorAvailable = !!(data.translator && data.translator.available);
     translatorInfo = data.translator || {};
+    translatorRegistry = data.translators || {};
     runtimeEl.textContent = ffmpegAvailable ? 'FFmpeg 可用' : 'FFmpeg 缺失';
     runtimeEl.className = 'pill ' + (ffmpegAvailable ? 'ok' : 'bad');
     updateTranslateAction();
@@ -1540,7 +1542,8 @@ function updateTranslateProgress(job) {
 
 function renderTranslationReview(jobOrPayload) {
   const translation = translationPayload(jobOrPayload);
-  if (translation.engine === 'local' || translation.translation_engine === 'local') {
+  const engineName = translation.engine || translation.translation_engine;
+  if (engineName === 'local' || engineName === 'hy-mt') {
     translationReviewEl.classList.add('is-hidden');
     translationReviewMetaEl.textContent = '';
     translationReviewListEl.innerHTML = '';
@@ -4523,10 +4526,14 @@ async function testSavedLlmProfile(profileId, button) {
 }
 
 async function translateCurrentSubtitles() {
-  const engine = translateEngineSelect?.value || 'local';
+  const engine = translateEngineSelect?.value || 'hy-mt';
   const active = activeLlmProfile();
   if (!currentJob) {
     translateStatusEl.textContent = '请先打开一个任务。';
+    return;
+  }
+  if (engine === 'hy-mt' && !localEngineReady('hy-mt')) {
+    translateStatusEl.textContent = localEngineReason('hy-mt');
     return;
   }
   if (engine === 'local' && !translatorAvailable) {
@@ -4599,11 +4606,23 @@ async function translateCurrentSubtitles() {
   }
 }
 
+function localEngineReady(engine) {
+  const entry = translatorRegistry[engine];
+  return !!(entry && entry.available);
+}
+
+function localEngineReason(engine) {
+  const entry = translatorRegistry[engine] || {};
+  if (entry.reason) return entry.reason;
+  if (engine === 'hy-mt') return '本地 HY-MT2 不可用；也可以切换到 AI 服务翻译。';
+  return '本地翻译模型未启动；也可以切换到 AI 服务翻译。';
+}
+
 function updateTranslateAction() {
   const busy = currentJob && RUNNING_STATES.has(currentJob.status);
-  const engine = translateEngineSelect?.value || 'local';
+  const engine = translateEngineSelect?.value || 'hy-mt';
   const active = activeLlmProfile();
-  const ready = engine === 'ai' ? !!active : translatorAvailable;
+  const ready = engine === 'ai' ? !!active : (engine === 'hy-mt' ? localEngineReady('hy-mt') : translatorAvailable);
   translateZhBtn.disabled = !ready || !currentJob || busy;
   translateZhBtn.textContent = ready ? '开始翻译' : (engine === 'ai' ? '请先配置 AI' : '本地模型未启动');
   openTranslateBtn.disabled = !currentJob;
@@ -4617,6 +4636,17 @@ function updateTranslateAction() {
         ? `已连接 ${active.provider === 'ollama' ? 'Ollama' : 'OpenAI 兼容'} · ${active.model || '默认模型'}，可翻译成任意目标语言。`
         : 'AI 翻译会使用首页当前启用的服务配置。';
     }
+  } else if (engine === 'hy-mt') {
+    const hy = translatorRegistry['hy-mt'] || {};
+    const hyModel = hy.model || 'HY-MT2-1.8B';
+    translateModelStatusEl.textContent = localEngineReady('hy-mt')
+      ? `本地 HY-MT2：${hyModel} · 仅支持英译中，首次翻译会自动启动本地服务（约 2 秒）。翻译前会自动保留英文底稿。`
+      : localEngineReason('hy-mt');
+    if (translateAiHintEl) {
+      translateAiHintEl.textContent = localEngineReady('hy-mt')
+        ? '本地引擎，不调用网络服务、不消耗 API 额度。'
+        : '需要把 llama.cpp 解压到 tools/llama-server/，并确认模型文件存在。';
+    }
   } else {
     translateModelStatusEl.textContent = translatorAvailable
       ? `本地 Opus-MT：${model} · 仅支持英译中。翻译前会自动保留英文底稿。`
@@ -4624,7 +4654,7 @@ function updateTranslateAction() {
     if (translateAiHintEl) translateAiHintEl.textContent = '本地引擎适合快速批量翻译，不会调用网络服务。';
   }
   if (translateAiHintEl) translateAiHintEl.classList.remove('is-hidden');
-  if (targetLanguageInput) targetLanguageInput.disabled = engine === 'local';
+  if (targetLanguageInput) targetLanguageInput.disabled = engine !== 'ai';
   const translation = (currentJob && currentJob.translation) || {};
   restoreTranslationBtn.disabled = !currentJob || !translation.source_available || busy;
   updateTranslateProgress(currentJob);
@@ -4638,6 +4668,7 @@ function translationDoneStatus(data) {
   const extras = [];
   const service = data.translation_service;
   if (data.translation_engine === 'ai' && service) extras.push(`AI · ${service.name || service.model || '当前服务'}`);
+  else if (data.translation_engine === 'hy-mt') extras.push('本地 HY-MT2');
   else if (data.translation_engine === 'local') extras.push('本地 Opus-MT');
   if (skipCount) extras.push(`自动跳过 ${skipCount} 条`);
   if (issueCount) extras.push(`可疑 ${issueCount} 条`);

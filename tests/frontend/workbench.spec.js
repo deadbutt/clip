@@ -230,6 +230,30 @@ test('settings, translation and proofreading modals have working state transitio
   }
 });
 
+test('translation engine picker offers HY-MT2 as the default alongside Opus and AI', async ({ page }) => {
+  await installApiFixture(page);
+  await openEditor(page);
+  await page.locator('#openTranslate').click();
+
+  const options = page.locator('#translateEngine option');
+  await expect(options).toHaveCount(3);
+  await expect(options.nth(0)).toHaveAttribute('value', 'hy-mt');
+  await expect(options.nth(0)).toHaveText(/推荐/);
+  await expect(options.nth(1)).toHaveAttribute('value', 'local');
+  await expect(options.nth(1)).toHaveText(/极速/);
+  await expect(options.nth(2)).toHaveAttribute('value', 'ai');
+  await expect(page.locator('#translateEngine')).toHaveValue('hy-mt');
+
+  // HY-MT2 可用时直接放行, 状态文案指向本地引擎而不是 Opus。
+  await expect(page.locator('#translateZh')).toBeEnabled();
+  await expect(page.locator('#translateModelStatus')).toContainText('HY-MT2');
+
+  // 切到 Opus 后状态文案跟着换。
+  await page.locator('#translateEngine').selectOption('local');
+  await expect(page.locator('#translateModelStatus')).toContainText('Opus-MT');
+  await expect(page.locator('#translateZh')).toBeEnabled();
+});
+
 test('backend save errors are shown as a readable message', async ({ page }) => {
   await installApiFixture(page, { failSave: true });
   await openEditor(page);

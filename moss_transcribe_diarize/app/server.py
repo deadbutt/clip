@@ -40,6 +40,44 @@ def _as_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "on", "yes")
 
 
+_LOCAL_ENGINE_LABELS = {"hy-mt": "本地 HY-MT2", "local": "本地 OPUS-MT"}
+
+# 浏览器播放/切页时会强行掐断 <video> 的连接, Windows 的 ProactorEventLoop 在
+# _call_connection_lost 里对已关闭的 socket 调 shutdown() 就会抛这个错。它不代表
+# 服务端有问题, 但默认处理器会打一整段 traceback, 把真正的日志淹掉。
+_CONNECTION_LOST_ERRNOS = {10054, 10053, 10038}  # WSAECONNRESET / WSAECONNABORTED / WSAENOTSOCK
+
+
+def _quiet_connection_reset_noise() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    default_handler = loop.get_exception_handler()
+
+    def _handler(loop_: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, OSError):
+            # Windows 上同一个错误可能只填 errno 或只填 winerror, 两个都查。
+            codes = {getattr(exc, "errno", None), getattr(exc, "winerror", None)}
+            if codes & _CONNECTION_LOST_ERRNOS:
+                return
+        if default_handler is not None:
+            default_handler(loop_, context)
+        else:
+            loop_.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
+
+def _local_unavailable_message(engine: str) -> str:
+    label = _LOCAL_ENGINE_LABELS.get(engine, "本地翻译模型")
+    if engine == "hy-mt":
+        return f"{label} 未配置：请把 llama.cpp 解压到 tools/llama-server/，并确认 models/Hy-MT2-1.8B-Q4_K_M.gguf 存在。"
+    return f"{label} 未配置，请选择其它翻译引擎，或用 start.bat 启动本地翻译模型。"
+
+
 def create_app(
     *,
     model_path: str | Path,
@@ -62,6 +100,10 @@ def create_app(
     translator_device: str = "auto",
     translator_compute_type: str = "auto",
     translator_protected_terms: tuple[str, ...] = (),
+    translator_hy_model: str | None = None,
+    translator_hy_server_dir: str | Path | None = None,
+    translator_hy_server_exe: str | None = None,
+    translator_hy_port: int = 8090,
     speaker_count: int | None = None,
     diarization_backend: str = "none",
     hf_token: str | None = None,
@@ -78,12 +120,20 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app):
+        _quiet_connection_reset_noise()
         manager.bind_events(asyncio.get_running_loop(), hub)
         _purge_orphan_cookies_files(manager)
         try:
             yield
         finally:
             manager.shutdown(wait=True, timeout=5.0)
+            for candidate in (app.state.translator, *(app.state.translators or {}).values()):
+                closer = getattr(candidate, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:  # noqa: BLE001 - 退出清理尽力而为
+                        logger.warning("关闭本地翻译服务失败", exc_info=True)
 
     app = FastAPI(title="蝶殇工作台", lifespan=_lifespan)
 
@@ -132,6 +182,30 @@ def create_app(
             protected_terms=translator_protected_terms or tuple(PROTECTED_TERMS),
         )
     app.state.translator = translator
+
+    # 本地引擎注册表: "local" 沿用启动时配置的那个, "hy-mt" 按需拉起 llama-server。
+    # 分开保存是为了让 HY-MT2 的可用性与 start.bat 是否检测到 OPUS 模型无关。
+    from .hy_mt_translator import HyMtTranslator
+
+    hy_translator = HyMtTranslator(
+        model_path=translator_hy_model or "models/Hy-MT2-1.8B-Q4_K_M.gguf",
+        server_dir=translator_hy_server_dir,
+        server_exe=translator_hy_server_exe,
+        port=translator_hy_port,
+    )
+    app.state.translators = {"local": translator, "hy-mt": hy_translator}
+
+    def _local_translator(engine: str):
+        """按 engine 取本地翻译器; 未知 engine 回退到启动时配置的那个。"""
+        candidates = app.state.translators or {}
+        if engine in candidates:
+            selected = candidates[engine]
+            if selected is None:
+                raise RuntimeError(_local_unavailable_message(engine))
+            return selected
+        if translator is None:
+            raise RuntimeError(_local_unavailable_message(engine))
+        return translator
 
     def _active_ai_translator(protected_terms: tuple[str, ...]):
         """按请求读取当前激活的 profile，避免服务重启后配置变更不生效。"""
@@ -230,6 +304,10 @@ def create_app(
                 "pyannote_model": manager.pyannote_model,
             },
             "translator": translator.runtime_info() if translator is not None else {"available": False},
+            "translators": {
+                key: (value.runtime_info() if value is not None else {"available": False})
+                for key, value in (app.state.translators or {}).items()
+            },
         }
 
     @app.get("/api/jobs")
@@ -645,17 +723,16 @@ def create_app(
             if engine in {"ai", "llm", "profile"}:
                 request_translator, profile = _active_ai_translator(protected_terms)
             elif engine in {"local", "opus-mt", "opus_mt"}:
-                translator = app.state.translator
-                if translator is None:
-                    raise RuntimeError("本地 Opus-MT 未配置，请选择 AI 翻译，或用 start.bat 启动本地翻译模型。")
-                request_translator = translator
-                if "protected_terms" in payload and hasattr(translator, "protected_terms"):
+                request_translator = _local_translator("local")
+                if "protected_terms" in payload and hasattr(request_translator, "protected_terms"):
                     try:
-                        request_translator = replace(translator, protected_terms=protected_terms)
+                        request_translator = replace(request_translator, protected_terms=protected_terms)
                     except TypeError:
-                        request_translator = translator
+                        pass
+            elif engine in {"hy-mt", "hy_mt", "hymt"}:
+                request_translator = _local_translator("hy-mt")
             else:
-                raise ValueError("engine must be 'local' or 'ai'.")
+                raise ValueError("engine must be 'local', 'hy-mt' or 'ai'.")
             batch_size = payload.get("batch_size")
             batch_size = None if batch_size in ("", None) else max(1, int(batch_size))
             result = await asyncio.to_thread(

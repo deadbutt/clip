@@ -23,6 +23,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--translator-device", default="auto")
     parser.add_argument("--translator-compute-type", default="auto")
     parser.add_argument("--translator-protected-terms", default="")
+    parser.add_argument("--translator-hy-model", default=None, help="Path to the HY-MT2 GGUF model used by the hy-mt engine.")
+    parser.add_argument("--translator-hy-server-dir", default=None, help="Directory containing llama-server.exe for the hy-mt engine.")
+    parser.add_argument("--translator-hy-server-exe", default=None, help="Explicit llama-server executable path for the hy-mt engine.")
+    parser.add_argument("--translator-hy-port", type=int, default=8090, help="Local port for the on-demand llama-server used by the hy-mt engine.")
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
@@ -75,6 +79,10 @@ def main() -> None:
         translator_device=args.translator_device,
         translator_compute_type=args.translator_compute_type,
         translator_protected_terms=tuple(term.strip() for term in args.translator_protected_terms.split(",") if term.strip()),
+        translator_hy_model=args.translator_hy_model,
+        translator_hy_server_dir=args.translator_hy_server_dir,
+        translator_hy_server_exe=args.translator_hy_server_exe,
+        translator_hy_port=args.translator_hy_port,
         speaker_count=args.speaker_count,
         diarization_backend=args.diarization_backend,
         hf_token=args.hf_token,

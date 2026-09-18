@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from moss_transcribe_diarize.app.whisper_runner import TranscriptionResult
 
@@ -107,6 +107,50 @@ class ParallelDemucsVramGateTest(unittest.TestCase):
             self.assertFalse(jobs._vram_allows_parallel_demucs())
         with patch("torch.cuda.is_available", return_value=False):
             self.assertFalse(jobs._vram_allows_parallel_demucs())
+
+
+@unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
+class ConnectionResetNoiseTest(unittest.TestCase):
+    """浏览器掐断 <video> 连接时, ProactorEventLoop 会抛 WinError 10054, 不该打 traceback。"""
+
+    def test_startup_installs_the_filter_on_the_running_loop(self):
+        from moss_transcribe_diarize.app import server as server_module
+        from moss_transcribe_diarize.app.server import create_app
+
+        seen = []
+
+        async def main():
+            server_module._quiet_connection_reset_noise()
+            handler = asyncio.get_running_loop().get_exception_handler()
+            self.assertIsNotNone(handler, "lifespan 未安装异常处理器")
+            handler(asyncio.get_running_loop(), {"exception": ConnectionResetError(10054, "reset")})
+            seen.append("silenced")
+            handler(asyncio.get_running_loop(), {"exception": OSError(10053, "aborted")})
+            seen.append("silenced again")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            asyncio.run(main())
+        self.assertEqual(seen, ["silenced", "silenced again"])
+
+    def test_unrelated_errors_still_reach_the_default_handler(self):
+        from moss_transcribe_diarize.app import server as server_module
+
+        loop = MagicMock()
+        default = MagicMock()
+        loop.get_exception_handler.return_value = default
+        context = {"exception": ValueError("boom"), "message": "real problem"}
+
+        with patch.object(asyncio, "get_running_loop", return_value=loop):
+            server_module._quiet_connection_reset_noise()
+        handler = loop.set_exception_handler.call_args.args[0]
+
+        handler(loop, context)
+        default.assert_called_once_with(loop, context)
+
+        default.reset_mock()
+        handler(loop, {"exception": ConnectionResetError(10054, "reset"), "message": "noise"})
+        default.assert_not_called()
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
