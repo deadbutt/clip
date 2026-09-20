@@ -1,0 +1,54 @@
+const { test, expect } = require('@playwright/test');
+const { installApiFixture, openEditor } = require('./fixtures');
+
+test('global word lists edit, cancel, persist and allow clearing', async ({ page }, testInfo) => {
+  const state = await installApiFixture(page);
+  await page.goto('/');
+  const hotwords = page.locator('#uploadHotwords');
+  await expect(hotwords).toHaveValue('Neuro, Vedal, Quick ban');
+  await expect(hotwords).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath('hotwords-readonly.png') });
+  await page.locator('#uploadHotwordsEdit').click();
+  await expect(hotwords).toBeEnabled();
+  await hotwords.fill('Neuro, Vedal, Quick ban\nGeoGuessr');
+  await page.screenshot({ path: testInfo.outputPath('hotwords-edit.png') });
+  await page.locator('#uploadHotwordsEdit').click();
+  await expect(hotwords).toBeDisabled();
+  expect(state.hotwords).toEqual(['Neuro', 'Vedal', 'Quick ban', 'GeoGuessr']);
+  await expect(page.locator('#hotwordsInput')).toHaveValue('Neuro, Vedal, Quick ban, GeoGuessr');
+  await page.reload();
+  await expect(hotwords).toHaveValue('Neuro, Vedal, Quick ban, GeoGuessr');
+  await openEditor(page);
+  await page.locator('#openTranslate').click();
+  const protectedTerms = page.locator('#translateProtectedTerms');
+  await expect(protectedTerms).toBeDisabled();
+  await page.locator('#translateProtectedTermsEdit').click();
+  await protectedTerms.fill('Neuro, GeoGuessr');
+  await page.locator('#translateProtectedTermsCancel').click();
+  await expect(protectedTerms).toHaveValue('Twitter, Twitch, OBS');
+  await page.locator('#translateProtectedTermsEdit').click();
+  await protectedTerms.fill('Neuro, GeoGuessr');
+  await page.locator('#translateProtectedTermsEdit').click();
+  await expect(protectedTerms).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath('protected-terms.png') });
+  expect(state.protectedTerms).toEqual(['Neuro', 'GeoGuessr']);
+  await page.locator('#translateProtectedTermsEdit').click();
+  await protectedTerms.fill('');
+  await page.locator('#translateProtectedTermsEdit').click();
+  await expect(protectedTerms).toBeDisabled();
+  expect(state.protectedTerms).toEqual([]);
+  await page.reload();
+  await expect(protectedTerms).toHaveValue('');
+});
+
+test('failed save keeps word list draft editable', async ({ page }) => {
+  const state = await installApiFixture(page, { failTermsSave: true });
+  await page.goto('/');
+  await page.locator('#uploadHotwordsEdit').click();
+  await page.locator('#uploadHotwords').fill('GeoGuessr');
+  await page.locator('#uploadHotwordsEdit').click();
+  await expect(page.locator('#uploadHotwordsStatus')).toContainText('操作失败');
+  await expect(page.locator('#uploadHotwords')).toBeEnabled();
+  await expect(page.locator('#uploadHotwords')).toHaveValue('GeoGuessr');
+  expect(state.hotwords).toEqual(['Neuro', 'Vedal', 'Quick ban']);
+});

@@ -27,6 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--translator-hy-server-dir", default=None, help="Directory containing llama-server.exe for the hy-mt engine.")
     parser.add_argument("--translator-hy-server-exe", default=None, help="Explicit llama-server executable path for the hy-mt engine.")
     parser.add_argument("--translator-hy-port", type=int, default=8090, help="Local port for the on-demand llama-server used by the hy-mt engine.")
+    parser.add_argument(
+        "--translator-hy-context-window", type=int, choices=[0, 1, 2, 3], default=2,
+        help="Nearby source subtitles per side for HY-MT2 (default: 2; 0 disables context).",
+    )
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
@@ -83,6 +87,7 @@ def main() -> None:
         translator_hy_server_dir=args.translator_hy_server_dir,
         translator_hy_server_exe=args.translator_hy_server_exe,
         translator_hy_port=args.translator_hy_port,
+        translator_hy_context_window=args.translator_hy_context_window,
         speaker_count=args.speaker_count,
         diarization_backend=args.diarization_backend,
         hf_token=args.hf_token,

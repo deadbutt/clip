@@ -1,8 +1,8 @@
 """HY-MT2 本地翻译引擎: 按需拉起 llama.cpp 的 llama-server, 走纯 MT 直译路径。
 
 与 ``LocalMtTranslator`` (CTranslate2 的 OPUS-MT) 的区别:
-- 模型是 1.8B 的纯翻译模型, 不吐 JSON, 所以不能走 ``TextTranslator`` 的
-  JSON 提示词路径 (那条路解析失败会二分降级并静默返回原文)。
+- 当前使用逐段纯文本输出, 不走 ``TextTranslator`` 的 JSON 批量解析路径。
+- 默认参考前后各两段原文, 限制上下文长度和时间跨度; 检出背景复述时单段重译。
 - llama-server 是常驻进程, 但显存只有 8GB 且要和 Whisper/Demucs/pyannote 抢,
   所以这里按需启动 (实测冷启动约 1.7s), 用完不主动杀, 由进程退出时清理。
 - 采样必须 temperature=0: 模型内置的 0.7/0.8/20 会把专有名词改写
@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import re
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,15 @@ DEFAULT_SERVER_DIR = Path("tools/llama-server")
 DEFAULT_MODEL_PATH = Path("models/Hy-MT2-1.8B-Q4_K_M.gguf")
 DEFAULT_PORT = 8090
 DEFAULT_PROMPT_TEMPLATE = "Translate the following segment into {target}, without additional explanation: {text}"
+_CONTEXT_OUTPUT_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"[（(](?:S\d+|\d{2,3}(?:集)?)[)）]"
+    r"|[\[【](?:Background Information|Source Text|Previous subtitles|Following subtitles|背景信息|待翻译文本|源文本)"
+    r"|(?:Previous|Following) subtitles\s*:"
+    r"|(?:根据|结合|参考)(?:以上|上述|提供的)?背景信息"
+    r"|(?:Based on|According to|Using) (?:the )?(?:above )?(?:background|context)"
+    r")"
+)
 
 # 官方提示词只给了中文的写法, 其余目标语言按英文名回退。
 _TARGET_NAMES = {
@@ -87,6 +97,72 @@ def _detect_server_executable(server_dir: Path | str | None, explicit: str | Pat
     return Path(found) if found else None
 
 
+def _with_subtitle_context(
+    template: str,
+    items: list[SubtitleSegment],
+    index: int,
+    window: int,
+    *,
+    max_chars: int = 600,
+    max_gap: float = 12.0,
+) -> str:
+    """Add bounded source-only context without changing the translation target."""
+    if window <= 0:
+        return template
+    target = items[index]
+    sides: list[str] = []
+    for direction, label in ((-1, "Previous subtitles"), (1, "Following subtitles")):
+        lines: list[str] = []
+        remaining = max_chars // 2
+        for distance in range(1, window + 1):
+            neighbor_index = index + direction * distance
+            if not 0 <= neighbor_index < len(items):
+                break
+            neighbor = items[neighbor_index]
+            gap = target.start - neighbor.end if direction < 0 else neighbor.start - target.end
+            if gap > max_gap:
+                break
+            if translation_skip_reason(neighbor.text) is not None:
+                continue
+            text = " ".join(neighbor.text.split())
+            line = f"({neighbor.speaker}) {text}"
+            if len(line) > remaining:
+                if not lines and remaining > 20:
+                    lines.append(line[:remaining - 1] + "…")
+                break
+            lines.append(line)
+            remaining -= len(line) + 1
+        if direction < 0:
+            lines.reverse()
+        if lines:
+            sides.append(label + ":\n" + "\n".join(lines))
+    if not sides:
+        return template
+    # Keep the shared glossary at the start so llama.cpp can reuse its KV prefix.
+    prefix = ""
+    if template.startswith("Reference the following translations:\n"):
+        glossary, separator, source_template = template.partition("\n\n")
+        if separator:
+            prefix, template = glossary + separator, source_template
+    background = "\n".join(sides).replace("{", "{{").replace("}", "}}")
+    return (
+        f"{prefix}[Background Information]\n{background}\n\n"
+        "The source is one subtitle from spoken dialogue. "
+        "Use the background only to understand references and meaning. "
+        "Do not translate the background or add its content to the translation.\n"
+        f"{template}"
+    )
+
+
+def _context_output_suspect(text: str, source: str) -> bool:
+    """Catch observable context leakage; semantic accuracy still needs review."""
+    return (
+        not text.strip()
+        or bool(_CONTEXT_OUTPUT_RE.search(text))
+        or len(text) > max(96, 3 * len(source.strip()))
+    )
+
+
 @dataclass(slots=True)
 class HyMtTranslator:
     model_path: str | Path = DEFAULT_MODEL_PATH
@@ -99,6 +175,7 @@ class HyMtTranslator:
     ubatch_size: int = 512
     gpu_layers: int = 99
     concurrency: int = 16
+    context_window: int = 2
     timeout: float = 300.0
     startup_timeout: float = 90.0
     model: str = "HY-MT2-1.8B"
@@ -107,11 +184,13 @@ class HyMtTranslator:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _startup_error: str | None = field(default=None, init=False, repr=False)
     failure_count: int = field(default=0, init=False)
+    context_retry_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         # 必须绝对化: 子进程的 cwd 是 exe 所在目录, 相对路径会解析到 tools/ 下面。
         self.model_path = Path(self.model_path).resolve()
         self.concurrency = max(1, int(self.concurrency))
+        self.context_window = max(0, min(3, int(self.context_window)))
         atexit.register(self.close)
 
     # ---------------------------------------------------------------- 状态
@@ -136,6 +215,7 @@ class HyMtTranslator:
             "port": self.port,
             "running": self._is_running(),
             "concurrency": self.concurrency,
+            "context_window": self.context_window,
         }
         if not model_ok:
             info["reason"] = f"未找到模型文件：{self.model_path}"
@@ -237,11 +317,13 @@ class HyMtTranslator:
         *,
         target_language: str = "简体中文",
         batch_size: int = 32,
-        context_window: int = 0,
+        context_window: int | None = None,
         semantic_units: bool = False,
+        protected_terms: tuple[str, ...] = (),
         progress_callback: Callable[[int, int, int, int], None] | None = None,
     ) -> list[str]:
-        del batch_size, context_window, semantic_units
+        del batch_size, semantic_units
+        context_window = self.context_window if context_window is None else max(0, min(3, int(context_window)))
         items = list(segments)
         if not items:
             return []
@@ -261,15 +343,28 @@ class HyMtTranslator:
                 target=_TARGET_NAMES.get(target_language, target_language),
                 text="{text}",
             )
+            # Official terminology intervention: identity mappings preserve names.
+            # Escape braces because _translate_one formats the source text later.
+            terms = list(dict.fromkeys(term.strip() for term in protected_terms if term.strip()))
+            if terms:
+                glossary = "\n".join(f"{term} translates to {term}" for term in terms)
+                glossary = glossary.replace("{", "{{").replace("}", "}}")
+                template = f"Reference the following translations:\n{glossary}\n\n{template}"
             done = len(items) - len(pending)
             if progress_callback is not None:
                 progress_callback(done, len(items), 0, 0)
             with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-                futures = {pool.submit(self._translate_one, template, items[i].text): i for i in pending}
+                futures = {
+                    pool.submit(
+                        self._translate_with_context, template, items, i, context_window,
+                    ): i for i in pending
+                }
                 for future in as_completed(futures):
                     index = futures[future]
                     try:
-                        results[index] = future.result()
+                        results[index], retried = future.result()
+                        if retried:
+                            self.context_retry_count += 1
                     except Exception as exc:  # noqa: BLE001 - 单段失败降级为原文, 但计数并告警
                         self.failure_count += 1
                         logger.warning("HY-MT2 翻译第 %d 段失败: %s", index, exc)
@@ -279,6 +374,20 @@ class HyMtTranslator:
                         progress_callback(min(done, len(items)), len(items), index, 1)
 
         return [value if value is not None else str(items[i].text or "") for i, value in enumerate(results)]
+
+    def _translate_with_context(
+        self, template: str, items: list[SubtitleSegment], index: int, window: int,
+    ) -> tuple[str, bool]:
+        source = items[index].text
+        contextual = _with_subtitle_context(template, items, index, window)
+        result = self._translate_one(contextual, source)
+        retried = contextual != template and _context_output_suspect(result, source)
+        if retried:
+            logger.warning("HY-MT2 第 %d 段出现上下文输出异常，改用单段重译", index)
+            result = self._translate_one(template, source)
+            if _context_output_suspect(result, source):
+                raise RuntimeError("HY-MT2 单段重译仍返回异常内容，保留原文。")
+        return result, retried
 
     def _translate_one(self, template: str, text: str) -> str:
         body = {

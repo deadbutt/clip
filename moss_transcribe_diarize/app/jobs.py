@@ -1780,6 +1780,7 @@ class JobManager(ClipOperationsMixin):
         batch_size: int | None = None,
         engine: str | None = None,
         service: dict[str, Any] | None = None,
+        protected_terms: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         job = self.get_job(job_id)
         if job.status in RUNNING_STATES:
@@ -1842,6 +1843,8 @@ class JobManager(ClipOperationsMixin):
                 }
                 if batch_size is not None:
                     translate_kwargs["batch_size"] = batch_size
+                if protected_terms is not None:
+                    translate_kwargs["protected_terms"] = protected_terms
                 translations = translator.translate_segments(segments, **translate_kwargs)
                 elapsed = time.time() - started
                 usage = getattr(translator, "usage_totals", None)

@@ -52,8 +52,9 @@
               </label>
               <div class="task-params" style="margin-top:10px">
                 <div>
-                  <label>热词（人名/专名/术语，空格或逗号分隔，可显著减少错听）</label>
-                  <textarea id="uploadHotwords" class="prompt-input" rows="2" placeholder="例如: Neuro Vedal bajiru"></textarea>
+                  <div class="term-heading"><label for="uploadHotwords">Whisper 热词</label><button id="uploadHotwordsEdit" type="button" class="small ghost" disabled>修改</button><button id="uploadHotwordsCancel" type="button" class="small ghost is-hidden">取消</button></div>
+                  <textarea id="uploadHotwords" class="prompt-input term-input" rows="2" disabled placeholder="尚无热词"></textarea>
+                  <div id="uploadHotwordsStatus" class="meta term-status" role="status">正在读取热词…</div>
                 </div>
               </div>
               <div id="rerunSource" class="meta" style="margin-top:8px"></div>
@@ -116,8 +117,9 @@
                   <textarea id="prompt" class="prompt-input" rows="2" placeholder="留空用默认"></textarea>
                 </div>
                 <div>
-                  <label>热词（人名/专名/术语，空格或逗号分隔，可显著减少错听）</label>
-                  <textarea id="hotwordsInput" class="prompt-input" rows="2" placeholder="例如: Neuro Vedal bajiru"></textarea>
+                  <div class="term-heading"><label for="hotwordsInput">Whisper 热词</label><button id="hotwordsInputEdit" type="button" class="small ghost" disabled>修改</button><button id="hotwordsInputCancel" type="button" class="small ghost is-hidden">取消</button></div>
+                  <textarea id="hotwordsInput" class="prompt-input term-input" rows="2" disabled placeholder="尚无热词"></textarea>
+                  <div id="hotwordsInputStatus" class="meta term-status" role="status">正在读取热词…</div>
                 </div>
                 <div class="params-row">
                   <div>
@@ -435,8 +437,10 @@
                   <input id="targetLanguage" type="text" value="简体中文" />
                 </div>
               </div>
-              <label for="translateProtectedTerms" style="margin-top:10px">Protected terms</label>
-              <textarea id="translateProtectedTerms" class="prompt-input" rows="2" placeholder="Twitter, Twitch, OBS, names..."></textarea>
+              <div class="term-heading" style="margin-top:10px"><label for="translateProtectedTerms">Protected terms · 翻译保护词</label><button id="translateProtectedTermsEdit" type="button" class="small ghost" disabled>修改</button><button id="translateProtectedTermsCancel" type="button" class="small ghost is-hidden">取消</button></div>
+              <textarea id="translateProtectedTerms" class="prompt-input term-input" rows="2" disabled placeholder="尚无保护词"></textarea>
+              <div id="translateProtectedTermsStatus" class="meta term-status" role="status">正在读取保护词…</div>
+              <div class="meta term-status">HY-MT2 / AI 服务会参考保护词保留原文；OPUS-MT 不支持。多个词用逗号或换行分隔。</div>
               <div id="translateProgressMeta" class="render-progress-meta is-hidden" style="margin-top:10px"><span>翻译进度</span><strong id="translateProgressText">0%</strong></div>
               <div id="translateProgress" class="progress is-hidden"><div id="translateProgressBar" class="bar"></div></div>
               <div class="actions" style="margin-top:12px">

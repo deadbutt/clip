@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -26,12 +27,12 @@ def _parse_protected_terms(value: Any) -> tuple[str, ...]:
     if value in ("", None):
         return ()
     if isinstance(value, str):
-        items = value.split(",")
+        items = re.split(r"[,，;；\n]+", value)
     elif isinstance(value, list):
         items = value
     else:
         items = [value]
-    return tuple(str(item).strip() for item in items if str(item).strip())
+    return tuple(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
 
 
 def _as_bool(value: Any) -> bool:
@@ -104,6 +105,7 @@ def create_app(
     translator_hy_server_dir: str | Path | None = None,
     translator_hy_server_exe: str | None = None,
     translator_hy_port: int = 8090,
+    translator_hy_context_window: int = 2,
     speaker_count: int | None = None,
     diarization_backend: str = "none",
     hf_token: str | None = None,
@@ -192,6 +194,7 @@ def create_app(
         server_dir=translator_hy_server_dir,
         server_exe=translator_hy_server_exe,
         port=translator_hy_port,
+        context_window=translator_hy_context_window,
     )
     app.state.translators = {"local": translator, "hy-mt": hy_translator}
 
@@ -209,7 +212,7 @@ def create_app(
 
     def _active_ai_translator(protected_terms: tuple[str, ...]):
         """按请求读取当前激活的 profile，避免服务重启后配置变更不生效。"""
-        from .text_translator import PROTECTED_TERMS, TextTranslator
+        from .text_translator import TextTranslator
 
         profile = app.state.llm_store.get_active()
         if profile is None:
@@ -226,7 +229,7 @@ def create_app(
             api_key=str(profile.get("api_key") or "EMPTY"),
             timeout=600.0,
             provider=str(profile.get("provider") or "openai"),
-            protected_terms=protected_terms or tuple(PROTECTED_TERMS),
+            protected_terms=protected_terms,
             disable_thinking=bool(profile.get("disable_thinking")),
         ), profile
 
@@ -717,7 +720,10 @@ def create_app(
             except Exception:
                 payload = {}
             payload = payload if isinstance(payload, dict) else {}
-            protected_terms = _parse_protected_terms(payload.get("protected_terms"))
+            protected_terms = (
+                _parse_protected_terms(payload["protected_terms"])
+                if "protected_terms" in payload else tuple(get_protected_terms()["terms"])
+            )
             engine = str(payload.get("engine") or "local").strip().lower()
             profile = None
             if engine in {"ai", "llm", "profile"}:
@@ -743,6 +749,7 @@ def create_app(
                 mode=str(payload.get("mode") or "bilingual"),
                 batch_size=batch_size,
                 engine=engine,
+                protected_terms=protected_terms if engine in {"hy-mt", "hy_mt", "hymt"} else None,
                 service=(
                     {
                         "name": str(profile.get("name") or "AI 服务"),
@@ -786,6 +793,30 @@ def create_app(
         return app.state.llm_store.list_profiles()
 
     # ------------------------------------------------------------ hotwords glossary
+
+    @app.get("/api/protected-terms")
+    def get_protected_terms():
+        from .text_translator import PROTECTED_TERMS
+
+        path = manager.hotwords_glossary_path.with_name("protected_terms.json")
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return {"terms": list(_parse_protected_terms(data["terms"]))}
+        return {"terms": list(translator_protected_terms or PROTECTED_TERMS)}
+
+    @app.put("/api/protected-terms")
+    async def update_protected_terms(request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("terms"), list):
+                raise ValueError("terms must be a list.")
+            terms = list(_parse_protected_terms(payload["terms"]))
+            path = manager.hotwords_glossary_path.with_name("protected_terms.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"terms": terms}, ensure_ascii=False, indent=2), encoding="utf-8")
+            return {"terms": terms}
+        except ValueError as exc:
+            raise _fail(exc) from exc
 
     @app.get("/api/hotwords")
     def get_hotwords():

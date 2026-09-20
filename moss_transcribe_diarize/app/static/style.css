@@ -3577,3 +3577,8 @@ header .header-action:hover:not(:disabled) { border-color: #80bdb1; background: 
   #llmProfileEditor .actions { justify-content: stretch; }
   #llmProfileEditor .actions button { flex: 1 1 30%; }
 }
+.term-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.term-heading label { flex: 1; margin: 0; }
+.term-input:disabled { opacity: 1; cursor: default; color: var(--muted, #8c96a8); background: rgba(128, 140, 160, .06); }
+.term-input:not(:disabled) { border-color: var(--accent, #6ba9d4); }
+.term-status { margin-top: 6px; line-height: 1.6; }

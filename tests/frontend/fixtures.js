@@ -50,6 +50,8 @@ async function installApiFixture(page, options = {}) {
     splitRequests: [],
     mergeRequests: 0,
     clipRenderRequests: 0,
+    hotwords: ['Neuro', 'Vedal', 'Quick ban'],
+    protectedTerms: ['Twitter', 'Twitch', 'OBS'],
   };
 
   await page.addInitScript(() => {
@@ -88,6 +90,14 @@ async function installApiFixture(page, options = {}) {
       });
     }
     if (path === '/api/llm/profiles') return json(200, { profiles: [], active_id: null });
+    if (path === '/api/hotwords' || path === '/api/protected-terms') {
+      const key = path === '/api/hotwords' ? 'hotwords' : 'protectedTerms';
+      if (method === 'PUT') {
+        if (options.failTermsSave) return json(500, { detail: '保存失败' });
+        state[key] = request.postDataJSON().terms;
+      }
+      return json(200, { terms: state[key] });
+    }
     if (path === '/api/jobs' && method === 'GET') return json(200, { jobs: [clone(state.job)] });
     if (path === '/api/jobs/job-1' && method === 'GET') return json(200, clone(state.job));
     if (path === '/api/jobs/job-1/media') return route.fulfill({ status: 200, contentType: 'video/mp4', body: '' });

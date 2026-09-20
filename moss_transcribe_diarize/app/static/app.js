@@ -329,7 +329,6 @@ async function refreshRuntime() {
     updateRenderAction(currentJob);
     applyInferenceDefaults(data.inference || {});
     applySpeakerDefaults(data.speaker_labeling || {});
-    applyTranslatorDefaults(data.translator || {});
     renderModelInfo(data.model || {});
   } catch (err) {
     runtimeChecked = true;
@@ -363,10 +362,67 @@ function applySpeakerDefaults(defaults) {
  }
 }
 
-function applyTranslatorDefaults(defaults) {
-  if (!translateProtectedTermsInput || translateProtectedTermsInput.value) return;
-  const terms = Array.isArray(defaults.protected_terms) ? defaults.protected_terms : [];
-  translateProtectedTermsInput.value = terms.join(', ');
+const termEditors = new Map();
+
+function setupTermEditors(ids, endpoint, hint) {
+  const editors = ids.map((id) => ({
+    input: document.getElementById(id),
+    edit: document.getElementById(id + 'Edit'),
+    cancel: document.getElementById(id + 'Cancel'),
+    status: document.getElementById(id + 'Status'),
+    editing: false,
+  }));
+  const state = { terms: [], loaded: false };
+  ids.forEach((id) => termEditors.set(id, state));
+  const render = () => editors.forEach((editor) => {
+    editor.input.value = state.terms.join(', ');
+    editor.input.disabled = !editor.editing;
+    editor.edit.textContent = editor.editing ? '保存' : '修改';
+    editor.cancel.classList.toggle('is-hidden', !editor.editing);
+    editor.status.textContent = editor.editing ? '编辑后点击保存；逗号或换行分隔，词组内可保留空格。' : hint;
+  });
+  async function request(method, terms) {
+    const response = await fetch(apiUrl(endpoint), {
+      method, cache: 'no-store',
+      ...(method === 'PUT' ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ terms }) } : {}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '词表读取或保存失败');
+    if (!Array.isArray(data.terms)) throw new Error('词表格式错误');
+    return data.terms;
+  }
+  editors.forEach((editor) => {
+    editor.edit.addEventListener('click', async () => {
+      editors.forEach((item) => { item.edit.disabled = true; item.cancel.disabled = true; });
+      try {
+        if (editor.editing) {
+          const terms = [...new Set(editor.input.value.split(/[,，;；\n]+/).map((term) => term.trim()).filter(Boolean))];
+          state.terms = await request('PUT', terms);
+          editor.editing = false;
+        } else {
+          // Re-read so terms learned from proofreading are visible when editing.
+          state.terms = await request('GET');
+          editors.forEach((item) => { item.editing = false; });
+          editor.editing = true;
+        }
+        state.loaded = true;
+        render();
+        if (editor.editing) editor.input.focus();
+      } catch (error) {
+        editor.status.textContent = '操作失败：' + error.message + '，请重试。';
+      } finally {
+        editors.forEach((item) => { item.edit.disabled = false; item.cancel.disabled = false; });
+      }
+    });
+    editor.cancel.addEventListener('click', () => { editor.editing = false; render(); });
+  });
+  request('GET').then((terms) => {
+    state.terms = terms;
+    state.loaded = true;
+    render();
+  }).catch((error) => {
+    editors.forEach((editor) => { editor.status.textContent = '读取失败：' + error.message + '，点击修改重试。'; });
+  }).finally(() => editors.forEach((editor) => { editor.edit.disabled = false; }));
 }
 
 function renderModelInfo(model) {
@@ -605,7 +661,6 @@ async function submitUrlDownload() {
   form.append('url', url);
   form.append('cookies_browser', cookiesBrowserSelect.value);
   if (promptInput.value) form.append('prompt', promptInput.value);
-  if (hotwordsInput.value.trim()) form.append('hotwords', hotwordsInput.value.trim());
   if (speakerCountInput.value) form.append('speaker_count', speakerCountInput.value);
   form.append('diarization_backend', diarizationBackendSelect.value || 'auto');
   if (forceTranscribeInput && forceTranscribeInput.checked) form.append('force_transcribe', '1');
@@ -867,7 +922,7 @@ function updateUploadBtnLabel() {
 
 function addPendingFiles(fileList) {
   for (const file of fileList) {
-    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file, hotwords: uploadHotwordsInput.value.trim() }, defaultPendingParams()));
+    pendingUploads.push(Object.assign({ id: ++pendingIdCounter, file }, defaultPendingParams()));
   }
   renderPendingList();
   updateUploadBtnLabel();
@@ -4573,7 +4628,8 @@ async function translateCurrentSubtitles() {
         target_language: targetLanguageInput.value || '简体中文',
         mode: translateModeSelect.value || 'bilingual',
         engine,
-        protected_terms: translateProtectedTermsInput.value || ''
+        ...(termEditors.get('translateProtectedTerms')?.loaded
+          ? { protected_terms: termEditors.get('translateProtectedTerms').terms } : {})
       })
     });
     const data = await res.json();
@@ -4639,8 +4695,11 @@ function updateTranslateAction() {
   } else if (engine === 'hy-mt') {
     const hy = translatorRegistry['hy-mt'] || {};
     const hyModel = hy.model || 'HY-MT2-1.8B';
+    const hyContext = Number.isInteger(hy.context_window)
+      ? (hy.context_window > 0 ? `参考前后各 ${hy.context_window} 段字幕。` : '逐段翻译，不带前后文。')
+      : '';
     translateModelStatusEl.textContent = localEngineReady('hy-mt')
-      ? `本地 HY-MT2：${hyModel} · 仅支持英译中，首次翻译会自动启动本地服务（约 2 秒）。翻译前会自动保留英文底稿。`
+      ? `本地 HY-MT2：${hyModel} · 仅支持英译中。${hyContext}首次翻译会自动启动本地服务（约 2 秒）。翻译前会自动保留英文底稿。`
       : localEngineReason('hy-mt');
     if (translateAiHintEl) {
       translateAiHintEl.textContent = localEngineReady('hy-mt')
@@ -5448,6 +5507,8 @@ function statusLabel(status) {
   return labels[status] || status;
 }
 
+setupTermEditors(['uploadHotwords', 'hotwordsInput'], 'api/hotwords', '全局热词 · 用于后续 Whisper 转录，上传和链接任务共用。');
+setupTermEditors(['translateProtectedTerms'], 'api/protected-terms', '已保存的全局保护词 · 点击修改可添加、删除或清空。');
 refreshRuntime();
 refreshJobs();
 loadLlmProfiles();
