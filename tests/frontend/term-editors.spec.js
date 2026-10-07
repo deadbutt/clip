@@ -4,6 +4,7 @@ const { installApiFixture, openEditor } = require('./fixtures');
 test('global word lists edit, cancel, persist and allow clearing', async ({ page }, testInfo) => {
   const state = await installApiFixture(page);
   await page.goto('/');
+  await page.locator('.sidebar-create').click();
   const hotwords = page.locator('#uploadHotwords');
   await expect(hotwords).toHaveValue('Neuro, Vedal, Quick ban');
   await expect(hotwords).toBeDisabled();
@@ -44,6 +45,7 @@ test('global word lists edit, cancel, persist and allow clearing', async ({ page
 test('failed save keeps word list draft editable', async ({ page }) => {
   const state = await installApiFixture(page, { failTermsSave: true });
   await page.goto('/');
+  await page.locator('.sidebar-create').click();
   await page.locator('#uploadHotwordsEdit').click();
   await page.locator('#uploadHotwords').fill('GeoGuessr');
   await page.locator('#uploadHotwordsEdit').click();

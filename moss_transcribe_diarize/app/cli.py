@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--language", default=None, help="Force the source language (ja/en/zh); otherwise auto-detect.")
     parser.add_argument("--max-new-tokens", type=int, default=8192)
     parser.add_argument("--max-len", type=int, default=131072)
     parser.add_argument("--decoding", choices=["greedy", "sample"], default="greedy")
@@ -100,7 +101,7 @@ def main() -> None:
             "segments_input": str(Path(args.segments_input).expanduser()),
         }
     else:
-        runner = WhisperRunner(args.model, device=args.device, dtype=args.dtype)
+        runner = WhisperRunner(args.model, device=args.device, dtype=args.dtype, language=args.language)
         result = runner.transcribe(
             input_path,
             prompt=args.prompt,

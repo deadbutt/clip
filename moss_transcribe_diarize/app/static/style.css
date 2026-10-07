@@ -3582,3 +3582,1038 @@ header .header-action:hover:not(:disabled) { border-color: #80bdb1; background: 
 .term-input:disabled { opacity: 1; cursor: default; color: var(--muted, #8c96a8); background: rgba(128, 140, 160, .06); }
 .term-input:not(:disabled) { border-color: var(--accent, #6ba9d4); }
 .term-status { margin-top: 6px; line-height: 1.6; }
+/* ========================================
+   Modern Upload & Task List Redesign
+   保持HTML结构不变，仅优化视觉呈现
+   ======================================== */
+
+/* 🎨 整体视图背景 - 更清爽的渐变 */
+.task-view {
+  padding: 32px clamp(20px, 4vw, 48px) 40px;
+  background:
+    radial-gradient(circle at 15% 20%, rgba(19, 143, 135, 0.04), transparent 35%),
+    radial-gradient(circle at 85% 60%, rgba(100, 200, 190, 0.03), transparent 40%),
+    #fafbfb;
+}
+
+.task-view-inner {
+  grid-template-columns: minmax(480px, 1.1fr) minmax(400px, 0.9fr);
+  gap: 24px;
+  max-width: 1520px;
+}
+
+/* 📤 上传卡片 - 现代简约风格 */
+.upload-card {
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 16px;
+  background: #ffffff;
+  color: #1a2b2e;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.02),
+    0 8px 24px rgba(19, 143, 135, 0.06);
+  overflow: hidden;
+  transition: box-shadow 0.3s ease;
+}
+
+.upload-card:hover {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.03),
+    0 12px 32px rgba(19, 143, 135, 0.09);
+}
+
+/* ✨ Hero区块 - 简化设计 */
+.signal-hero {
+  position: relative;
+  min-height: 200px;
+  padding: 36px 32px 32px;
+  background: linear-gradient(135deg, #f0faf8 0%, #e6f7f4 100%);
+  border-bottom: 1px solid rgba(19, 143, 135, 0.1);
+  overflow: hidden;
+}
+
+/* 去掉复杂的伪元素动画，改用简单的几何装饰 */
+.signal-hero::after {
+  content: "";
+  position: absolute;
+  top: -50%;
+  right: -10%;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(19, 143, 135, 0.08) 0%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.signal-hero-top {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.signal-eyebrow {
+  display: inline-block;
+  padding: 4px 12px;
+  background: rgba(19, 143, 135, 0.1);
+  color: #138f87;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  border-radius: 6px;
+}
+
+.signal-engine {
+  color: #6b8480;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.signal-hero h2 {
+  position: relative;
+  z-index: 2;
+  max-width: 480px;
+  margin: 0 0 12px;
+  color: #0d3835;
+  font-size: clamp(28px, 3vw, 42px);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.signal-copy {
+  position: relative;
+  z-index: 2;
+  max-width: 420px;
+  margin: 0;
+  color: #4a6862;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* 隐藏复杂的视觉元素，保持简洁 */
+.signal-visual {
+  display: none;
+}
+
+.signal-hero-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(19, 143, 135, 0.12);
+  color: #5a7470;
+  font-size: 11px;
+}
+
+.signal-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.signal-status i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+}
+
+/* 📁 上传卡片内部元素 */
+.upload-card > :not(.signal-hero) {
+  margin-left: 32px;
+  margin-right: 32px;
+}
+
+.upload-card > .tab-bar {
+  margin-top: 0;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.upload-card > #upload {
+  margin-bottom: 32px;
+}
+
+/* 🔖 标签栏 - 现代风格 */
+.upload-card .tab-bar {
+  border-bottom: 1px solid rgba(19, 143, 135, 0.08);
+  background: #fafcfb;
+  padding: 0 32px;
+  margin-bottom: 24px;
+}
+
+.upload-card .tab-btn {
+  position: relative;
+  padding: 14px 20px;
+  color: #6b8480;
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  transition: color 0.2s ease;
+}
+
+.upload-card .tab-btn:hover {
+  color: #138f87;
+  background: transparent;
+  transform: none;
+}
+
+.upload-card .tab-btn.active {
+  color: #0d3835;
+  background: transparent;
+  border: none;
+}
+
+.upload-card .tab-btn.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 20px;
+  right: 20px;
+  height: 3px;
+  background: linear-gradient(90deg, #138f87, #0ea89e);
+  border-radius: 3px 3px 0 0;
+}
+
+/* 📂 文件拖放区 - 优雅设计 */
+.file-drop-zone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 32px 24px;
+  border: 2px dashed rgba(19, 143, 135, 0.25);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(19, 143, 135, 0.03), transparent 70%),
+    #fafcfb;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.25s ease;
+}
+
+.file-drop-zone:hover {
+  border-color: rgba(19, 143, 135, 0.4);
+  background:
+    radial-gradient(circle at 50% 50%, rgba(19, 143, 135, 0.05), transparent 70%),
+    #f5faf9;
+  transform: translateY(-2px);
+}
+
+.file-drop-zone input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.file-drop-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 16px;
+  border: 2px solid rgba(19, 143, 135, 0.2);
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(19, 143, 135, 0.08), rgba(19, 143, 135, 0.04));
+  color: #138f87;
+  font-size: 28px;
+  font-weight: 300;
+  line-height: 1;
+  transition: all 0.25s ease;
+}
+
+.file-drop-zone:hover .file-drop-icon {
+  border-color: #138f87;
+  background: linear-gradient(135deg, rgba(19, 143, 135, 0.12), rgba(19, 143, 135, 0.06));
+  transform: scale(1.05);
+}
+
+.file-drop-title {
+  color: #0d3835;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.file-drop-meta {
+  color: #6b8480;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+/* 📝 输入框和选择框 */
+.upload-card input,
+.upload-card select,
+.upload-card textarea {
+  border-color: rgba(19, 143, 135, 0.15);
+  border-radius: 8px;
+  background: #fafcfb;
+  color: #1a2b2e;
+  transition: all 0.2s ease;
+}
+
+.upload-card input:focus,
+.upload-card select:focus,
+.upload-card textarea:focus {
+  outline: 0;
+  border-color: #138f87;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(19, 143, 135, 0.08);
+}
+
+.upload-card label {
+  color: #4a6862;
+  font-weight: 600;
+}
+
+/* 📋 参数配置面板 */
+.upload-card .task-params,
+.upload-card details.advanced,
+.upload-card .cookies-settings,
+.upload-card .pending-item {
+  border-color: rgba(19, 143, 135, 0.1);
+  border-radius: 10px;
+  background: #fafcfb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+}
+
+.upload-card details.advanced summary,
+.upload-card .cookies-settings summary {
+  color: #1a2b2e;
+  font-weight: 600;
+}
+
+.upload-card details.advanced summary::after {
+  border-color: rgba(19, 143, 135, 0.2);
+  background: #ffffff;
+  color: #138f87;
+}
+
+/* 🔘 按钮 - 现代质感 */
+.upload-card button.primary {
+  min-height: 48px;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #138f87, #0ea89e);
+  border: none;
+  border-radius: 10px;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 4px 12px rgba(19, 143, 135, 0.25);
+  transition: all 0.2s ease;
+}
+
+.upload-card button.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #0ea89e, #0c9088);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 6px 16px rgba(19, 143, 135, 0.35);
+  transform: translateY(-1px);
+}
+
+.upload-card button.ghost {
+  color: #138f87;
+  border-color: rgba(19, 143, 135, 0.2);
+  background: transparent;
+}
+
+.upload-card button.ghost:hover {
+  border-color: #138f87;
+  background: rgba(19, 143, 135, 0.05);
+}
+
+/* 📊 任务列表卡片 */
+.jobs-card {
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.02),
+    0 8px 24px rgba(19, 143, 135, 0.06);
+  overflow: hidden;
+}
+
+.jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 24px 24px 18px;
+  border-bottom: 1px solid rgba(19, 143, 135, 0.08);
+  background: #fafcfb;
+}
+
+.jobs-head strong {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0d3835;
+}
+
+.jobs-head strong::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 18px;
+  margin-right: 10px;
+  background: linear-gradient(180deg, #138f87, #0ea89e);
+  border-radius: 2px;
+  vertical-align: -2px;
+}
+
+.jobs-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.jobs-card .task-list {
+  padding: 16px 12px;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+/* 📌 任务项 - 现代卡片设计 */
+.task-item {
+  position: relative;
+  width: 100%;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 10px;
+  padding: 16px;
+  background: #ffffff;
+  cursor: pointer;
+  text-align: left;
+  margin-bottom: 10px;
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+
+.task-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: transparent;
+  transition: background 0.2s ease;
+}
+
+.task-item:hover {
+  background: #fafcfb;
+  border-color: rgba(19, 143, 135, 0.25);
+  transform: translateY(-2px);
+  box-shadow:
+    0 4px 12px rgba(19, 143, 135, 0.08),
+    0 1px 3px rgba(0, 0, 0, 0.02);
+}
+
+.task-item.active {
+  background: linear-gradient(135deg, #f0faf8 0%, #e6f7f4 100%);
+  border-color: #138f87;
+  box-shadow:
+    0 4px 16px rgba(19, 143, 135, 0.15),
+    0 1px 3px rgba(0, 0, 0, 0.03);
+}
+
+.task-item.active::before {
+  background: linear-gradient(180deg, #138f87, #0ea89e);
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 14px;
+  color: #0d3835;
+}
+
+.task-id {
+  margin-top: 6px;
+  color: #6b8480;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+}
+
+/* 💊 状态徽章 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(19, 143, 135, 0.2);
+  color: #138f87;
+  background: rgba(19, 143, 135, 0.08);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.pill.ok {
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.2);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.pill.bad {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+/* 📈 进度条 */
+.task-progress {
+  flex: 1 1 auto;
+  min-width: 80px;
+}
+
+.progress {
+  height: 6px;
+  background: rgba(19, 143, 135, 0.1);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bar {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #138f87, #0ea89e);
+  transition: width 0.3s ease;
+  border-radius: 999px;
+}
+
+/* 📱 响应式调整 */
+@media (max-width: 900px) {
+  .task-view {
+    padding: 20px 16px 32px;
+  }
+
+  .task-view-inner {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .signal-hero {
+    min-height: 180px;
+    padding: 28px 24px 24px;
+  }
+
+  .signal-hero h2 {
+    font-size: 32px;
+  }
+
+  .upload-card > :not(.signal-hero) {
+    margin-left: 24px;
+    margin-right: 24px;
+  }
+
+  .upload-card .tab-bar {
+    padding: 0 24px;
+  }
+
+  .file-drop-zone {
+    min-height: 140px;
+    padding: 28px 20px;
+  }
+}
+/* ========================================
+   模态框和弹窗重新设计
+   优化 AI服务、设置、校对、翻译等所有弹窗
+   ======================================== */
+
+/* 🎭 模态框背景遮罩 - 更柔和 */
+.settings-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(13, 56, 53, 0.4);
+  backdrop-filter: blur(4px);
+  animation: modalFadeIn 0.2s ease;
+}
+
+@keyframes modalFadeIn {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    backdrop-filter: blur(4px);
+  }
+}
+
+.settings-modal.is-hidden {
+  display: none;
+}
+
+/* 📦 模态框卡片 - 统一现代风格 */
+.settings-modal-card {
+  width: min(680px, 100%);
+  max-height: min(85vh, 800px);
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 16px;
+  box-shadow:
+    0 4px 6px rgba(0, 0, 0, 0.05),
+    0 20px 50px rgba(13, 56, 53, 0.15);
+  overflow: hidden;
+  animation: modalSlideUp 0.25s ease;
+}
+
+@keyframes modalSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.settings-modal-card.wide {
+  width: min(920px, 100%);
+  max-height: min(88vh, 860px);
+}
+
+/* 🎯 模态框头部 - 清爽设计 */
+.settings-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  padding: 20px 24px;
+  border-bottom: 1px solid rgba(19, 143, 135, 0.08);
+  background: linear-gradient(180deg, #fafcfb 0%, #ffffff 100%);
+}
+
+.settings-modal-head strong {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0d3835;
+}
+
+.settings-modal-head .modal-subtitle {
+  display: block;
+  margin-top: 4px;
+  color: #6b8480;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.settings-modal-head button.ghost {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  color: #6b8480;
+  font-size: 20px;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.settings-modal-head button.ghost:hover {
+  color: #0d3835;
+  background: rgba(19, 143, 135, 0.08);
+  transform: rotate(90deg);
+}
+
+/* 📄 模态框主体 */
+.settings-modal-body {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+  background: #fafcfb;
+}
+
+/* ========================================
+   AI服务页面 - 保持原样不改
+   ======================================== */
+
+/* ========================================
+   设置模态框优化
+   ======================================== */
+
+.settings-card {
+  width: min(1100px, 95%);
+  max-height: min(90vh, 880px);
+}
+
+.settings-card .settings-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0 32px !important;
+  background: #fafcfb !important;
+}
+
+.settings-card .group {
+  display: block !important;
+  width: 100%;
+  padding: 32px 0;
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid rgba(19, 143, 135, 0.08);
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.settings-card .group:last-of-type {
+  border-bottom: none;
+}
+
+.settings-card .group > label:first-child {
+  display: block;
+  margin: 0 0 16px;
+  color: #0d3835;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.settings-card .row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.settings-card .row:first-of-type {
+  margin-top: 0;
+}
+
+.settings-card .row > div {
+  min-width: 0;
+}
+
+.settings-card .row > div > label {
+  display: block;
+  margin-bottom: 8px;
+  color: #4a6862;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-card input,
+.settings-card select,
+.settings-card textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid rgba(19, 143, 135, 0.15);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1a2b2e;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.settings-card input:focus,
+.settings-card select:focus,
+.settings-card textarea:focus {
+  outline: 0;
+  border-color: #138f87;
+  box-shadow: 0 0 0 3px rgba(19, 143, 135, 0.08);
+}
+
+.settings-card input[type="color"] {
+  min-height: 40px;
+  padding: 4px;
+  cursor: pointer;
+}
+
+/* 说话人映射 */
+.settings-card .speaker-map {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-card .speaker-map-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 40px;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-card .speaker-tag {
+  color: #6b8480;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 设置操作栏 */
+.settings-card .settings-actions {
+  display: flex !important;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  min-height: 76px;
+  padding: 20px 32px !important;
+  margin: 0 !important;
+  border-top: 1px solid rgba(19, 143, 135, 0.08);
+  background: #ffffff !important;
+}
+
+/* ========================================
+   其他功能模态框（校对、翻译、切片）
+   ======================================== */
+
+/* 翻译模态框 */
+#translateModal .settings-modal-card {
+  width: min(780px, 100%);
+}
+
+.translation-engine-field {
+  padding: 16px;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 10px;
+  background: #ffffff;
+  margin-bottom: 16px;
+}
+
+.field-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.field-heading label {
+  margin: 0;
+  color: #0d3835;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.translation-ai-hint {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-left: 3px solid #138f87;
+  background: rgba(19, 143, 135, 0.05);
+  color: #4a6862;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: 0 6px 6px 0;
+}
+
+/* 模型状态 */
+.model-state {
+  padding: 12px 16px;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #4a6862;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 校对列表 */
+.proofread-section {
+  margin-top: 20px;
+  padding: 20px;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.proofread-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.proofread-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.proofread-check input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #138f87;
+  cursor: pointer;
+}
+
+.proofread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.proofread-item {
+  padding: 14px 16px;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 10px;
+  background: #fafcfb;
+  transition: all 0.2s ease;
+}
+
+.proofread-item:hover {
+  border-color: rgba(19, 143, 135, 0.25);
+  background: #ffffff;
+}
+
+.proofread-item.unchecked {
+  opacity: 0.5;
+}
+
+.proofread-diff {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.proofread-diff .before {
+  color: #ef4444;
+  text-decoration: line-through;
+  text-decoration-color: rgba(239, 68, 68, 0.4);
+}
+
+.proofread-diff .after {
+  color: #22c55e;
+  font-weight: 600;
+}
+
+/* 切片模态框 */
+#clipsModal .settings-modal-card {
+  width: min(1000px, 100%);
+}
+
+.clip-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.clip-pending-panel {
+  padding: 20px;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.clip-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(19, 143, 135, 0.08);
+}
+
+.clip-section-kicker {
+  display: block;
+  color: #138f87;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+.clip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.clip-card {
+  padding: 14px 16px;
+  border: 1px solid rgba(19, 143, 135, 0.12);
+  border-radius: 10px;
+  background: #fafcfb;
+  transition: all 0.2s ease;
+}
+
+.clip-card:hover {
+  border-color: rgba(19, 143, 135, 0.25);
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(19, 143, 135, 0.08);
+}
+
+/* ========================================
+   响应式优化
+   ======================================== */
+
+@media (max-width: 768px) {
+  .settings-modal {
+    padding: 12px;
+  }
+
+  .settings-modal-card,
+  .settings-modal-card.wide {
+    width: 100%;
+    max-height: 90vh;
+    border-radius: 12px;
+  }
+
+  .settings-modal-head {
+    padding: 16px 20px;
+  }
+
+  .settings-modal-body {
+    padding: 20px;
+  }
+
+  .ai-settings-view {
+    padding: 20px 16px;
+  }
+
+  .ai-settings-main {
+    padding: 24px 20px;
+  }
+
+  .settings-card .group {
+    padding: 20px 24px;
+  }
+
+  .settings-card .row {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-provider-picker {
+    grid-template-columns: 1fr;
+  }
+}

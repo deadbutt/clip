@@ -8,6 +8,7 @@ from moss_transcribe_diarize.app.whisper_runner import (
     WhisperRunner,
     _is_likely_hallucination,
     _RepeatedPhraseGuard,
+    _whisper_initial_prompt,
 )
 
 
@@ -84,6 +85,80 @@ class FakePunctuationWhisperModel(FakeWhisperModel):
 
 
 class WhisperRunnerTest(unittest.TestCase):
+    def test_auto_language_has_no_english_example(self):
+        from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
+
+        self.assertIsNone(_whisper_initial_prompt(DEFAULT_PROMPT, None))
+        self.assertIsNone(_whisper_initial_prompt(DEFAULT_PROMPT, "ja"))
+        self.assertEqual(_whisper_initial_prompt("固有名詞", None), "固有名詞")
+
+    def test_multi_sample_detection_overrides_a_misleading_intro(self):
+        import numpy as np
+
+        runner = WhisperRunner("small")
+        runner._model = types.SimpleNamespace(detect_language=unittest.mock.Mock(side_effect=[
+            ("en", 0.99, [("en", 0.99), ("ja", 0.01)]),
+            *[("ja", 0.95, [("ja", 0.95), ("en", 0.05)])] * 4,
+        ]))
+        with patch("moss_transcribe_diarize.app.whisper_runner._probe_duration", return_value=180):
+            with patch("moss_transcribe_diarize.app.whisper_runner._decode_audio_sample", return_value=np.ones(16000, dtype=np.float32)) as decode:
+                runner._detect_recording_language("recording.mkv")
+        self.assertEqual(runner._detected_language, "ja")
+        self.assertAlmostEqual(runner._language_probability, 0.762)
+        self.assertEqual(len(runner._language_samples), 5)
+        self.assertEqual(decode.call_args_list[-1].args, ("recording.mkv", 147.0, 30.0))
+
+    def test_different_kana_sentences_are_not_treated_as_repetition(self):
+        guard = _RepeatedPhraseGuard()
+        self.assertEqual([guard.should_skip(t) for t in ["愛している", "愛されたい", "愛していた", "愛していこう"]], [False] * 4)
+
+    def test_english_only_model_does_not_call_multilingual_detection(self):
+        detect = unittest.mock.Mock(side_effect=RuntimeError("English-only model"))
+        runner = WhisperRunner("small.en")
+        runner._model = types.SimpleNamespace(detect_language=detect, model=types.SimpleNamespace(is_multilingual=False))
+        runner._detect_recording_language("recording.wav")
+        detect.assert_not_called()
+        self.assertEqual(runner._detected_language, "en")
+
+    def test_explicit_language_skips_sampling(self):
+        runner = WhisperRunner("small", device="cpu", dtype="int8", language="ja")
+        with patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=FakeWhisperModel)}):
+            with patch.object(runner, "_detect_recording_language") as detect:
+                runner.transcribe("sample.wav")
+        detect.assert_not_called()
+        self.assertEqual(FakeWhisperModel.last_kwargs["language"], "ja")
+
+    def test_detected_language_is_reused_for_retries_but_not_next_job(self):
+        calls = []
+
+        class DetectingModel(FakeWhisperModel):
+            def transcribe(self, path, **kwargs):
+                calls.append(kwargs["language"])
+                return iter([]), types.SimpleNamespace(duration=0, language="ja", language_probability=0.98)
+
+        runner = WhisperRunner("small", device="cpu", dtype="int8")
+        with patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=DetectingModel)}):
+            with patch.object(runner, "_looks_sparse", return_value=True), patch.object(runner, "_recover_gaps", return_value=None):
+                first = runner.transcribe("first.wav")
+                runner.transcribe("second.wav")
+        self.assertEqual(calls, [None, "ja", None, "ja"])
+        self.assertEqual(first.language, "ja")
+        self.assertEqual(first.language_probability, 0.98)
+
+    def test_gap_quality_metrics_are_kept_with_recovered_words(self):
+        runner = WhisperRunner("small", device="cpu", dtype="int8")
+        recovered = (
+            ["[4.00][S00]Recovered speech[5.00]"],
+            [(4.0, 5.0, "Recovered speech")],
+            [{"start": 4.0, "end": 5.0, "avg_logprob": -1.2, "no_speech_prob": 0.1, "compression_ratio": 1.0}],
+        )
+        with patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=FakeWhisperModel)}):
+            with patch.object(runner, "_recover_gaps", return_value=recovered):
+                result = runner.transcribe("sample.wav")
+        self.assertIn("Recovered speech", result.text)
+        self.assertEqual(result.words[-1], (4.0, 5.0, "Recovered speech"))
+        self.assertEqual(result.segment_metrics[-1]["avg_logprob"], -1.2)
+
     def test_ensure_ffmpeg_on_path_prepends_portable_directory(self):
         from moss_transcribe_diarize.app import whisper_runner as module
 

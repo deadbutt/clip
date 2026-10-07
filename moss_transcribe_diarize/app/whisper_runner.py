@@ -52,6 +52,9 @@ class TranscriptionResult:
     # 供词级断句重组取精确时间。引擎不支持时为 None，走 segment 级降级。
     words: list[tuple[float, float, str]] | None = None
     segment_metrics: list[dict[str, float]] | None = None
+    language: str | None = None
+    language_probability: float | None = None
+    language_samples: list[dict[str, object]] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +69,9 @@ class TranscriptionResult:
             "top_p": self.top_p,
             "top_k": self.top_k,
             "segment_metrics": self.segment_metrics,
+            "language": self.language,
+            "language_probability": self.language_probability,
+            "language_samples": self.language_samples,
         }
 
 
@@ -106,6 +112,9 @@ class WhisperRunner:
         self.vad_speech_pad_ms = vad_speech_pad_ms
         self.vad_threshold = vad_threshold
         self.hallucination_silence_threshold = hallucination_silence_threshold
+        self._detected_language: str | None = None
+        self._language_probability: float | None = None
+        self._language_samples: list[dict[str, object]] = []
         self._model = None
         self._engine = None
         self._openai_fp16 = False
@@ -151,6 +160,10 @@ class WhisperRunner:
     ) -> TranscriptionResult:
         del max_length, max_new_tokens, decoding, temperature
         with self._lock:
+            # Detection belongs to this recording, never to a previous job.
+            self._detected_language = self.language
+            self._language_probability = 1.0 if self.language else None
+            self._language_samples = []
             if status_callback is not None:
                 status_callback("loading_model", 0.05, None)
             self._ensure_loaded()
@@ -159,6 +172,8 @@ class WhisperRunner:
 
             started = time.time()
             if self._engine == "faster-whisper":
+                if self.language is None:
+                    self._detect_recording_language(audio_path)
                 parts, segment_count, words, metrics = self._transcribe_faster_whisper(
                     audio_path, prompt, status_callback, hotwords=hotwords
                 )
@@ -184,6 +199,7 @@ class WhisperRunner:
                 if recovered:
                     parts.extend(recovered[0])
                     words.extend(recovered[1])
+                    metrics.extend(recovered[2])
                     segment_count += len(recovered[0])
                     words.sort(key=lambda w: w[0])
                     parts.sort(key=lambda p: float(p[1:p.find("]")]))
@@ -204,7 +220,46 @@ class WhisperRunner:
                 temperature=None,
                 words=words,
                 segment_metrics=metrics,
+                language=self._detected_language,
+                language_probability=self._language_probability,
+                language_samples=list(self._language_samples),
             )
+
+    def _detect_recording_language(self, audio_path: str | Path) -> None:
+        """Combine language probabilities from positions across the recording.
+
+        An intro or speech VAD can bias the first Whisper window. Sampling the
+        original audio also works for singing without adding a content mode.
+        Older engines without detect_language retain their native detection.
+        """
+        detect = getattr(self._model, "detect_language", None)
+        if not callable(detect):
+            return
+        if getattr(getattr(self._model, "model", None), "is_multilingual", True) is False:
+            self._detected_language = "en"
+            self._language_probability = 1.0
+            return
+        duration = _probe_duration(audio_path)
+        if duration <= 0:
+            return
+        fractions = [0.1, 0.3, 0.5, 0.7, 0.9] if duration >= 120 else [0.0, 0.5, 1.0]
+        starts = sorted({max(0.0, min(duration - 30.0, duration * f - 15.0)) for f in fractions})
+        scores: dict[str, float] = {}
+        for start in starts:
+            sample = _decode_audio_sample(audio_path, start, min(30.0, duration))
+            if sample is None or not len(sample):
+                continue
+            import numpy as np
+
+            if float(np.sqrt(np.mean(sample ** 2))) < 1e-4:
+                continue
+            language, probability, probabilities = detect(audio=sample)
+            self._language_samples.append({"start": start, "language": language, "probability": float(probability)})
+            for code, value in probabilities:
+                scores[code] = scores.get(code, 0.0) + float(value)
+        if scores:
+            self._detected_language = max(scores, key=scores.get)
+            self._language_probability = scores[self._detected_language] / len(self._language_samples)
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -260,10 +315,10 @@ class WhisperRunner:
         *,
         vad_filter: bool | None = None,
         hotwords: str | None = None,
-    ) -> tuple[list[str], int, list[tuple[float, float, str]]]:
+    ) -> tuple[list[str], int, list[tuple[float, float, str]], list[dict[str, float]]]:
         path = str(Path(audio_path).expanduser())
         kwargs = {
-            "language": self.language,
+            "language": self.language or self._detected_language,
             "beam_size": int(self.beam_size),
             "vad_filter": bool(self.vad_filter if vad_filter is None else vad_filter),
             "initial_prompt": _whisper_initial_prompt(prompt, self.language),
@@ -313,6 +368,9 @@ class WhisperRunner:
             ):
                 kwargs.pop(key, None)
             segments_iter, info = self._model.transcribe(path, **kwargs)
+        if self._detected_language is None:
+            self._detected_language = getattr(info, "language", None)
+            self._language_probability = getattr(info, "language_probability", None)
         duration = float(getattr(info, "duration", 0.0) or 0.0)
         repeat_guard = _RepeatedPhraseGuard()
         used_prompt = kwargs.get("initial_prompt")
@@ -397,7 +455,7 @@ class WhisperRunner:
         audio_path: str | Path,
         prompt: str,
         status_callback: StatusCallback | None,
-    ) -> tuple[list[str], list[tuple[float, float, str]]] | None:
+    ) -> tuple[list[str], list[tuple[float, float, str]], list[dict[str, float]]] | None:
         """检测词时间轴上的无词缺口，对有语音能量的缺口单独重转录。
 
         VAD 可能局部误杀短句（如 "Whoa!" 被判无声），整体覆盖率检查无法发现。
@@ -437,6 +495,7 @@ class WhisperRunner:
             return None
         recovered_parts: list[str] = []
         recovered_words: list[tuple[float, float, str]] = []
+        recovered_metrics: list[dict[str, float]] = []
         for gap_start, gap_end in gaps:
             s = int(gap_start * sr)
             e = int(gap_end * sr)
@@ -466,7 +525,7 @@ class WhisperRunner:
                 tmp_path = tmp.name
             try:
                 sf.write(tmp_path, chunk, sr)
-                gap_parts, _, gap_words, _ = self._transcribe_faster_whisper(
+                gap_parts, _, gap_words, gap_metrics = self._transcribe_faster_whisper(
                     tmp_path, prompt, status_callback, vad_filter=False,
                 )
                 if gap_words:
@@ -475,6 +534,10 @@ class WhisperRunner:
                         (w[0] + offset, w[1] + offset, w[2]) for w in gap_words
                     ]
                     recovered_words.extend(adjusted_words)
+                    recovered_metrics.extend(
+                        {**metric, "start": metric["start"] + offset, "end": metric["end"] + offset}
+                        for metric in gap_metrics
+                    )
                     # parts 的时间戳是相对临时片段的(≈0),必须同样加偏移,
                     # 否则 transcribe() 按首时间戳排序时这些段会被排到全文最前。
                     recovered_parts.extend(
@@ -487,7 +550,7 @@ class WhisperRunner:
                     pass
         if not recovered_words:
             return None
-        return recovered_parts, recovered_words
+        return recovered_parts, recovered_words, recovered_metrics
 
     def _transcribe_openai_whisper(
         self,
@@ -509,6 +572,7 @@ class WhisperRunner:
             word_timestamps=True,
         )
         duration = float(result.get("duration") or 0.0)
+        self._detected_language = result.get("language", self.language)
         segments = result.get("segments") or []
         repeat_guard = _RepeatedPhraseGuard()
         used_prompt = _whisper_initial_prompt(prompt, self.language)
@@ -601,7 +665,7 @@ def _whisper_initial_prompt(prompt: str, language: str | None) -> str | None:
     lang = (language or "").lower()
     if lang.startswith("zh"):
         return _PUNCT_PROMPT_ZH
-    if not lang or lang.startswith("en"):
+    if lang.startswith("en"):
         return _PUNCT_PROMPT_EN
     return None
 
@@ -646,7 +710,9 @@ class _RepeatedPhraseGuard:
 def _normalize_repeated_phrase(text: str) -> str:
     text = (text or "").lower()
     text = re.sub(r"['`]", "", text)
-    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text)
+    # Keep kana, Hangul and accented letters: stripping them collapses distinct
+    # sentences into the same few kanji and incorrectly discards real speech.
+    text = "".join(char if char.isalnum() else " " for char in text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -770,6 +836,28 @@ def _duration_progress(position: float, duration: float) -> float:
         return 0.25
     ratio = max(0.0, min(1.0, position / duration))
     return 0.10 + (0.85 - 0.10) * ratio
+
+
+def _decode_audio_sample(audio_path: str | Path, start: float, duration: float) -> "np.ndarray | None":
+    """Decode a bounded 16 kHz sample; never load a long recording for detection."""
+    import subprocess
+
+    import numpy as np
+
+    ffmpeg = detect_ffmpeg().ffmpeg
+    if not ffmpeg:
+        return None
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-v", "error", "-ss", str(start), "-i", str(Path(audio_path).expanduser()),
+             "-t", str(duration), "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1"],
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return np.frombuffer(result.stdout, dtype="<f4").copy()
 
 
 def _decode_audio_pcm(audio_path: str | Path) -> tuple["np.ndarray", int] | None:

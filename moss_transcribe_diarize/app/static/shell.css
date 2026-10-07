@@ -1,0 +1,126 @@
+/* Outer workspace only; editor geometry and controls retain their own styles. */
+body { --shell-width: 224px; }
+body:not(.editor-workspace) { background: #f5f6f8; }
+.app-sidebar { position: fixed; inset: 0 auto 0 0; width: var(--shell-width); display: flex; flex-direction: column; padding: 30px 18px 20px; background: #fff; border-right: 1px solid #e6e9ed; z-index: 10; }
+.app-sidebar h1 { font-size: 17px; gap: 9px; white-space: nowrap; }
+.app-sidebar h1::before { background: #13877b; box-shadow: none; border-radius: 9px; }
+.brand-caption { font-size: 11px; color: #8c949c; margin: 13px 0 28px; }
+.sidebar-create { width: 100%; min-height: 42px; margin-bottom: 30px; font-weight: 600; }
+.app-sidebar button.primary, .task-view button.primary { background: #13877b; border-color: #13877b; box-shadow: none; }
+.nav-caption { color: #929aa3; font-size: 11px; letter-spacing: .04em; padding: 0 10px; }
+.app-sidebar nav { display: grid; gap: 7px; margin-top: 12px; }
+.shell-nav { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 10px 12px; background: transparent; border: 0; border-radius: 8px; color: #66717d; text-align: left; font-size: 13px; }
+.shell-nav > span:first-child { font-size: 19px; width: 22px; text-align: center; }
+.shell-nav.active { color: #087b6e; background: #edf7f4; font-weight: 650; }
+.shell-nav:hover:not(:disabled) { background: #f1f5f4; box-shadow: none; transform: none; }
+.nav-count { margin-left: auto; font-size: 11px; background: #e7eeeb; color: #6e7a75; border-radius: 5px; padding: 2px 6px; }
+.sidebar-footer { margin-top: auto; display: grid; gap: 12px; padding: 18px 8px 0; border-top: 1px solid #edf0f2; }
+.sidebar-footer .nav-caption { padding: 0; }
+.sidebar-footer .pill { width: fit-content; font-size: 11px; box-shadow: none; }
+.sidebar-footer p { margin: 0; font-size: 10px; color: #929aa3; }
+header.app-topbar { margin-left: var(--shell-width); height: 64px; padding: 0 38px; background: #fff; border-bottom: 1px solid #e6e9ed; box-shadow: none; backdrop-filter: none; }
+.app-topbar > div { display: flex; gap: 16px; align-items: center; font-size: 12px; }
+.topbar-space, .topbar-note { color: #929aa3; font-size: 11px; }
+.topbar-divider { color: #ced4da; }
+body:not(.editor-workspace) > main { margin-left: var(--shell-width); height: calc(100dvh - 64px); }
+.editor-workspace .app-sidebar { display: none; }
+.editor-workspace header.app-topbar { margin-left: 0; height: 68px; }
+.app-topbar .editor-shell-actions { display: none; }
+.editor-workspace .app-topbar .editor-shell-actions { display: flex; gap: 8px; }
+.editor-workspace .topbar-note { display: none; }
+.task-view { padding: 38px 38px 48px; background: #f5f6f8; overflow-y: auto; }
+.task-view .task-view-inner { display: flex; flex-direction: column; align-items: stretch; gap: 28px; width: 100%; max-width: 1120px; min-width: 0; margin: 0 auto; height: auto; }
+.hub-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.hub-eyebrow { color: #8a969d; font-size: 11px; letter-spacing: .08em; }
+.hub-heading h2 { margin: 10px 0 10px; font-size: 29px; letter-spacing: -.04em; font-weight: 700; color: #253039; }
+.hub-heading p { margin: 0; font-size: 13px; color: #87919a; line-height: 1.7; }
+.hub-heading > button { font-size: 12px; min-height: 39px; white-space: nowrap; }
+.hub-home { display: grid; gap: 18px; }
+.hub-stats { display: grid; grid-template-columns: repeat(3, 1fr); background: #fff; border: 1px solid #e6e9ed; border-radius: 12px; padding: 22px 0; margin-bottom: 12px; }
+.hub-stats > div { display: flex; flex-direction: column; gap: 10px; padding: 0 26px; }
+.hub-stats > div + div { border-left: 1px solid #edf0f2; }
+.hub-stats span { color: #8a949d; font-size: 12px; }
+.hub-stats strong { font-size: 28px; color: #303b43; font-weight: 650; }
+.hub-stats > div:nth-child(2) strong { color: #13877b; }
+.hub-section-heading { display: flex; align-items: center; justify-content: space-between; }
+.hub-section-heading h3 { margin: 0; font-size: 14px; font-weight: 650; }
+.hub-section-heading > span { font-size: 11px; color: #959ea5; }
+.hub-entry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.hub-entry { display: flex; gap: 18px; align-items: center; padding: 24px; min-height: 116px; text-align: left; border: 1px solid #e3e8eb; border-radius: 12px; background: #fff; }
+.hub-entry:hover:not(:disabled) { transform: none; border-color: #88bcb2; background: #fcfefd; box-shadow: 0 4px 16px #203b3410; }
+.entry-icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 11px; color: #13877b; background: #ecf6f2; font-size: 26px; }
+.hub-entry:nth-child(2) .entry-icon { background: #eff2fb; color: #697cbd; }
+.hub-entry strong { display: block; font-size: 15px; font-weight: 650; color: #303b43; }
+.hub-entry small { display: block; margin-top: 7px; font-size: 12px; color: #8b949d; }
+.entry-arrow { margin-left: auto; color: #a2acb4; }
+.task-view .jobs-card { border: 1px solid #e6e9ed; border-radius: 12px; padding: 22px 24px; background: #fff; box-shadow: none; }
+.task-view .jobs-head { padding: 0 0 17px; margin: 0; border-bottom: 1px solid #edf0f2; }
+.jobs-head > strong { font-size: 15px; }
+.task-view .jobs-card .task-list { overflow: visible; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 18px 0 0; max-height: none; }
+.task-view .task-item { padding: 17px; margin: 0; border: 1px solid #e7ebee; border-radius: 9px; background: #fff; box-shadow: none; }
+.task-view .task-item:hover { transform: none; background: #fafcfb; border-color: #a4c9bf; box-shadow: none; }
+.task-view .task-name { font-size: 13px; }
+.task-view .task-id { font-size: 10px; opacity: .65; }
+.task-view .task-progress { height: 4px; }
+.task-view .task-output-label { font-size: 9px; }
+.hub-all-tasks { align-self: center; margin-top: 18px; font-size: 12px; color: #13877b; border: 0; }
+.hub-empty { grid-column: 1 / -1; text-align: center; padding: 34px 16px; }
+.hub-empty strong { font-size: 14px; font-weight: 500; color: #687681; }
+.hub-empty p { color: #98a1a9; font-size: 12px; margin: 10px 0 0; }
+.hub-task-filters { display: flex; gap: 12px; margin-top: 18px; }
+.hub-task-filters input { flex: 1; min-width: 0; padding: 10px 12px; font-size: 12px; }
+.hub-task-filters select { width: 150px; font-size: 12px; }
+.task-view .upload-card { max-width: 780px; width: 100%; align-self: center; background: #fff; box-shadow: none; border: 1px solid #e6e9ed; border-radius: 12px; }
+.task-view .upload-card:hover { box-shadow: none; }
+.task-view .signal-hero { min-height: 0; padding: 24px 28px 8px; background: #fff; border: 0; }
+.task-view .signal-hero::after, .task-view .signal-hero-top, .task-view .signal-visual, .task-view .signal-hero-footer { display: none; }
+.task-view .signal-hero h2 { margin: 0 0 8px; font-size: 20px; color: #303b43; }
+.task-view .signal-copy { font-size: 12px; color: #8b949d; margin: 0; }
+.task-view .upload-card > :not(.signal-hero) { margin-left: 28px; margin-right: 28px; }
+.task-view .upload-card .tab-bar { margin-top: 20px; }
+.task-view .file-drop-zone { background: #f8fbfa; border: 1px dashed #b4cdc6; box-shadow: none; }
+.task-view .file-drop-title { color: #344941; }
+.task-view .upload-card > #upload { margin-bottom: 28px; }
+.task-view[data-shell-mode="home"] .upload-card,
+.task-view:not([data-shell-mode="home"]) .hub-home,
+.task-view:not([data-shell-mode="tasks"]) .hub-task-filters,
+.task-view[data-shell-mode="tasks"] .upload-card,
+.task-view[data-shell-mode="tasks"] .hub-all-tasks,
+.task-view[data-shell-mode="create"] .jobs-card,
+.task-view[data-shell-mode="create"] .hub-heading > button { display: none; }
+body:not(.editor-workspace) .ai-settings-view,
+body:not(.editor-workspace) .subscriptions-view { background: #f5f6f8; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #13877b; outline-offset: 3px; }
+@media (min-width: 1650px) { .task-view { padding-top: 48px; } }
+@media (max-width: 1050px) {
+  body { --shell-width: 192px; }
+  .app-sidebar { padding-left: 14px; padding-right: 14px; }
+  .task-view { padding: 28px 24px; }
+  header.app-topbar { padding: 0 24px; }
+  .hub-entry { padding: 18px; gap: 12px; }
+  .task-view .jobs-card .task-list { grid-template-columns: 1fr; }
+}
+@media (max-width: 700px) {
+  body { --shell-width: 0px; }
+  .app-sidebar { position: static; width: 100%; padding: 14px 16px 10px; border-right: 0; border-bottom: 1px solid #e6e9ed; }
+  .brand-caption, .sidebar-create, .app-sidebar > .nav-caption, .sidebar-footer { display: none; }
+  .app-sidebar nav { display: flex; gap: 4px; margin-top: 12px; }
+  .shell-nav { justify-content: center; gap: 5px; padding: 8px 6px; font-size: 11px; min-height: 36px; }
+  .shell-nav > span:first-child { font-size: 15px; width: 16px; }
+  .nav-count { display: none; }
+  header.app-topbar { height: 48px; padding: 0 18px; }
+  .topbar-note { display: none; }
+  body:not(.editor-workspace) > main { height: calc(100dvh - 157px); }
+  .task-view { padding: 24px 16px; }
+  .task-view .task-view-inner { gap: 22px; }
+  .hub-heading h2 { font-size: 23px; }
+  .hub-heading > button { display: none; }
+  .hub-entry-grid { grid-template-columns: 1fr; gap: 12px; }
+  .hub-entry { min-height: 95px; }
+  .hub-stats > div { padding: 0 16px; }
+  .task-view .jobs-card { padding: 18px 14px; }
+  .jobs-tools { gap: 6px; }
+  .task-view .upload-card > :not(.signal-hero) { margin-left: 18px; margin-right: 18px; }
+  .task-view .signal-hero { padding: 20px 18px 8px; }
+  .hub-task-filters select { width: 115px; }
+}

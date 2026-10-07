@@ -168,6 +168,17 @@ class TranscriptionQualityTest(unittest.TestCase):
         self.assertLess(segment.confidence, 0.70)
         self.assertIn("possible_hallucination", segment.quality_flags or [])
 
+    def test_japanese_canned_outro_is_reviewed_without_deleting_text(self):
+        from moss_transcribe_diarize.app.jobs import _apply_transcription_quality
+
+        text = "ご視聴ありがとうございました"
+        segment = SubtitleSegment("seg_0001", 0.0, 1.0, "S00", text)
+        metrics = [{"start": 0.0, "end": 1.0, "avg_logprob": -0.2, "no_speech_prob": 0.0}]
+        _apply_transcription_quality([segment], metrics)
+        self.assertGreater(segment.confidence, 0.80)
+        self.assertIn("possible_hallucination", segment.quality_flags or [])
+        self.assertEqual(segment.text, text)
+
     def test_flags_punctuation_only_segment_without_metrics(self):
         from moss_transcribe_diarize.app.jobs import _apply_transcription_quality
 

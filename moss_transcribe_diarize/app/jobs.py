@@ -58,7 +58,7 @@ from .text_translator import (
 )
 
 RUNNING_STATES = {"queued", "downloading", "loading_model", "transcribing", "postprocessing", "labeling_speakers", "translating", "proofreading", "rendering"}
-TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
+TERMINAL_STATES = {"waiting_review", "downloaded", "done", "failed", "cancelled"}
 # API 触发的用户后处理状态: {status: (进度信息字段, 中文名)}。重启中断时回
 # waiting_review 而非重新入队,避免 worker 重跑后处理覆盖用户编辑。
 _POSTPROCESS_STATES: dict[str, tuple[str | None, str]] = {
@@ -416,6 +416,8 @@ def _apply_transcription_quality(segments: list[SubtitleSegment], metrics: list[
             add("possible_hallucination", "字幕只包含标点或非文字符号")
         if generic_phrase and (segment.confidence is None or segment.confidence < 0.70):
             add("possible_hallucination", "低置信度的常见模板短语，可能来自音乐或静音段")
+        if re.search(r"ご(?:視聴|清聴)(?:ありがとう|有難う)ございました", text):
+            add("possible_hallucination", "常见日语视频结束语，请核对是否实际发声；伴奏段也可能高置信度误识别")
         if re.fullmatch(
             r"(?:(?:first|burst) blood|double kill|triple kill|quadra kill|penta ?kill|legendary|"
             r"rampage|unstoppable|shut down|godlike|executed|you have slain an enemy)!?",
@@ -597,6 +599,10 @@ class JobRecord:
     elapsed_sec: float | None = None
     subtitle_style: dict[str, Any] = field(default_factory=dict)
     backend: str = ""
+    transcription_info: dict[str, Any] = field(default_factory=dict)
+    download_only: bool = False
+    subscription_id: str = ""
+    subscription_video_key: str = ""
     speaker_labeling: dict[str, Any] = field(default_factory=dict)
     speaker_count: int | None = None
     diarization_backend: str = "none"
@@ -697,6 +703,7 @@ class JobRecord:
             "ass": str(self.ass_path),
             "mp4": str(self.output_path),
             "clips": str(self.clips_dir),
+            "media": self.input_path,
         }
         data["backend"] = self.backend
         data["translation"] = {
@@ -745,6 +752,10 @@ class JobRecord:
             elapsed_sec=data.get("elapsed_sec"),
             subtitle_style=dict(data.get("subtitle_style") or {}),
             backend=str(data.get("backend") or ""),
+            transcription_info=dict(data.get("transcription_info") or {}),
+            download_only=bool(data.get("download_only", False)),
+            subscription_id=str(data.get("subscription_id") or ""),
+            subscription_video_key=str(data.get("subscription_video_key") or ""),
             speaker_labeling=dict(data.get("speaker_labeling") or {}),
             speaker_count=None if data.get("speaker_count") in ("", None) else int(data.get("speaker_count")),
             diarization_backend=str(data.get("diarization_backend") or "auto"),
@@ -946,6 +957,10 @@ class JobManager(ClipOperationsMixin):
         diarization_backend: str | None = None,
         force_transcribe: bool = False,
         hotwords: str | None = None,
+        download_only: bool = False,
+        subscription_id: str = "",
+        subscription_video_key: str = "",
+        media_name: str | None = None,
     ) -> JobRecord:
         options = self._resolve_inference_options(
             prompt=prompt,
@@ -962,7 +977,7 @@ class JobManager(ClipOperationsMixin):
             id=job_id,
             status="queued",
             progress=0.0,
-            media_name=url[:80],
+            media_name=_sanitize_display_name(media_name or url[:80]),
             input_path=str(job_dir / "input.media"),
             job_dir=str(job_dir),
             inference_prompt=options["prompt"],
@@ -979,6 +994,9 @@ class JobManager(ClipOperationsMixin):
             cookies_config=cookies_config,
             force_transcribe=bool(force_transcribe),
             hotwords=str(hotwords or ""),
+            download_only=bool(download_only),
+            subscription_id=subscription_id,
+            subscription_video_key=subscription_video_key,
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -2515,6 +2533,7 @@ class JobManager(ClipOperationsMixin):
     def download_path(self, job_id: str, kind: str) -> Path:
         job = self.get_job(job_id)
         table = {
+            "media": Path(job.input_path),
             "json": job.segments_path,
             "segments": job.segments_path,
             "srt": job.srt_path,
@@ -2625,6 +2644,13 @@ class JobManager(ClipOperationsMixin):
             if job.source == "url" and job.source_url and not Path(job.input_path).exists():
                 self._download_phase(job)
 
+            if job.download_only:
+                if not Path(job.input_path).is_file():
+                    raise FileNotFoundError(job.input_path)
+                self._set_status(job, "downloaded", 1.0, error=None)
+                self.job_log(job, "视频已下载；未启用自动转录")
+                return
+
             # 录屏文件音频轨可能有 PTS 窟窿（丢帧），会让整条字幕时间轴前移。
             # 转录/人声分离/说话人标记统一改吃修复后的音频，保证时间轴一致。
             audio_path = self._prepare_audio_timeline(job)
@@ -2734,6 +2760,16 @@ class JobManager(ClipOperationsMixin):
                     status_callback=update,
                 )
                 self._raise_if_cancelled(job.id)
+                job.transcription_info = {
+                    "language": getattr(result, "language", None),
+                    "language_probability": getattr(result, "language_probability", None),
+                    "language_samples": getattr(result, "language_samples", None),
+                }
+                self.job_log(
+                    job,
+                    f"转录语言: {job.transcription_info['language'] or 'unknown'}, "
+                    f"检测概率: {job.transcription_info['language_probability']}",
+                )
                 job.generated_tokens = max(last_generated_tokens, int(result.generated_tokens or 0))
                 self.job_log(
                     job,
@@ -2885,7 +2921,7 @@ class JobManager(ClipOperationsMixin):
             self._raise_if_cancelled(job.id)
             job.download_info = info
             save = self._should_save_live_progress(job.id)
-            self._set_status(job, "downloading", ratio * 0.05, error=None, save=save)
+            self._set_status(job, "downloading", ratio if job.download_only else ratio * 0.05, error=None, save=save)
 
         def cancel_check() -> bool:
             return job.id in self._cancelled_jobs or job.id not in self._jobs

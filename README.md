@@ -100,7 +100,7 @@ uv pip install -e ".[torch-runtime,diarization]"
 
 再把模型放入 `models/`，把 `tools/llama-server/` 和 `tools/ffmpeg/` 准备好，双击 `start.bat`。这些命令是开发安装入口，**并不保证复现开发机的 CUDA wheel 和全部版本**；正式发布应固定经过验收的依赖及 torch/torchaudio 下载源。也可先验证随包的 `uv.lock`，再使用 `uv sync --locked --extra torch-runtime --extra diarization`，不能把未验证的锁文件当成当前环境快照。
 
-当前 `start.bat` 固定使用 NVIDIA CUDA / float16 和英语 `en`。其他语言或自动语言检测要调整语言参数；CPU 用户应按启动一节手动指定设备。HY 的 llama.cpp 后端独立于 Whisper，`--device cpu` 不会自动把 HY 改成 CPU/Vulkan。
+当前 `start.bat` 使用 NVIDIA CUDA / float16，默认自动检测语言。已知日语素材可明确指定 `--language ja`；CPU 用户应按启动一节手动指定设备。HY 的 llama.cpp 后端独立于 Whisper，`--device cpu` 不会自动把 HY 改成 CPU/Vulkan。
 
 #### 未来的“解压即用”整合包
 
@@ -137,7 +137,7 @@ uv pip install -e ".[torch-runtime,diarization]"
 .venv\Scripts\mtd-subtitle-web.exe --port 8080    # 自定义端口
 ```
 
-`start.bat` 已自动附加常用参数（本地 `large-v3-turbo`、CUDA + float16、英语 `en`、HF 镜像、检测到本地 OPUS-MT 时启用本地翻译）。它适用于当前英语素材和 NVIDIA 配置，不是所有电脑的通用启动器。手动启动时按需传参，完整列表见 `.venv\Scripts\mtd-subtitle-web.exe --help`，常用参数如下：
+`start.bat` 已自动附加常用参数（本地 `large-v3-turbo`、CUDA + float16、自动检测语言、HF 镜像、检测到本地 OPUS-MT 时启用本地翻译）。它适用于 NVIDIA 配置。手动启动时按需传参，完整列表见 `.venv\Scripts\mtd-subtitle-web.exe --help`，常用参数如下：
 
 自动检测语言时不要传 `--language`，例如：
 
@@ -159,6 +159,14 @@ uv pip install -e ".[torch-runtime,diarization]"
 | `--beam-size` | `5` | 束宽；长视频 3 是速度/质量折中，1 只适合草稿 |
 | `--decoding` / `--temperature` | `greedy` / `1.0` | 历史兼容入口；当前 Whisper runner 不使用它们控制解码 |
 | `--prompt` | 内置 | Whisper 初始提示词（可放领域词引导） |
+
+明确指定日语时可这样启动；默认不传 `--language`，由模型自动检测：
+
+```powershell
+.venv\Scripts\mtd-subtitle-web.exe --model models/faster-whisper-large-v3-turbo --device cuda --dtype float16 --language ja
+```
+
+自动检测不会注入英文示例；faster-whisper 会对原音频多个位置的短片段综合判断语言，避免片头或伴奏影响首段检测。选出的主要语言会用于整段转录和后续缺口补录，避免短片段重新检测后切换语言。任务的 `transcription_info` 保存实际语言、检测概率和取样结果，供复查使用。混合语言素材仍按主要语言处理；明确传入 `--language` 可覆盖检测。
 | `--max-new-tokens` / `--max-len` | `8192` / `131072` | 历史兼容入口；当前 Whisper runner 忽略它们，不能通过调大来提升质量 |
 
 **说话人分离**
@@ -264,6 +272,24 @@ mtd-subtitle --help
 - **URL 任务**：在线视频直链，先下载后转录，进度实时显示
 - **AI 服务**（折叠面板）：配置 LLM API，可存多份（DeepSeek / Ollama / 任意 OpenAI 兼容），"启用"按钮切换当前使用的配置；"测试连通"一键验证
 - **下载 Cookie**：默认 Firefox（Chrome/Edge 的 App-Bound Encryption 导致 yt-dlp 读不到）
+
+### 关注更新（YouTube / B 站）
+
+点击侧栏「关注更新」，添加 YouTube 频道主页、@账号或 UC 频道 ID，或 B 站 UP 主主页 / 数字 UID。默认每 10 分钟检查一次，支持暂停、修改间隔和手动检查。
+
+- 默认「提醒，确认后下载」：发现新投稿后显示未读提示，在更新列表点击「确认下载」加入任务队列。也可以选择「自动下载」。
+- 默认只下载原视频；勾选「下载完成后自动转录」才会接着转录。只下载的任务完成后可查看文件位置、另存原视频或手动开始转录，文件保存在 `runs/<job_id>/`。
+- 首次成功检查只记录近期投稿，不自动下载历史视频；切换到「全部近期视频」可以手动下载历史投稿。已记录的视频会去重，重复检查、重复确认和服务重启不会重复创建下载任务。
+- 服务运行时持续轮询，关闭网页不影响检查和自动下载；关闭程序后暂停。可选的浏览器桌面提醒需要开启通知权限并保持页面打开，未读提示会保留到下次打开。
+- 关注列表与更新记录保存在 `config/subscriptions.json`。首次成功关注时会保存最近 5 条投稿（标题、封面、发布时间；B 站还会显示平台返回的时长），服务每次启动和后台轮询都会再检查更新。长时间停机仍可能遗漏超出平台近期列表的投稿；此功能检查视频投稿，不监控动态、直播开播或提供即时推送。
+- 付费、大会员、充电专属或地区受限视频，能否下载取决于所选浏览器登录账号是否有权限。平台可能允许读取标题和封面，但下载时仍返回权限错误；卡片会保留错误信息，可换有资格的 Firefox 账号后重试。
+- YouTube 需要本机网络能够访问；平台限流或网络失败会显示错误并延后重试。关注设置里的「检查与下载登录态」默认使用 Firefox：订阅检查和后续 yt-dlp 下载共用同一个浏览器登录态，B 站被匿名请求拦截时成功率更高。Firefox 必须先登录对应平台；程序只在本机读取匹配域名的 Cookie，不上传 Cookie。Chrome / Edge 可能受 Cookie 加密限制，建议 Firefox。公开视频也可以选择「不使用」。
+
+#### 关注更新的登录态
+
+首次添加 B 站或 YouTube 关注时，建议先在 Firefox 登录对应网站，再选择「Firefox（推荐，检查和下载共用）」。程序会读取本机 Firefox 配置中的 `cookies.sqlite`，复制后只提取对应域名的 Cookie，用于订阅检查和视频下载。Firefox 正在运行时通常也可以读取；如果读取失败，完全退出 Firefox 后再点“检查”。
+
+Cookie 失效、平台风控或网络限制仍可能导致 HTTP 412、-352 等错误。这表示平台拒绝了本次请求，不代表频道链接格式错误；稍后重试或在 Firefox 中重新登录即可。
 
 ### 编辑器
 

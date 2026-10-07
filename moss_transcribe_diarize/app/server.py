@@ -12,6 +12,7 @@ from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
 from .events import EventHub
 from .ffmpeg import detect_ffmpeg
 from .jobs import JobManager
+from .subscriptions import SubscriptionManager
 from .whisper_runner import WhisperRunner
 
 logger = logging.getLogger(__name__)
@@ -125,9 +126,11 @@ def create_app(
         _quiet_connection_reset_noise()
         manager.bind_events(asyncio.get_running_loop(), hub)
         _purge_orphan_cookies_files(manager)
+        subscriptions.start()
         try:
             yield
         finally:
+            subscriptions.stop()
             manager.shutdown(wait=True, timeout=5.0)
             for candidate in (app.state.translator, *(app.state.translators or {}).values()):
                 closer = getattr(candidate, "close", None)
@@ -155,6 +158,8 @@ def create_app(
         diarization_device=diarization_device,
     )
     app.state.manager = manager
+    subscriptions = SubscriptionManager(Path(runs_dir).parent / "config", manager)
+    app.state.subscriptions = subscriptions
 
     # 同时进行的 clip 渲染(ffmpeg 编码进程)上限;整片烧录走 worker 单线程,不占此配额。
     clip_render_semaphore = asyncio.Semaphore(2)
@@ -316,6 +321,73 @@ def create_app(
     @app.get("/api/jobs")
     def list_jobs():
         return {"jobs": [job.to_dict() for job in manager.list_jobs()], "queue": manager.queue_info()}
+
+    @app.get("/api/subscriptions")
+    def list_subscriptions():
+        return subscriptions.snapshot()
+
+    @app.post("/api/subscriptions")
+    async def add_subscription(request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("需要订阅设置对象")
+            return await asyncio.to_thread(subscriptions.add, payload)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/api/subscriptions/check")
+    def check_subscriptions():
+        return subscriptions.check_all()
+
+    @app.post("/api/subscriptions/read")
+    def read_subscription_updates():
+        subscriptions.mark_read()
+        return {"ok": True}
+
+    @app.put("/api/subscriptions/{subscription_id}")
+    async def update_subscription(subscription_id: str, request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("需要订阅设置对象")
+            return subscriptions.update(subscription_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="订阅不存在") from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.delete("/api/subscriptions/{subscription_id}")
+    def delete_subscription(subscription_id: str):
+        try:
+            subscriptions.delete(subscription_id)
+            return {"ok": True}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="订阅不存在") from exc
+
+    @app.post("/api/subscriptions/{subscription_id}/check")
+    def check_subscription(subscription_id: str):
+        try:
+            return subscriptions.check(subscription_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="订阅不存在") from exc
+
+    @app.post("/api/subscription-videos/{video_id}/download")
+    def download_subscription_video(video_id: str):
+        try:
+            return subscriptions.download(video_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="更新记录不存在") from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/api/subscription-videos/{video_id}/dismiss")
+    def dismiss_subscription_video(video_id: str):
+        try:
+            subscriptions.dismiss(video_id)
+            return {"ok": True}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="更新记录不存在") from exc
 
     @app.get("/api/queue")
     def queue_info():

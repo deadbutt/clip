@@ -1,6 +1,6 @@
 const RUNNING_STATES = new Set(['queued', 'downloading', 'loading_model', 'transcribing', 'postprocessing', 'labeling_speakers', 'translating', 'proofreading', 'rendering']);
 const EDIT_STATES = new Set(['waiting_review', 'rendering', 'done']);
-const TERMINAL_STATES = new Set(['waiting_review', 'done', 'failed', 'cancelled']);
+const TERMINAL_STATES = new Set(['waiting_review', 'downloaded', 'done', 'failed', 'cancelled']);
 const {
   apiUrl,
   normalizedSpeakerCount,
@@ -733,8 +733,8 @@ function confirmLeaveUnsavedChanges() {
   return window.confirm('有未保存的字幕修改，离开后将丢失。确定离开吗？');
 }
 
-newTaskBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
-openNewBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
+newTaskBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true, shellMode: 'create' }); });
+openNewBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true, shellMode: 'create' }); });
 backFromProcessingBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
 backToTasksBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
@@ -1324,7 +1324,8 @@ async function refreshJobs(options = {}) {
       currentJob = null;
       showImportView();
     }
-  } else if (!options.keepSelection && jobs.length && options.selectLatest) {
+  } else if (!options.keepSelection && jobs.length && options.selectLatest
+      && document.querySelector('#subscriptionsView').classList.contains('is-hidden')) {
     await selectJob(jobs[0].id);
   }
   ensurePolling();
@@ -1332,11 +1333,12 @@ async function refreshJobs(options = {}) {
 
 function renderJobList() {
   jobCountEl.textContent = jobs.length + ' 个任务';
-  if (!jobs.length) {
-    jobListEl.innerHTML = '<div class="meta" style="padding:10px">还没有任务</div>';
+  const visibleJobs = window.shellJobs ? window.shellJobs(jobs) : jobs;
+  if (!visibleJobs.length) {
+    jobListEl.innerHTML = '<div class="hub-empty"><strong>' + (jobs.length ? '没有匹配的任务' : '你的第一项工作，从这里开始') + '</strong><p>' + (jobs.length ? '试试其他关键词或状态。' : '导入音视频或粘贴链接，完成的项目会保留在这里。') + '</p></div>';
     return;
   }
-  jobListEl.innerHTML = jobs.map((job) => {
+  jobListEl.innerHTML = visibleJobs.map((job) => {
     const active = currentJob && currentJob.id === job.id ? ' active' : '';
     const canDelete = true;
     const percent = Math.round((job.progress || 0) * 100);
@@ -1347,7 +1349,7 @@ function renderJobList() {
     const dlInfo = (job.status === 'downloading' && job.download_info)
       ? `<div class="meta">下载: ${job.download_info.percent || 0}%${job.download_info.speed ? ' | ' + escapeHtml(job.download_info.speed) : ''}${job.download_info.eta ? ' | ETA ' + escapeHtml(job.download_info.eta) : ''}</div>`
       : '';
-    const outputKinds = EDIT_STATES.has(job.status)
+    const outputKinds = job.status === 'downloaded' ? [['media', '原视频']] : EDIT_STATES.has(job.status)
       ? [['srt', 'SRT'], ['ass', 'ASS'], ['transcript', 'TXT']].concat(job.status === 'done' ? [['mp4', 'MP4']] : [])
       : [];
     const outputLinks = outputKinds.length
@@ -1374,6 +1376,7 @@ function renderJobList() {
 }
 
 async function selectJob(jobId) {
+  if (!document.querySelector('#subscriptionsView').classList.contains('is-hidden')) setVisible(importView);
   if (currentJob && currentJob.id !== jobId) stopPreviewPlayback({ unload: true });
   const local = jobs.find((job) => job.id === jobId);
   currentJob = local || currentJob;
@@ -1389,6 +1392,7 @@ async function selectJob(jobId) {
 }
 
 function renderCurrentJob(job, options = {}) {
+  if (!document.querySelector('#subscriptionsView').classList.contains('is-hidden')) return;
   if (job.id !== translationReviewJobId) {
     translationReviewJobId = job.id;
     dismissedTranslationReviewItems = new Set();
@@ -1400,7 +1404,8 @@ function renderCurrentJob(job, options = {}) {
   renderJobList();
   const keepWorkbenchForPostprocess = currentJob && currentJob.id === job.id
     && (job.status === 'translating' || job.status === 'proofreading');
-  if (EDIT_STATES.has(job.status) || keepWorkbenchForPostprocess) showEditor(job, options);
+  if (job.status === 'downloaded') showDownloadedJob(job);
+  else if (EDIT_STATES.has(job.status) || keepWorkbenchForPostprocess) showEditor(job, options);
   else showProcessing(job);
 }
 
@@ -1433,13 +1438,14 @@ function showImportView(options = {}) {
   const uploadTabBtn = document.querySelector('.tab-btn[data-tab="upload"]');
   if (uploadTabBtn) uploadTabBtn.click();
   if (!options.preserveError) importErrorEl.textContent = '';
+  importView.dataset.shellMode = options.shellMode || 'home';
   setVisible(importView);
   renderJobList();
 }
 
 function resetImportMode() {
   rerunDraftJob = null;
-  importTitleEl.textContent = '任务管理';
+  importTitleEl.textContent = '新建转写任务';
   rerunSourceEl.textContent = '';
   fileInput.disabled = false;
   if (rerunParamsEl) rerunParamsEl.style.display = 'none';
@@ -1708,6 +1714,7 @@ function showRerunDraft(job) {
   rerunParamsEl.style.display = '';
   uploadBtn.textContent = '开始重跑';
   importErrorEl.textContent = '';
+  importView.dataset.shellMode = 'create';
   setVisible(importView);
   renderJobList();
 }
@@ -1744,11 +1751,20 @@ async function startRerunDraft() {
 }
 
 function setVisible(view) {
-  importView.classList.toggle('is-hidden', view !== importView);
-  processingView.classList.toggle('is-hidden', view !== processingView);
-  workbench.classList.toggle('is-hidden', view !== workbench);
-  aiSettingsView.classList.toggle('is-hidden', view !== aiSettingsView);
+  document.querySelectorAll('section.content > .view').forEach((item) => item.classList.toggle('is-hidden', item !== view));
+  if (window.updateShell) window.updateShell(view);
 }
+
+function showDownloadedJob(job) {
+  stopPreviewPlayback();
+  stopSubtitleSyncPolling();
+  document.querySelector('#downloadedName').textContent = job.media_name;
+  document.querySelector('#downloadedPath').value = job.input_path;
+  document.querySelector('#downloadedMediaLink').href = apiUrl(`api/jobs/${job.id}/download?kind=media`);
+  setVisible(document.querySelector('#downloadedView'));
+}
+document.querySelector('#backFromDownloaded').addEventListener('click', () => showImportView());
+document.querySelector('#transcribeDownloaded').addEventListener('click', () => { if (currentJob) showRerunDraft(currentJob); });
 
 async function cancelJobById(jobId) {
   try {
@@ -5438,6 +5454,7 @@ function parameterSummary(job) {
 }
 
 function tokenUsageSummary(job) {
+  if (job.download_only) return job.status === 'downloaded' ? '视频已保存 · 未转录' : '视频下载任务';
   const usage = job.usage || {};
   const inference = job.inference || {};
   if (isWhisperJob(job)) {
@@ -5484,13 +5501,14 @@ function elapsedJobSeconds(job) {
 }
 
 function statusClass(status) {
-  return 'pill ' + (status === 'failed' ? 'bad' : status === 'done' ? 'ok' : status === 'cancelled' ? 'muted' : '');
+  return 'pill ' + (status === 'failed' ? 'bad' : ['done', 'downloaded'].includes(status) ? 'ok' : status === 'cancelled' ? 'muted' : '');
 }
 
 function statusLabel(status) {
   const labels = {
     queued: '排队中',
     downloading: '下载中',
+    downloaded: '已下载',
     loading_model: '加载模型',
     transcribing: '转写中',
     postprocessing: '处理中',

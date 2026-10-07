@@ -41,3 +41,9 @@ dist/
 
 # Runtime config (LLM profiles contain API keys).
 config/
+
+# Pytest scratch directories and local cookie-database copies.
+pytest-of-*/
+tmp*.sqlite
+tmp*.sqlite-*
+-live.cjs

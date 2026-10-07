@@ -19,7 +19,10 @@ echo.
 
 set WHISPER_DEVICE=cuda
 set WHISPER_DTYPE=float16
-set WHISPER_LANGUAGE=en
+rem Leave unset for automatic language detection. Set to ja/en/zh to force a language.
+set WHISPER_LANGUAGE=
+set WHISPER_LANGUAGE_ARGS=
+if defined WHISPER_LANGUAGE set WHISPER_LANGUAGE_ARGS=--language %WHISPER_LANGUAGE%
 set WHISPER_MODEL=large-v3-turbo
 if exist "models\faster-whisper-large-v3-turbo\config.json" set WHISPER_MODEL=models\faster-whisper-large-v3-turbo
 set WHISPER_BEAM_SIZE=5
@@ -44,7 +47,7 @@ start "" /min powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   --port 7860 ^
   --device %WHISPER_DEVICE% ^
   --dtype %WHISPER_DTYPE% ^
-  --language %WHISPER_LANGUAGE% ^
+  %WHISPER_LANGUAGE_ARGS% ^
   --beam-size %WHISPER_BEAM_SIZE% ^
   --max-new-tokens 8192 ^
   %TRANSLATOR_ARGS%

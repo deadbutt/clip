@@ -5,6 +5,7 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -302,6 +303,10 @@ def download_with_yt_dlp(
             # this parent decodes UTF-8, which turns CJK video titles into mojibake.
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
+            # PyInstaller does not use Python's writable-temp fallback. Match
+            # Python when the inherited Windows TEMP directory is unavailable.
+            "TEMP": tempfile.gettempdir(),
+            "TMP": tempfile.gettempdir(),
         }
         proc = subprocess.Popen(
             cmd,
