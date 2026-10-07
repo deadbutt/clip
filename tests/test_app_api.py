@@ -285,12 +285,15 @@ class UploadWhitelistTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
-            client = TestClient(app)
-            resp = client.post(
-                "/api/jobs",
-                files={"file": ("video.MKV", b"video-bytes", "application/octet-stream")},
-            )
-            self.assertEqual(resp.status_code, 200)
+            try:
+                client = TestClient(app)
+                resp = client.post(
+                    "/api/jobs",
+                    files={"file": ("video.MKV", b"video-bytes", "application/octet-stream")},
+                )
+                self.assertEqual(resp.status_code, 200)
+            finally:
+                app.state.manager.shutdown()
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")

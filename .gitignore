@@ -46,4 +46,5 @@ config/
 pytest-of-*/
 tmp*.sqlite
 tmp*.sqlite-*
+tmp*/
 -live.cjs

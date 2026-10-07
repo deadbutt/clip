@@ -292,6 +292,7 @@ def test_firefox_cookie_header_reads_matching_domain_without_logging_values(tmp_
             (".example.com", "ignored", "should-not-leak"),
         ])
     monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
     header = _firefox_cookie_header("https://api.bilibili.com/x/web-interface/nav")
     assert header == "SESSDATA=secret-cookie"
 
