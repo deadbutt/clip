@@ -2498,6 +2498,22 @@ header .header-action:hover:not(:disabled) { border-color: #80bdb1; background: 
   box-shadow: 0 18px 42px rgba(29, 60, 56, .09);
   overflow: hidden;
 }
+
+.task-thumb {
+  float: left;
+  width: 118px;
+  height: 68px;
+  margin: 0 14px 8px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  color: #7aa8a2;
+  background: linear-gradient(135deg, #e8f4f1, #d5ebe7);
+  font-size: 24px;
+}
+.task-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.file-drop-zone.is-dragging { border-color: var(--teal); background: #eaf8f5; transform: translateY(-1px); }
 .ai-settings-sidebar {
   display: flex;
   flex-direction: column;
@@ -4043,6 +4059,7 @@ header .header-action:hover:not(:disabled) { border-color: #80bdb1; background: 
   justify-content: space-between;
   gap: 12px;
 }
+.task-item::after { content: ""; display: block; clear: both; }
 
 .task-name {
   min-width: 0;

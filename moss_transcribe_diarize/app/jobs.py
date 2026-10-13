@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import difflib
+import hashlib
 import json
 import logging
 import queue
@@ -81,6 +83,52 @@ _TAIL_FRAME_SECONDS = 0.02
 _TAIL_ANALYSIS_RATE = 8000
 _TAIL_MAX_EXTENSION = 0.80
 _TAIL_FALLBACK_PADDING = 0.50
+
+
+def _make_media_thumbnail(media_path: str | Path, output_path: str | Path) -> bool:
+    """Extract a small poster frame for the task library."""
+    media_path = Path(media_path)
+    output_path = Path(output_path)
+    if not media_path.is_file() or output_path.is_file():
+        return output_path.is_file()
+    tools = detect_ffmpeg()
+    if not tools.ffmpeg:
+        return False
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix('.tmp.jpg')
+    try:
+        result = subprocess.run(
+            [tools.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-ss', '0',
+             '-i', str(media_path), '-frames:v', '1', '-vf', 'scale=640:-2', str(temporary)],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0 or not temporary.is_file():
+            return False
+        temporary.replace(output_path)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _sha256_file(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Return a streaming SHA-256 digest without loading a video into memory."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _safe_media_stem(name: str) -> str:
+    stem = Path(str(name or "media")).stem
+    stem = _DISPLAY_NAME_ILLEGAL_RE.sub(" ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip().strip(".")
+    return (stem[:80] or "media")
 
 
 class _AppendFileHandler(logging.Handler):
@@ -609,6 +657,7 @@ class JobRecord:
     translation_info: dict[str, Any] = field(default_factory=dict)
     proofread_info: dict[str, Any] = field(default_factory=dict)
     alignment_info: dict[str, Any] = field(default_factory=dict)
+    publish_info: dict[str, Any] = field(default_factory=dict)
     hotwords: str = ""
     source: str = "upload"
     source_url: str | None = None
@@ -623,6 +672,10 @@ class JobRecord:
     retry_count: int = 0
     phase_times: dict[str, float] = field(default_factory=dict)
     error_kind: str | None = None
+    # 媒体库引用。input_path 指向 videos/ 中的唯一媒体文件，任务目录不再保存原视频。
+    media_id: str = ""
+    media_hash: str = ""
+    thumbnail_path: str | None = None
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -704,6 +757,7 @@ class JobRecord:
             "mp4": str(self.output_path),
             "clips": str(self.clips_dir),
             "media": self.input_path,
+            "thumbnail": self.thumbnail_path if self.thumbnail_path and Path(self.thumbnail_path).is_file() else None,
         }
         data["backend"] = self.backend
         data["translation"] = {
@@ -718,6 +772,7 @@ class JobRecord:
             **self.alignment_info,
             "result_available": self.alignment_path.exists(),
         }
+        data["publish"] = dict(self.publish_info)
         data["source"] = self.source
         if self.source_url:
             data["source_url"] = self.source_url
@@ -762,12 +817,22 @@ class JobRecord:
             translation_info=dict(data.get("translation_info") or data.get("translation") or {}),
             proofread_info=dict(data.get("proofread_info") or data.get("proofread") or {}),
             alignment_info=dict(data.get("alignment_info") or data.get("alignment") or {}),
+            publish_info=dict(data.get("publish_info") or data.get("publish") or {}),
             hotwords=str(data.get("hotwords") or ""),
             source=str(data.get("source") or "upload"),
             source_url=data.get("source_url"),
             cookies_config=dict(data.get("cookies_config") or {}),
             download_info=dict(data.get("download_info") or {}),
+            force_transcribe=bool(data.get("force_transcribe", False)),
+            transcript_source=data.get("transcript_source"),
+            source_subtitles=list(data.get("source_subtitles") or []),
             subtitle_file_stamps=dict(data.get("subtitle_file_stamps") or {}),
+            retry_count=int(data.get("retry_count") or 0),
+            phase_times={str(k): float(v) for k, v in dict(data.get("phase_times") or {}).items()},
+            error_kind=data.get("error_kind"),
+            media_id=str(data.get("media_id") or ""),
+            media_hash=str(data.get("media_hash") or ""),
+            thumbnail_path=data.get("thumbnail_path"),
         )
 
 
@@ -788,8 +853,11 @@ class JobManager(ClipOperationsMixin):
         pyannote_model: str = "pyannote/speaker-diarization-3.1",
         diarization_device: str = "auto",
     ):
-        self.runs_dir = Path(runs_dir)
+        self.runs_dir = Path(runs_dir).resolve()
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.videos_dir = self.runs_dir.parent / "videos"
+        self.videos_dir.mkdir(parents=True, exist_ok=True)
+        self._media_lock = threading.Lock()
         self.model_runner = model_runner
         self.prompt = prompt
         self.max_length = max_length
@@ -839,6 +907,192 @@ class JobManager(ClipOperationsMixin):
         self._worker = threading.Thread(target=self._worker_loop, name="mtd-job-worker", daemon=True)
         self._worker.start()
 
+    # ------------------------------------------------------------ 媒体库
+
+    def _media_cover_path(self, media_path: str | Path) -> Path:
+        path = Path(media_path)
+        return path.with_name(f"{path.stem}.cover.jpg")
+
+    def _media_meta_path(self, media_path: str | Path) -> Path:
+        path = Path(media_path)
+        return path.with_name(f"{path.stem}.media.json")
+
+    def _find_media_by_hash(self, digest: str) -> Path | None:
+        for path in self.videos_dir.glob(f"{digest}_*"):
+            if path.is_file() and not path.name.endswith((".cover.jpg", ".media.json")):
+                return path
+        return None
+
+    def _register_media(
+        self,
+        source_path: str | Path,
+        *,
+        media_name: str | None = None,
+    ) -> tuple[Path, dict[str, Any]]:
+        """Put a media file in videos/ and return its canonical path and metadata.
+
+        Source files are preserved; callers clean up their own staging files only
+        after the new task reference has been persisted.
+        A content hash makes repeated imports point at the same physical file.
+        """
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(str(source))
+        with self._media_lock:
+            digest = _sha256_file(source)
+            existing = self._find_media_by_hash(digest)
+            if existing is None:
+                suffix = source.suffix.lower() or ".media"
+                safe_name = _safe_media_stem(media_name or source.name)
+                destination = self.videos_dir / f"{digest}_{safe_name}{suffix}"
+                temporary = destination.with_name(f".{uuid.uuid4().hex}.importing")
+                try:
+                    shutil.copyfile(source, temporary)
+                    temporary.replace(destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                existing = destination
+            meta_path = self._media_meta_path(existing)
+            previous = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+            metadata = {
+                **previous,
+                "media_id": digest[:16],
+                "media_hash": digest,
+                "name": previous.get("name") or media_name or source.name,
+                "filename": existing.name,
+                "path": str(existing),
+                "size": existing.stat().st_size,
+                "created_at": previous.get("created_at") or time.time(),
+                "duration_sec": previous.get("duration_sec") or probe_media_duration(existing),
+            }
+            cover = self._media_cover_path(existing)
+            _make_media_thumbnail(existing, cover)
+            metadata["thumbnail"] = str(cover) if cover.is_file() else None
+            self._media_meta_path(existing).write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            return existing, metadata
+
+    def _attach_media(self, job: JobRecord, media_path: str | Path, metadata: dict[str, Any]) -> None:
+        job.input_path = str(media_path)
+        job.media_id = str(metadata.get("media_id") or "")
+        job.media_hash = str(metadata.get("media_hash") or "")
+        job.thumbnail_path = metadata.get("thumbnail")
+        self._save_job(job)
+
+    def _ensure_job_thumbnail(self, job: JobRecord) -> None:
+        media_path = Path(job.input_path)
+        if not media_path.is_file():
+            return
+        cover = self._media_cover_path(media_path)
+        if not cover.is_file():
+            _make_media_thumbnail(media_path, cover)
+        if cover.is_file() and job.thumbnail_path != str(cover):
+            job.thumbnail_path = str(cover)
+            self._save_job(job)
+
+    def cover_candidates(self, job_id: str, count: int = 6) -> list[dict[str, Any]]:
+        """Return preview frames for choosing a Bilibili投稿封面."""
+        job = self.get_job(job_id)
+        media_path = Path(job.input_path)
+        if not media_path.is_file():
+            raise FileNotFoundError(str(media_path))
+        tools = detect_ffmpeg()
+        if not tools.ffmpeg:
+            raise RuntimeError("FFmpeg 不可用，无法截取封面候选帧")
+        duration = float(probe_media_duration(media_path) or 0.0)
+        if duration <= 0:
+            timestamps = [0.0]
+        else:
+            count = max(1, min(int(count), 8))
+            timestamps = [duration * index / count for index in range(count)]
+        candidates: list[dict[str, Any]] = []
+        for timestamp in timestamps:
+            try:
+                result = subprocess.run(
+                    [tools.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{timestamp:.3f}',
+                     '-i', str(media_path), '-frames:v', '1', '-vf', 'scale=640:-2', '-f', 'image2pipe',
+                     '-vcodec', 'mjpeg', 'pipe:1'], capture_output=True, timeout=30,
+                )
+                if result.returncode == 0 and result.stdout:
+                    candidates.append({
+                        "timestamp": round(timestamp, 3),
+                        "image": "data:image/jpeg;base64," + base64.b64encode(result.stdout).decode("ascii"),
+                    })
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return candidates
+
+    def set_cover_frame(self, job_id: str, timestamp: float) -> Path:
+        job = self.get_job(job_id)
+        media_path = Path(job.input_path)
+        if not media_path.is_file():
+            raise FileNotFoundError(str(media_path))
+        tools = detect_ffmpeg()
+        if not tools.ffmpeg:
+            raise RuntimeError("FFmpeg 不可用，无法生成封面")
+        target = self._media_cover_path(media_path)
+        temporary = target.with_name(f".{target.name}.{job.id}.tmp.jpg")
+        result = subprocess.run(
+            [tools.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{max(0.0, float(timestamp)):.3f}',
+             '-i', str(media_path), '-frames:v', '1', '-vf', 'scale=640:-2', str(temporary)],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0 or not temporary.is_file():
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError("无法从视频生成封面")
+        temporary.replace(target)
+        job.thumbnail_path = str(target)
+        self._save_job(job)
+        return target
+
+    def finalize_uploaded_job(self, job: JobRecord, staged_path: str | Path | None = None) -> JobRecord:
+        """Move a completed upload into videos/ before it is queued."""
+        source = Path(staged_path or job.input_path)
+        media_path, metadata = self._register_media(source, media_name=job.media_name)
+        self._attach_media(job, media_path, metadata)
+        source.unlink(missing_ok=True)
+        return job
+
+    def list_media(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for path in sorted(self.videos_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if not path.is_file() or path.name.endswith((".cover.jpg", ".media.json")):
+                continue
+            try:
+                digest = path.name.split("_", 1)[0]
+                meta_path = self._media_meta_path(path)
+                data = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+                data.update({
+                    "media_id": str(data.get("media_id") or digest[:16]),
+                    "media_hash": str(data.get("media_hash") or digest),
+                    "filename": path.name,
+                    "path": str(path),
+                    "thumbnail": str(self._media_cover_path(path)) if self._media_cover_path(path).is_file() else None,
+                    "size": path.stat().st_size,
+                })
+                items.append(data)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return items
+
+    def media_path(self, media_id: str) -> Path:
+        for item in self.list_media():
+            if str(item.get("media_id")) == str(media_id) or str(item.get("media_hash")) == str(media_id):
+                path = Path(str(item.get("path") or ""))
+                if path.is_file():
+                    return path
+        raise FileNotFoundError(media_id)
+
+    def media_thumbnail_path(self, media_id: str) -> Path:
+        path = self.media_path(media_id)
+        cover = self._media_cover_path(path)
+        if not cover.is_file():
+            _make_media_thumbnail(path, cover)
+        if not cover.is_file():
+            raise FileNotFoundError(media_id)
+        return cover
+
     def create_job_from_file(
         self,
         source_path: str | Path,
@@ -862,11 +1116,9 @@ class JobManager(ClipOperationsMixin):
         )
         job_id = uuid.uuid4().hex[:12]
         source_path = Path(source_path)
-        suffix = source_path.suffix or ".media"
         job_dir = self.runs_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=False)
-        input_path = job_dir / f"input{suffix}"
-        shutil.copyfile(source_path, input_path)
+        input_path, metadata = self._register_media(source_path, media_name=media_name or source_path.name)
         job = JobRecord(
             id=job_id,
             status="queued",
@@ -884,6 +1136,9 @@ class JobManager(ClipOperationsMixin):
             speaker_count=self._resolve_speaker_count(speaker_count),
             diarization_backend=self._resolve_diarization_backend(diarization_backend),
             hotwords=str(hotwords or ""),
+            media_id=str(metadata.get("media_id") or ""),
+            media_hash=str(metadata.get("media_hash") or ""),
+            thumbnail_path=metadata.get("thumbnail"),
         )
         self._jobs[job.id] = job
         self._save_job(job)
@@ -914,7 +1169,9 @@ class JobManager(ClipOperationsMixin):
         suffix = Path(filename).suffix or ".media"
         job_dir = self.runs_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=False)
-        input_path = job_dir / f"input{suffix}"
+        # Upload bytes are staged under the task until the request finishes;
+        # finalize_uploaded_job() then deduplicates and copies them to videos/.
+        input_path = job_dir / f".uploading{suffix}"
         job = JobRecord(
             id=job_id,
             status="queued",
@@ -978,7 +1235,7 @@ class JobManager(ClipOperationsMixin):
             status="queued",
             progress=0.0,
             media_name=_sanitize_display_name(media_name or url[:80]),
-            input_path=str(job_dir / "input.media"),
+            input_path=str(job_dir / ".download.media"),
             job_dir=str(job_dir),
             inference_prompt=options["prompt"],
             max_length=options["max_length"],
@@ -1116,6 +1373,93 @@ class JobManager(ClipOperationsMixin):
         self._emit_job_event(job, force=True)
         return job
 
+    def cancel_jobs(self, job_ids: list[str]) -> dict[str, Any]:
+        cancelled: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for raw_id in dict.fromkeys(str(item) for item in job_ids):
+            try:
+                self.cancel_job(raw_id)
+                cancelled.append(raw_id)
+            except KeyError:
+                skipped.append({"id": raw_id, "reason": "任务不存在"})
+            except RuntimeError as exc:
+                skipped.append({"id": raw_id, "reason": str(exc)})
+        return {"cancelled": cancelled, "skipped": skipped, "queue": self.queue_info()}
+
+    def publish_draft(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        draft = dict(job.publish_info or {})
+        if not draft:
+            title = Path(job.media_name or "").stem.strip() or "未命名视频"
+            draft = {
+                "title": title[:80],
+                "description": "",
+                "tags": [],
+                "privacy": "public",
+                "tid": 0,
+                "copyright": "original",
+                "source": "",
+                "dynamic": "",
+                "upload_variant": "processed" if job.output_path.is_file() else "original",
+                "status": "draft",
+            }
+            job.publish_info = draft
+            self._save_job(job)
+        return draft
+
+    def update_publish_draft(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        current = self.publish_draft(job_id)
+        if current.get("status") == "uploading":
+            raise ValueError("视频投稿进行中，暂时不能修改草稿")
+        title = str(payload.get("title", current.get("title") or "")).strip()
+        if not title:
+            raise ValueError("发布标题不能为空")
+        tags = payload.get("tags", current.get("tags") or [])
+        if isinstance(tags, str):
+            tags = [item.strip() for item in re.split(r"[,，\s]+", tags) if item.strip()]
+        if not isinstance(tags, list):
+            raise ValueError("tags 必须是列表或逗号分隔文本")
+        tags = list(dict.fromkeys(str(item).strip() for item in tags if str(item).strip()))
+        if not tags or len(tags) > 10 or any(len(item) > 20 for item in tags):
+            raise ValueError("B 站投稿需要 1–10 个标签，每个标签不超过 20 个字符")
+        try:
+            tid = int(payload.get("tid", current.get("tid") or 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tid 必须是有效的 B 站分区编号") from exc
+        privacy = str(payload.get("privacy", current.get("privacy") or "public"))
+        if privacy not in {"public", "private", "unlisted"}:
+            raise ValueError("privacy 必须是 public、private 或 unlisted")
+        copyright_type = str(payload.get("copyright", current.get("copyright") or "original"))
+        if copyright_type not in {"original", "repost"}:
+            raise ValueError("copyright 必须是 original 或 repost")
+        upload_variant = str(payload.get("upload_variant", current.get("upload_variant") or "original"))
+        if upload_variant not in {"original", "processed"}:
+            raise ValueError("upload_variant 必须是 original 或 processed")
+        draft = {
+            **current,
+            "title": title[:80],
+            "description": str(payload.get("description", current.get("description") or "")),
+            "tags": tags,
+            "privacy": privacy,
+            "tid": tid,
+            "copyright": copyright_type,
+            "source": str(payload.get("source", current.get("source") or "")).strip()[:200],
+            "dynamic": str(payload.get("dynamic", current.get("dynamic") or ""))[:233],
+            "upload_variant": upload_variant,
+            "updated_at": time.time(),
+        }
+        job.publish_info = draft
+        self._touch(job, error=None)
+        return draft
+
+    def update_publish_status(self, job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Persist the platform upload state without mixing it into task state."""
+        job = self.get_job(job_id)
+        job.publish_info = {**(job.publish_info or {}), **patch, "updated_at": time.time()}
+        self._touch(job, error=None)
+        return dict(job.publish_info)
+
     # ------------------------------------------------------------ 热词词表
 
     @property
@@ -1208,7 +1552,11 @@ class JobManager(ClipOperationsMixin):
         )
 
     def list_jobs(self) -> list[JobRecord]:
-        return sorted(self._jobs.values(), key=lambda job: job.updated_at, reverse=True)
+        jobs = sorted(self._jobs.values(), key=lambda job: job.updated_at, reverse=True)
+        # Backfill posters for existing jobs created before thumbnail support.
+        for job in jobs:
+            self._ensure_job_thumbnail(job)
+        return jobs
 
     def get_job(self, job_id: str) -> JobRecord:
         try:
@@ -2644,6 +2992,8 @@ class JobManager(ClipOperationsMixin):
             if job.source == "url" and job.source_url and not Path(job.input_path).exists():
                 self._download_phase(job)
 
+            self._ensure_job_thumbnail(job)
+
             if job.download_only:
                 if not Path(job.input_path).is_file():
                     raise FileNotFoundError(job.input_path)
@@ -2956,7 +3306,23 @@ class JobManager(ClipOperationsMixin):
         else:
             # 标题比下载先到时 on_title 已写入，这里只在没拿到标题时回退文件名。
             job.media_name = downloaded.name
-        job.input_path = str(downloaded)
+        media_path, metadata = self._register_media(downloaded, media_name=job.media_name)
+        self._attach_media(job, media_path, metadata)
+        if result.thumbnail and result.thumbnail.is_file():
+            try:
+                from PIL import Image
+                with Image.open(result.thumbnail) as source:
+                    image = source.convert("RGB")
+                    cover = self._media_cover_path(media_path)
+                    temporary = cover.with_name(f".{cover.name}.{job.id}.tmp.jpg")
+                    image.save(temporary, format="JPEG", quality=92, optimize=True)
+                    temporary.replace(cover)
+                    job.thumbnail_path = str(cover)
+            except Exception:
+                logger.debug("download thumbnail conversion failed", exc_info=True)
+        downloaded.unlink(missing_ok=True)
+        if result.thumbnail:
+            result.thumbnail.unlink(missing_ok=True)
         job.download_info = {"completed": True, "filename": downloaded.name}
         job.source_subtitles = list(result.subtitles)
         self._save_job(job)

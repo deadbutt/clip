@@ -71,6 +71,10 @@ def _firefox_cookie_header(url: str) -> str:
         finally:
             if temporary:
                 temporary.unlink(missing_ok=True)
+                # SQLite may create WAL/SHM sidecars even for a read-only copy.
+                # Removing only the main file leaves tmp*.sqlite-wal/.shm behind.
+                temporary.with_name(temporary.name + "-wal").unlink(missing_ok=True)
+                temporary.with_name(temporary.name + "-shm").unlink(missing_ok=True)
     return "; ".join(f"{name}={value}" for name, value in rows if name and value)
 
 

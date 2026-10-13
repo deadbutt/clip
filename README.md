@@ -38,7 +38,7 @@
 
 ```powershell
 uv venv --python 3.12 .venv
-uv pip install -e ".[torch-runtime,diarization]"
+uv pip install -e ".[torch-runtime,diarization,bilibili]"
 ```
 
 可选依赖组：
@@ -47,6 +47,7 @@ uv pip install -e ".[torch-runtime,diarization]"
 | --- | --- |
 | `torch-runtime` | torch / torchaudio / librosa 等运行依赖；demucs 包需另行准备 |
 | `diarization` | pyannote.audio（说话人分离必需） |
+| `bilibili` | B 站扫码登录、视频分片上传和稿件提交 |
 | `flash-attn` | 可选实验依赖；安装它不会自动加速 faster-whisper/CTranslate2，当前默认流程不需要 |
 | `dev` | pytest / Ruff |
 
@@ -95,10 +96,10 @@ DieShang-Workbench/
 
 ```powershell
 uv venv --python 3.12 .venv
-uv pip install -e ".[torch-runtime,diarization]"
+uv pip install -e ".[torch-runtime,diarization,bilibili]"
 ```
 
-再把模型放入 `models/`，把 `tools/llama-server/` 和 `tools/ffmpeg/` 准备好，双击 `start.bat`。这些命令是开发安装入口，**并不保证复现开发机的 CUDA wheel 和全部版本**；正式发布应固定经过验收的依赖及 torch/torchaudio 下载源。也可先验证随包的 `uv.lock`，再使用 `uv sync --locked --extra torch-runtime --extra diarization`，不能把未验证的锁文件当成当前环境快照。
+再把模型放入 `models/`，把 `tools/llama-server/` 和 `tools/ffmpeg/` 准备好，双击 `start.bat`。这些命令是开发安装入口，**并不保证复现开发机的 CUDA wheel 和全部版本**；正式发布应固定经过验收的依赖及 torch/torchaudio 下载源。也可先验证随包的 `uv.lock`，再使用 `uv sync --locked --extra torch-runtime --extra diarization --extra bilibili`，不能把未验证的锁文件当成当前环境快照。
 
 当前 `start.bat` 使用 NVIDIA CUDA / float16，默认自动检测语言。已知日语素材可明确指定 `--language ja`；CPU 用户应按启动一节手动指定设备。HY 的 llama.cpp 后端独立于 Whisper，`--device cpu` 不会自动把 HY 改成 CPU/Vulkan。
 

@@ -13,6 +13,7 @@ const {
   normalizeQueuedClip
 } = window.MtdWorkbenchUtils;
 const fileInput = document.querySelector('#file');
+const fileDropZone = document.querySelector('.file-drop-zone');
 const importTitleEl = document.querySelector('#importTitle');
 const rerunSourceEl = document.querySelector('#rerunSource');
 const promptInput = document.querySelector('#prompt');
@@ -54,6 +55,40 @@ const llmServiceSummaryStateEl = document.querySelector('#llmServiceSummaryState
 const openClipsBtn = document.querySelector('#openClips');
 const closeClipsBtn = document.querySelector('#closeClips');
 const clipsModal = document.querySelector('#clipsModal');
+const openPublishBtn = document.querySelector('#openPublish');
+const closePublishBtn = document.querySelector('#closePublish');
+const cancelPublishBtn = document.querySelector('#cancelPublish');
+const savePublishBtn = document.querySelector('#savePublish');
+const submitPublishBtn = document.querySelector('#submitPublish');
+const publishModal = document.querySelector('#publishModal');
+const publishTitleInput = document.querySelector('#publishTitle');
+const publishDescriptionInput = document.querySelector('#publishDescription');
+const publishTagsInput = document.querySelector('#publishTags');
+const publishTagsHint = document.querySelector('#publishTagsHint');
+const publishCategorySelect = document.querySelector('#publishCategory');
+const publishCopyrightSelect = document.querySelector('#publishCopyright');
+const publishSourceInput = document.querySelector('#publishSource');
+const publishSourceLabel = document.querySelector('#publishSourceLabel');
+const publishVariantSelect = document.querySelector('#publishVariant');
+const publishDynamicInput = document.querySelector('#publishDynamic');
+const publishCoverPreview = document.querySelector('#publishCoverPreview');
+const publishCoverStatus = document.querySelector('#publishCoverStatus');
+const publishCoverInput = document.querySelector('#publishCoverInput');
+const publishCoverCandidates = document.querySelector('#publishCoverCandidates');
+const publishStatusEl = document.querySelector('#publishStatus');
+const bilibiliAuthStatusEl = document.querySelector('#bilibiliAuthStatus');
+const startBilibiliLoginBtn = document.querySelector('#startBilibiliLogin');
+const logoutBilibiliBtn = document.querySelector('#logoutBilibili');
+const bilibiliQrPanel = document.querySelector('#bilibiliQrPanel');
+const bilibiliQrImage = document.querySelector('#bilibiliQrImage');
+const bilibiliQrStatus = document.querySelector('#bilibiliQrStatus');
+const publishResultLink = document.querySelector('#publishResultLink');
+let bilibiliLoginSession = '';
+let bilibiliLoginTimer = 0;
+let bilibiliLoginPolling = false;
+let publishStateTimer = 0;
+let publishPollInFlight = false;
+let publishAuthLoggedIn = false;
 const pendingListEl = document.querySelector('#pendingList');
 const saveBtn = document.querySelector('#save');
 const syncSubtitlesBtn = document.querySelector('#syncSubtitles');
@@ -77,6 +112,15 @@ const workbench = document.querySelector('#workbench');
 const runtimeEl = document.querySelector('#runtime');
 const jobListEl = document.querySelector('#jobList');
 const jobCountEl = document.querySelector('#jobCount');
+const queueSummaryEl = document.querySelector('#queueSummary');
+const queueToggleBtn = document.querySelector('#queueToggle');
+const batchModeToggleBtn = document.querySelector('#batchModeToggle');
+const batchActionsEl = document.querySelector('#batchActions');
+const batchSelectionSummaryEl = document.querySelector('#batchSelectionSummary');
+const batchOverallProgressEl = document.querySelector('#batchOverallProgress');
+const batchCancelBtn = document.querySelector('#batchCancel');
+const batchRetryBtn = document.querySelector('#batchRetry');
+const batchClearBtn = document.querySelector('#batchClear');
 const importErrorEl = document.querySelector('#importError');
 const processTitleEl = document.querySelector('#processTitle');
 const processNameEl = document.querySelector('#processName');
@@ -214,6 +258,8 @@ let proofreadPollTimer = null;
 let alignmentResult = null;
 let alignmentPollTimer = null;
 let jobs = [];
+let batchMode = false;
+const selectedBatchJobs = new Set();
 let currentJob = null;
 let rerunDraftJob = null;
 let pendingUploads = [];
@@ -446,11 +492,12 @@ function scheduleLayoutFit() {
   });
 }
 
-function openSettings() { settingsModal.classList.remove('is-hidden'); }
+function openSettings() { closePublish(); settingsModal.classList.remove('is-hidden'); }
 function closeSettings() { settingsModal.classList.add('is-hidden'); }
 function openAiSettings() {
   closeSettings();
   closeTranslate();
+  closePublish();
   closeClips();
   proofreadModal.classList.add('is-hidden');
   stopAlignmentPolling();
@@ -463,18 +510,321 @@ function closeAiSettings() {
   else showImportView({ clearDraft: false });
 }
 function openTranslate() {
+  closePublish();
   loadLlmProfiles();
   updateTranslateAction();
   translateModal.classList.remove('is-hidden');
 }
 function closeTranslate() { translateModal.classList.add('is-hidden'); }
 function openClips() {
+  closePublish();
   ensureClipQueueForJob();
   updateClipActions();
   updateTimelineClipRange();
   clipsModal.classList.remove('is-hidden');
 }
 function closeClips() { clipsModal.classList.add('is-hidden'); }
+
+function closePublish() {
+  publishModal?.classList.add('is-hidden');
+  if (bilibiliLoginTimer) clearInterval(bilibiliLoginTimer);
+  if (publishStateTimer) clearInterval(publishStateTimer);
+  bilibiliLoginTimer = 0;
+  publishStateTimer = 0;
+}
+
+function publishPayload() {
+  const tags = publishTagsInput.value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+  return {
+    title: publishTitleInput.value,
+    description: publishDescriptionInput.value,
+    tags,
+    tid: Number(publishCategorySelect.value || 0),
+    copyright: publishCopyrightSelect.value,
+    source: publishSourceInput.value,
+    upload_variant: publishVariantSelect.value,
+    dynamic: publishDynamicInput.value,
+  };
+}
+
+function updatePublishTagsHint() {
+  if (!publishTagsHint || !publishTagsInput) return;
+  const tags = publishTagsInput.value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+  const unique = [...new Set(tags)];
+  publishTagsHint.textContent = unique.length
+    ? `已识别 ${unique.length} 个标签 · 最多 10 个 · 每个最多 20 字`
+    : '用空格、英文逗号或中文逗号分隔，最多 10 个，每个最多 20 字';
+  publishTagsHint.classList.toggle('error', unique.length > 10 || unique.some((item) => item.length > 20));
+}
+
+async function publishRequest(url, options = {}) {
+  const response = await fetch(apiUrl(url), { cache: 'no-store', ...options });
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok) throw new Error(data.detail || '请求失败');
+  return data;
+}
+
+function renderPublishState(data) {
+  const status = data.status || 'draft';
+  const phaseNames = { preparing: '正在准备投稿', uploading: '正在分片上传', submitting: '正在提交稿件', complete: '投稿完成' };
+  if (status === 'uploading') {
+    const percent = Math.round(Number(data.progress || 0) * 100);
+    publishStatusEl.textContent = `${phaseNames[data.phase] || '正在投稿'} · ${percent}%`;
+  } else if (status === 'submitted') {
+    publishStatusEl.textContent = data.bvid
+      ? `已提交到 B 站：${data.bvid} · 等待平台审核，公开状态以创作中心为准。`
+      : '已提交到 B 站，等待平台审核；公开状态以创作中心为准。';
+  } else if (status === 'interrupted') {
+    publishStatusEl.textContent = data.error || '上次投稿中断，请先到 B 站创作中心核对。';
+  } else if (status === 'failed') {
+    publishStatusEl.textContent = `投稿失败：${data.error || '未知错误'}`;
+  } else {
+    publishStatusEl.textContent = data.updated_at ? '本地草稿已保存' : '填写信息后可以先保存草稿';
+  }
+  if (data.url && status === 'submitted') {
+    publishResultLink.href = data.url;
+    publishResultLink.classList.remove('is-hidden');
+  } else publishResultLink.classList.add('is-hidden');
+  submitPublishBtn.disabled = !publishAuthLoggedIn || status === 'uploading';
+  submitPublishBtn.textContent = status === 'submitted' ? '再次投稿' : status === 'uploading' ? '正在投稿…' : '保存并投稿';
+  if (status !== 'uploading' && publishStateTimer) {
+    clearInterval(publishStateTimer);
+    publishStateTimer = 0;
+  }
+}
+
+async function refreshPublishStatus() {
+  if (!currentJob || publishPollInFlight) return;
+  publishPollInFlight = true;
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/publish`);
+    currentJob.publish = data;
+    currentJob.publish_info = data;
+    renderPublishState(data);
+  } catch (error) {
+    publishStatusEl.textContent = error.message || '读取投稿状态失败';
+  } finally {
+    publishPollInFlight = false;
+  }
+}
+
+async function loadPublishCategories(selected = 0) {
+  try {
+    const { categories } = await publishRequest('api/bilibili/categories');
+    publishCategorySelect.replaceChildren(new Option('选择投稿分区', ''));
+    for (const category of categories || []) {
+      publishCategorySelect.add(new Option(category.name, String(category.tid)));
+    }
+    publishCategorySelect.value = selected ? String(selected) : '';
+  } catch (error) {
+    publishCategorySelect.replaceChildren(new Option(error.message || '无法读取投稿分区', ''));
+  }
+}
+
+function renderBilibiliAuth(data) {
+  publishAuthLoggedIn = Boolean(data.logged_in);
+  if (publishAuthLoggedIn) {
+    bilibiliAuthStatusEl.textContent = data.account ? `已登录：${data.account}` : '已登录 B 站';
+    startBilibiliLoginBtn.classList.add('is-hidden');
+    logoutBilibiliBtn.classList.remove('is-hidden');
+    bilibiliQrPanel.classList.add('is-hidden');
+  } else {
+    bilibiliAuthStatusEl.textContent = data.error || '尚未登录 B 站';
+    startBilibiliLoginBtn.classList.remove('is-hidden');
+    logoutBilibiliBtn.classList.add('is-hidden');
+  }
+  submitPublishBtn.disabled = !publishAuthLoggedIn;
+}
+
+async function refreshBilibiliAuth() {
+  try { renderBilibiliAuth(await publishRequest('api/bilibili/auth')); }
+  catch (error) { bilibiliAuthStatusEl.textContent = error.message || '读取登录状态失败'; }
+}
+
+async function openPublishDraft() {
+  if (!currentJob || RUNNING_STATES.has(currentJob.status)) return;
+  if (publishStateTimer) clearInterval(publishStateTimer);
+  if (bilibiliLoginTimer) clearInterval(bilibiliLoginTimer);
+  publishStateTimer = 0;
+  bilibiliLoginTimer = 0;
+  publishResultLink.classList.add('is-hidden');
+  publishStatusEl.textContent = '读取草稿…';
+  bilibiliAuthStatusEl.textContent = '正在检查登录状态…';
+  bilibiliQrPanel.classList.add('is-hidden');
+  publishModal.classList.remove('is-hidden');
+  try {
+    const [data] = await Promise.all([
+      publishRequest(`api/jobs/${currentJob.id}/publish`),
+      refreshBilibiliAuth(),
+    ]);
+    publishTitleInput.value = data.title || '';
+    publishDescriptionInput.value = data.description || '';
+    publishTagsInput.value = Array.isArray(data.tags) ? data.tags.join(', ') : (data.tags || '');
+    publishCopyrightSelect.value = data.copyright || 'original';
+    publishSourceInput.value = data.source || '';
+    publishSourceInput.classList.toggle('is-hidden', publishCopyrightSelect.value !== 'repost');
+    publishSourceLabel.classList.toggle('is-hidden', publishCopyrightSelect.value !== 'repost');
+    publishDynamicInput.value = data.dynamic || '';
+    await loadPublishCategories(data.tid);
+    const processedOption = [...publishVariantSelect.options].find((option) => option.value === 'processed');
+    const hasProcessed = (data.available_variants || []).includes('processed');
+    if (processedOption) processedOption.classList.toggle('is-hidden', !hasProcessed);
+    publishVariantSelect.value = hasProcessed && data.upload_variant === 'processed' ? 'processed' : 'original';
+    if (data.cover_available) {
+      publishCoverPreview.src = apiUrl(`api/jobs/${currentJob.id}/thumbnail`);
+      publishCoverPreview.classList.remove('is-hidden');
+      publishCoverStatus.textContent = '投稿时将使用这张媒体库封面';
+    } else {
+      publishCoverPreview.removeAttribute('src');
+      publishCoverPreview.classList.add('is-hidden');
+      publishCoverStatus.textContent = '没有可用封面';
+    }
+    loadPublishCoverCandidates();
+    currentJob.publish = data;
+    currentJob.publish_info = data;
+    renderPublishState(data);
+    if (data.status === 'uploading') {
+      publishStateTimer = setInterval(refreshPublishStatus, 1500);
+    }
+  } catch (error) {
+    publishStatusEl.textContent = error.message || '读取草稿失败';
+  }
+}
+
+async function loadPublishCoverCandidates() {
+  if (!publishCoverCandidates || !currentJob) return;
+  publishCoverCandidates.textContent = '正在截取视频候选封面…';
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/publish/cover-candidates`);
+    const candidates = data.candidates || [];
+    publishCoverCandidates.innerHTML = candidates.length
+      ? `<span class="meta">从视频中选择封面</span><div class="publish-cover-grid">${candidates.map((item) => `<button type="button" class="publish-cover-candidate" data-cover-time="${item.timestamp}"><img src="${item.image}" alt="${item.timestamp} 秒画面" /><small>${item.timestamp}s</small></button>`).join('')}</div>`
+      : '<span class="meta">没有可用的视频画面候选</span>';
+  } catch (error) {
+    publishCoverCandidates.textContent = error.message || '候选封面读取失败';
+  }
+}
+
+async function savePublishDraft() {
+  if (!currentJob) return;
+  savePublishBtn.disabled = true;
+  publishStatusEl.textContent = '保存中…';
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/publish`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(publishPayload()),
+    });
+    currentJob.publish = data;
+    currentJob.publish_info = data;
+    renderPublishState(data);
+  } catch (error) {
+    publishStatusEl.textContent = error.message || '保存失败';
+  } finally {
+    savePublishBtn.disabled = false;
+  }
+}
+
+async function submitPublishDraft() {
+  if (!currentJob) return;
+  let confirmUncertainRetry = false;
+  let confirmDuplicateSubmission = false;
+  const state = currentJob.publish || currentJob.publish_info || {};
+  if (state.status === 'interrupted' || (state.status === 'failed' && state.phase === 'submitting')) {
+    confirmUncertainRetry = window.confirm('上次连接中断时可能已经提交成功。请先到 B 站创作中心确认没有收到这条稿件，再继续重试。现在继续吗？');
+    if (!confirmUncertainRetry) return;
+  } else if (state.status === 'submitted') {
+    confirmDuplicateSubmission = window.confirm('这段任务已经提交过一次。再次投稿会在 B 站创建另一条稿件，确定继续吗？');
+    if (!confirmDuplicateSubmission) return;
+  }
+  submitPublishBtn.disabled = true;
+  publishStatusEl.textContent = '正在创建投稿任务…';
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/publish/submit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...publishPayload(), confirm_uncertain_retry: confirmUncertainRetry,
+        confirm_duplicate_submission: confirmDuplicateSubmission }),
+    });
+    currentJob.publish = data;
+    currentJob.publish_info = data;
+    renderPublishState(data);
+    if (data.status === 'uploading' && !publishStateTimer) publishStateTimer = setInterval(refreshPublishStatus, 1500);
+  } catch (error) {
+    publishStatusEl.textContent = error.message || '投稿启动失败';
+    submitPublishBtn.disabled = !publishAuthLoggedIn;
+  }
+}
+
+async function startBilibiliLogin() {
+  if (bilibiliLoginTimer) clearInterval(bilibiliLoginTimer);
+  bilibiliLoginTimer = 0;
+  bilibiliLoginSession = '';
+  bilibiliLoginPolling = false;
+  startBilibiliLoginBtn.disabled = true;
+  bilibiliAuthStatusEl.textContent = '正在生成登录二维码…';
+  bilibiliQrStatus.textContent = '请使用 B 站 App 扫码';
+  try {
+    const data = await publishRequest('api/bilibili/login', { method: 'POST' });
+    bilibiliLoginSession = data.session_id;
+    bilibiliQrImage.src = data.qr_image;
+    bilibiliQrPanel.classList.remove('is-hidden');
+    bilibiliQrStatus.textContent = '请使用 B 站 App 扫码';
+    bilibiliLoginTimer = setInterval(pollBilibiliLogin, 1800);
+    await pollBilibiliLogin();
+  } catch (error) {
+    bilibiliAuthStatusEl.textContent = error.message || '二维码生成失败';
+    startBilibiliLoginBtn.disabled = false;
+    bilibiliQrPanel.classList.remove('is-hidden');
+    bilibiliQrStatus.textContent = `二维码生成失败：${error.message || '请重试'}`;
+  }
+}
+
+async function pollBilibiliLogin() {
+  if (!bilibiliLoginSession || bilibiliLoginPolling) return;
+  bilibiliLoginPolling = true;
+  try {
+    const data = await publishRequest(`api/bilibili/login/${encodeURIComponent(bilibiliLoginSession)}`);
+    if (data.state === 'scanned') bilibiliQrStatus.textContent = '已扫码，请在手机上确认登录';
+    else if (data.state === 'waiting') bilibiliQrStatus.textContent = '等待扫码…';
+    else if (data.state === 'expired') {
+      clearInterval(bilibiliLoginTimer); bilibiliLoginTimer = 0;
+      bilibiliQrStatus.textContent = '二维码已过期，请重新生成';
+      startBilibiliLoginBtn.disabled = false;
+    } else if (data.state === 'done') {
+      clearInterval(bilibiliLoginTimer); bilibiliLoginTimer = 0;
+      bilibiliQrPanel.classList.add('is-hidden');
+      startBilibiliLoginBtn.disabled = false;
+      try {
+        const auth = await publishRequest('api/bilibili/auth');
+        renderBilibiliAuth(auth);
+        if (!auth.logged_in) bilibiliAuthStatusEl.textContent = auth.error || '登录状态未确认，请重新扫码';
+      } catch (error) {
+        renderBilibiliAuth({ logged_in: false });
+        bilibiliAuthStatusEl.textContent = error.message || '登录完成，但状态确认失败';
+      }
+    } else if (data.state === 'error') {
+      clearInterval(bilibiliLoginTimer); bilibiliLoginTimer = 0;
+      bilibiliQrStatus.textContent = `${data.error || '扫码失败，请重试'}${data.code ? `（错误码 ${data.code}）` : ''}`;
+      startBilibiliLoginBtn.disabled = false;
+    }
+  } catch (error) {
+    clearInterval(bilibiliLoginTimer); bilibiliLoginTimer = 0;
+    bilibiliQrStatus.textContent = error.message || '检查登录状态失败';
+    startBilibiliLoginBtn.disabled = false;
+  } finally {
+    bilibiliLoginPolling = false;
+  }
+}
+
+async function logoutBilibili() {
+  try {
+    await publishRequest('api/bilibili/auth', { method: 'DELETE' });
+    bilibiliQrPanel.classList.add('is-hidden');
+    renderBilibiliAuth({ logged_in: false });
+  } catch (error) {
+    bilibiliAuthStatusEl.textContent = error.message || '退出登录失败';
+  }
+}
 
 function startSubtitleSyncPolling() {
   stopSubtitleSyncPolling();
@@ -733,7 +1083,7 @@ function confirmLeaveUnsavedChanges() {
   return window.confirm('有未保存的字幕修改，离开后将丢失。确定离开吗？');
 }
 
-newTaskBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true, shellMode: 'create' }); });
+if (newTaskBtn) newTaskBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true, shellMode: 'create' }); });
 openNewBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true, shellMode: 'create' }); });
 backFromProcessingBtn.addEventListener('click', () => { if (confirmLeaveUnsavedChanges()) showImportView({ clearDraft: true }); });
 refreshJobsBtn.addEventListener('click', () => refreshJobs());
@@ -744,6 +1094,53 @@ backFromAiSettingsBtn.addEventListener('click', closeAiSettings);
 closeSettingsBtn.addEventListener('click', closeSettings);
 openTranslateBtn.addEventListener('click', openTranslate);
 closeTranslateBtn.addEventListener('click', closeTranslate);
+openPublishBtn?.addEventListener('click', openPublishDraft);
+closePublishBtn?.addEventListener('click', closePublish);
+cancelPublishBtn?.addEventListener('click', closePublish);
+savePublishBtn?.addEventListener('click', savePublishDraft);
+submitPublishBtn?.addEventListener('click', submitPublishDraft);
+startBilibiliLoginBtn?.addEventListener('click', startBilibiliLogin);
+logoutBilibiliBtn?.addEventListener('click', logoutBilibili);
+publishCopyrightSelect?.addEventListener('change', () => {
+  const repost = publishCopyrightSelect.value === 'repost';
+  publishSourceInput.classList.toggle('is-hidden', !repost);
+  publishSourceLabel.classList.toggle('is-hidden', !repost);
+});
+publishTagsInput?.addEventListener('input', updatePublishTagsHint);
+publishCoverInput?.addEventListener('change', async () => {
+  const file = publishCoverInput.files?.[0];
+  if (!file || !currentJob) return;
+  publishCoverStatus.textContent = '正在上传封面…';
+  try {
+    const body = new FormData();
+    body.append('cover', file, file.name);
+    const data = await publishRequest(`api/jobs/${currentJob.id}/publish/cover`, { method: 'POST', body });
+    if (!data.cover_available) throw new Error('封面上传失败');
+    publishCoverPreview.src = `${apiUrl(`api/jobs/${currentJob.id}/thumbnail`)}?t=${Date.now()}`;
+    publishCoverPreview.classList.remove('is-hidden');
+    publishCoverStatus.textContent = '已使用自定义封面';
+  } catch (error) {
+    publishCoverStatus.textContent = error.message || '封面上传失败';
+  } finally {
+    publishCoverInput.value = '';
+  }
+});
+publishCoverCandidates?.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-cover-time]');
+  if (!button || !currentJob) return;
+  publishCoverStatus.textContent = '正在应用候选封面…';
+  try {
+    await publishRequest(`api/jobs/${currentJob.id}/publish/cover-frame`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timestamp: Number(button.dataset.coverTime) }),
+    });
+    publishCoverPreview.src = `${apiUrl(`api/jobs/${currentJob.id}/thumbnail`)}?t=${Date.now()}`;
+    publishCoverPreview.classList.remove('is-hidden');
+    publishCoverStatus.textContent = '已选择视频画面作为封面';
+  } catch (error) {
+    publishCoverStatus.textContent = error.message || '候选封面应用失败';
+  }
+});
 openProofreadBtn.addEventListener('click', openProofreadModal);
 closeProofreadBtn.addEventListener('click', () => { stopProofreadPolling(); proofreadModal.classList.add('is-hidden'); });
 proofreadRunBtn.addEventListener('click', runProofread);
@@ -815,6 +1212,14 @@ cancelCurrentBtn.addEventListener('click', async () => {
 jobListEl.addEventListener('click', async (event) => {
   if (event.target.closest('a')) {
     event.stopPropagation();
+    return;
+  }
+  const checkbox = event.target.closest('[data-batch-select]');
+  if (checkbox) {
+    event.stopPropagation();
+    if (checkbox.checked) selectedBatchJobs.add(checkbox.dataset.batchSelect);
+    else selectedBatchJobs.delete(checkbox.dataset.batchSelect);
+    updateBatchActions();
     return;
   }
   const deleteButton = event.target.closest('[data-delete-id]');
@@ -935,6 +1340,22 @@ fileInput.addEventListener('change', () => {
   }
   fileInput.value = '';
 });
+
+if (fileDropZone) {
+  ['dragenter', 'dragover'].forEach((name) => fileDropZone.addEventListener(name, (event) => {
+    event.preventDefault();
+    fileDropZone.classList.add('is-dragging');
+  }));
+  ['dragleave', 'drop'].forEach((name) => fileDropZone.addEventListener(name, (event) => {
+    event.preventDefault();
+    fileDropZone.classList.remove('is-dragging');
+  }));
+  fileDropZone.addEventListener('drop', (event) => {
+    if (rerunDraftJob) resetImportMode();
+    const files = event.dataTransfer && event.dataTransfer.files;
+    if (files && files.length) addPendingFiles(files);
+  });
+}
 
 pendingListEl.addEventListener('click', (event) => {
   const row = event.target.closest('.pending-item');
@@ -1309,6 +1730,7 @@ async function refreshJobs(options = {}) {
   if (!res.ok) return;
   const data = await res.json();
   jobs = mergeJobSnapshots(data.jobs || []);
+  renderQueueSummary(data.queue || {});
   renderJobList();
   if (currentJob) {
     const fresh = jobs.find((job) => job.id === currentJob.id);
@@ -1329,6 +1751,34 @@ async function refreshJobs(options = {}) {
     await selectJob(jobs[0].id);
   }
   ensurePolling();
+}
+
+function renderQueueSummary(queue) {
+  if (!queueSummaryEl) return;
+  const active = Number(queue.active || 0);
+  const pending = Number(queue.pending || 0);
+  queueSummaryEl.textContent = queue.paused
+    ? `队列已暂停 · ${active} 个处理中 · ${pending} 个等待`
+    : `${active} 个处理中 · ${pending} 个等待`;
+  if (queueToggleBtn) {
+    queueToggleBtn.textContent = queue.paused ? '继续排队' : '暂停排队';
+    queueToggleBtn.title = queue.paused ? '恢复取下一个任务' : '暂停取下一个任务，当前任务继续';
+    queueToggleBtn.dataset.paused = queue.paused ? '1' : '0';
+  }
+}
+
+if (queueToggleBtn) {
+  queueToggleBtn.addEventListener('click', async () => {
+    queueToggleBtn.disabled = true;
+    try {
+      const paused = queueToggleBtn.dataset.paused === '1';
+      const res = await fetch(apiUrl(`api/queue/${paused ? 'resume' : 'pause'}`), { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) renderQueueSummary(data);
+    } finally {
+      queueToggleBtn.disabled = false;
+    }
+  });
 }
 
 function renderJobList() {
@@ -1357,8 +1807,9 @@ function renderJobList() {
       : '';
     return `
       <div class="task-item${active}" data-job-id="${escapeHtml(job.id)}">
+        <div class="task-thumb">${job.files && job.files.thumbnail ? `<img src="${apiUrl(`api/jobs/${job.id}/thumbnail`)}" alt="" loading="lazy" />` : '<span aria-hidden="true">▶</span>'}</div>
         <div class="task-row">
-          <div class="task-name">${sourceBadge}${escapeHtml(job.media_name || 'input.media')}</div>
+          <div class="task-name"><input class="task-select" type="checkbox" data-batch-select="${escapeHtml(job.id)}" ${selectedBatchJobs.has(job.id) ? 'checked' : ''} aria-label="选择任务" />${sourceBadge}${escapeHtml(job.media_name || 'input.media')}</div>
           <span class="${statusClass(job.status)}">${statusLabel(job.status)}</span>
         </div>
         <div class="task-id meta">${escapeHtml(job.id)}</div>
@@ -1373,7 +1824,36 @@ function renderJobList() {
         ${outputLinks}
       </div>`;
   }).join('');
+  updateBatchActions();
 }
+
+function updateBatchActions() {
+  document.querySelector('.jobs-card')?.classList.toggle('batch-mode', batchMode);
+  batchActionsEl?.classList.toggle('is-hidden', !batchMode);
+  if (batchSelectionSummaryEl) batchSelectionSummaryEl.textContent = `已选 ${selectedBatchJobs.size} 个`;
+  const progressJobs = selectedBatchIds().map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
+  const overallJobs = progressJobs.length ? progressJobs : jobs;
+  const overallProgress = overallJobs.length ? Math.round(overallJobs.reduce((sum, job) => sum + Number(job.progress || 0), 0) / overallJobs.length * 100) : 0;
+  if (batchOverallProgressEl) batchOverallProgressEl.textContent = `整体进度 ${overallProgress}%`;
+  if (batchModeToggleBtn) batchModeToggleBtn.textContent = batchMode ? '收起批量' : '批量操作';
+}
+
+function selectedBatchIds() { return [...selectedBatchJobs].filter((id) => jobs.some((job) => job.id === id)); }
+
+batchModeToggleBtn?.addEventListener('click', () => { batchMode = !batchMode; if (!batchMode) selectedBatchJobs.clear(); renderJobList(); });
+batchClearBtn?.addEventListener('click', () => { batchMode = false; selectedBatchJobs.clear(); renderJobList(); });
+batchActionsEl?.addEventListener('click', async (event) => {
+  const ids = selectedBatchIds();
+  if (!ids.length) return;
+  if (event.target.closest('#batchCancel')) {
+    const response = await fetch(apiUrl('api/jobs/batch/cancel'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+    if (response.ok) { selectedBatchJobs.clear(); await refreshJobs({ keepSelection: true }); }
+  } else if (event.target.closest('#batchRetry')) {
+    const retryable = jobs.filter((job) => ids.includes(job.id) && ['failed', 'cancelled'].includes(job.status));
+    await Promise.all(retryable.map(async (job) => fetch(apiUrl(`api/jobs/${job.id}/rerun`), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })));
+    selectedBatchJobs.clear(); await refreshJobs({ keepSelection: true });
+  }
+});
 
 async function selectJob(jobId) {
   if (!document.querySelector('#subscriptionsView').classList.contains('is-hidden')) setVisible(importView);

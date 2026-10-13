@@ -7,7 +7,7 @@ if not exist ".venv\Scripts\mtd-subtitle-web.exe" (
   echo [ERROR] Virtual environment is not ready.
   echo Please run:
   echo   uv venv --python 3.12 .venv
-  echo   uv pip install -e ".[torch-runtime]"
+  echo   uv pip install -e ".[torch-runtime,bilibili]"
   pause
   exit /b 1
 )

@@ -42,6 +42,7 @@ _MEDIA_SUFFIXES = {".mkv", ".mp4", ".webm", ".mov", ".ts", ".mp3", ".m4a", ".aac
 class DownloadResult:
     path: Path
     title: str | None = None
+    thumbnail: Path | None = None
     # 下载到的源字幕文件：{"lang": "en", "path": "...", "kind": "manual"|"auto"}
     subtitles: list[dict[str, str]] = field(default_factory=list)
 
@@ -256,7 +257,7 @@ def download_with_yt_dlp(
         "-o",
         output_template,
         "--no-write-info-json",
-        "--no-write-thumbnail",
+        "--write-thumbnail",
         # 只抓人工上传的平台字幕（CC）；auto-CC 质量通常不如 whisper，不走它。
         "--write-subs",
         "--sub-langs",
@@ -421,7 +422,8 @@ def download_with_yt_dlp(
         downloaded_file = _remux_to_mkv(downloaded_file)
 
     subtitles = _collect_subtitle_files(out_dir)
-    return DownloadResult(path=downloaded_file, title=video_title, subtitles=subtitles)
+    thumbnail = next((p for p in out_dir.glob("input.*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
+    return DownloadResult(path=downloaded_file, title=video_title, thumbnail=thumbnail, subtitles=subtitles)
 
 
 def _pick_media_file(out_dir: Path) -> Path | None:

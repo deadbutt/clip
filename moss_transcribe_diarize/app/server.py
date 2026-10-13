@@ -9,6 +9,7 @@ from typing import Any
 
 from moss_transcribe_diarize.defaults import DEFAULT_PROMPT
 
+from .bilibili_publish import BilibiliPublishService
 from .events import EventHub
 from .ffmpeg import detect_ffmpeg
 from .jobs import JobManager
@@ -130,6 +131,7 @@ def create_app(
         try:
             yield
         finally:
+            bilibili_publish.shutdown(timeout=5.0)
             subscriptions.stop()
             manager.shutdown(wait=True, timeout=5.0)
             for candidate in (app.state.translator, *(app.state.translators or {}).values()):
@@ -160,6 +162,8 @@ def create_app(
     app.state.manager = manager
     subscriptions = SubscriptionManager(Path(runs_dir).parent / "config", manager)
     app.state.subscriptions = subscriptions
+    bilibili_publish = BilibiliPublishService(Path(runs_dir).parent / "config", manager)
+    app.state.bilibili_publish = bilibili_publish
 
     # 同时进行的 clip 渲染(ffmpeg 编码进程)上限;整片烧录走 worker 单线程,不占此配额。
     clip_render_semaphore = asyncio.Semaphore(2)
@@ -326,6 +330,37 @@ def create_app(
     def list_subscriptions():
         return subscriptions.snapshot()
 
+    @app.get("/api/bilibili/auth")
+    def bilibili_auth_status():
+        return bilibili_publish.auth_status()
+
+    @app.post("/api/bilibili/login")
+    def bilibili_login_start():
+        try:
+            return bilibili_publish.start_login()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/bilibili/login/{session_id}")
+    def bilibili_login_poll(session_id: str):
+        try:
+            return bilibili_publish.poll_login(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.delete("/api/bilibili/auth")
+    def bilibili_logout():
+        return bilibili_publish.logout()
+
+    @app.get("/api/bilibili/categories")
+    def bilibili_categories():
+        try:
+            return {"categories": bilibili_publish.categories()}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     @app.post("/api/subscriptions")
     async def add_subscription(request: Request):
         try:
@@ -401,6 +436,14 @@ def create_app(
     def resume_queue():
         return manager.resume_queue()
 
+    @app.post("/api/jobs/batch/cancel")
+    async def cancel_jobs_batch(request: Request):
+        payload = await request.json()
+        ids = payload.get("ids") if isinstance(payload, dict) else None
+        if not isinstance(ids, list):
+            raise HTTPException(status_code=400, detail="ids must be a list")
+        return manager.cancel_jobs(ids)
+
     @app.post("/api/jobs")
     async def create_job(
         file: UploadFile = File(...),
@@ -438,9 +481,14 @@ def create_app(
                     if not chunk:
                         break
                     handle.write(chunk)
+            manager.finalize_uploaded_job(job, input_path)
             manager.enqueue(job.id)
             return job.to_dict()
         except Exception as exc:
+            try:
+                input_path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("upload staging cleanup failed: %s", input_path, exc_info=True)
             manager._set_status(job, "failed", 1.0, error=str(exc))
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -563,6 +611,8 @@ def create_app(
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str):
         try:
+            if manager.get_job(job_id).publish_info.get("status") == "uploading":
+                raise HTTPException(status_code=409, detail="视频投稿进行中，完成后才能删除任务")
             manager.delete_job(job_id)
             return {"ok": True}
         except KeyError as exc:
@@ -579,6 +629,111 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return job.to_dict()
+
+    @app.get("/api/jobs/{job_id}/publish")
+    def get_publish_draft(job_id: str):
+        try:
+            draft = dict(manager.publish_draft(job_id))
+            job = manager.get_job(job_id)
+            manager._ensure_job_thumbnail(job)
+            draft["available_variants"] = ["original"] + (["processed"] if job.output_path.is_file() else [])
+            draft["cover_available"] = bool(job.thumbnail_path and Path(job.thumbnail_path).is_file())
+            return draft
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/jobs/{job_id}/publish")
+    async def update_publish_draft(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("需要发布草稿对象")
+            return manager.update_publish_draft(job_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/publish/cover")
+    async def upload_publish_cover(job_id: str, cover: UploadFile = File(...)):
+        """Replace the media's local cover used by Bilibili投稿."""
+        try:
+            job = manager.get_job(job_id)
+            if not cover.filename:
+                raise ValueError("请选择图片文件")
+            raw = await cover.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                raise ValueError("封面图片不能超过 8 MB")
+            if not raw:
+                raise ValueError("封面图片为空")
+            from PIL import Image
+            import io
+            try:
+                with Image.open(io.BytesIO(raw)) as source:
+                    source.verify()
+                with Image.open(io.BytesIO(raw)) as source:
+                    image = source.convert("RGB")
+            except Exception as exc:
+                raise ValueError("封面必须是有效的 JPG、PNG 或 WebP 图片") from exc
+            media_path = Path(job.input_path)
+            if not media_path.is_file():
+                raise FileNotFoundError(str(media_path))
+            target = manager._media_cover_path(media_path)
+            temporary = target.with_name(f".{target.name}.{job.id}.tmp")
+            image.save(temporary, format="JPEG", quality=92, optimize=True)
+            temporary.replace(target)
+            job.thumbnail_path = str(target)
+            manager._save_job(job)
+            return {"ok": True, "cover_available": True}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="媒体文件不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/api/jobs/{job_id}/publish/cover-candidates")
+    async def publish_cover_candidates(job_id: str):
+        try:
+            return {"candidates": await asyncio.to_thread(manager.cover_candidates, job_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="媒体文件不存在") from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/api/jobs/{job_id}/publish/cover-frame")
+    async def select_publish_cover_frame(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+            timestamp = float(payload.get("timestamp")) if isinstance(payload, dict) else -1
+            if timestamp < 0:
+                raise ValueError("封面时间点无效")
+            await asyncio.to_thread(manager.set_cover_frame, job_id, timestamp)
+            return {"ok": True, "cover_available": True}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/api/jobs/{job_id}/publish/submit")
+    async def submit_publish_draft(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("需要 B 站投稿设置对象")
+            return bilibili_publish.submit(job_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # ------------------------------------------------------------ SSE 实时事件
 
@@ -680,13 +835,78 @@ def create_app(
         try:
             job = manager.get_job(job_id)
             path = Path(job.input_path)
-            if not path.exists():
+            if not path.is_file():
                 raise FileNotFoundError(str(path))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Media file is missing.") from exc
         return FileResponse(path, filename=path.name)
+
+    @app.get("/api/jobs/{job_id}/thumbnail")
+    def thumbnail(job_id: str):
+        try:
+            job = manager.get_job(job_id)
+            path = Path(job.thumbnail_path or "")
+            if not path.is_file() and Path(job.input_path).is_file():
+                manager._ensure_job_thumbnail(job)
+                path = Path(job.thumbnail_path or "")
+            if not path.is_file():
+                raise FileNotFoundError(str(path))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Thumbnail is not available.") from exc
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+
+    @app.get("/api/media")
+    def list_media():
+        return {"media": manager.list_media()}
+
+    @app.get("/api/media/{media_id}")
+    def download_media_library_item(media_id: str):
+        try:
+            path = manager.media_path(media_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="媒体不存在") from exc
+        return FileResponse(path, filename=path.name)
+
+    @app.post("/api/media/{media_id}/jobs")
+    async def create_job_from_media(media_id: str, request: Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            path = manager.media_path(media_id)
+            metadata = next((item for item in manager.list_media() if item.get("media_hash") == media_id or item.get("media_id") == media_id), {})
+            job = await asyncio.to_thread(
+                manager.create_job_from_file,
+                path,
+                media_name=str(metadata.get("name") or path.name),
+                prompt=payload.get("prompt"),
+                max_length=payload.get("max_length") or payload.get("max_len"),
+                max_new_tokens=payload.get("max_new_tokens"),
+                decoding=payload.get("decoding"),
+                temperature=payload.get("temperature"),
+                speaker_count=payload.get("speaker_count"),
+                diarization_backend=payload.get("diarization_backend"),
+                hotwords=str(payload.get("hotwords") or ""),
+            )
+            return job.to_dict()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="媒体不存在") from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/api/media/{media_id}/thumbnail")
+    def media_library_thumbnail(media_id: str):
+        try:
+            cover = manager.media_thumbnail_path(media_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="封面不存在") from exc
+        return FileResponse(cover, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
 
     @app.get("/api/jobs/{job_id}/segments")
     def get_segments(job_id: str, request: Request):

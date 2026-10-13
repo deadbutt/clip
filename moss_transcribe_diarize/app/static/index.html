@@ -13,7 +13,6 @@
   <aside class="app-sidebar" aria-label="主导航">
     <h1>蝶殇工作台</h1>
     <p class="brand-caption">让每一份素材，有序落地。</p>
-    <button class="primary sidebar-create" data-shell-create="upload" type="button">＋ 新建任务</button>
     <span class="nav-caption">工作空间</span>
     <nav>
       <button class="shell-nav active" data-shell-page="home" type="button"><span aria-hidden="true">⌂</span> 首页</button>
@@ -28,7 +27,7 @@
     <section class="content">
       <section id="importView" class="view task-view" data-shell-mode="home">
         <div class="task-view-inner">
-          <div class="hub-heading"><div><span class="hub-eyebrow">蝶殇 · 工作空间</span><h2 id="hubTitle">从这里，继续你的工作。</h2><p id="hubDescription">导入新素材，或接着完成上一次的字幕与剪辑。</p></div><button class="primary" data-shell-create="upload" type="button">＋ 新建任务</button></div>
+          <div class="hub-heading"><div><span class="hub-eyebrow">蝶殇 · 工作空间</span><h2 id="hubTitle">从这里，继续你的工作。</h2><p id="hubDescription">导入新素材，或接着完成上一次的字幕与剪辑。</p></div></div>
           <div class="hub-home">
             <div class="hub-stats"><div><span>全部任务</span><strong id="hubTotal">0</strong></div><div><span>正在处理</span><strong id="hubRunning">0</strong></div><div><span>可继续编辑</span><strong id="hubEditable">0</strong></div></div>
             <div class="hub-section-heading"><h3>开始一项新工作</h3><span>从你的素材开始</span></div>
@@ -63,7 +62,7 @@
             <div id="uploadTab" class="tab-panel active">
               <label class="file-drop-zone" for="file">
                 <span class="file-drop-icon">+</span>
-                <span class="file-drop-title">拖入音频或视频，或点击选择</span>
+                <span class="file-drop-title">拖入一个或多个音频/视频，或点击选择</span>
                 <span class="file-drop-meta">MP4 · MOV · MKV · WAV · MP3 · M4A / 支持多选</span>
                 <input id="file" type="file" accept="audio/*,video/*,.mp4,.mov,.mkv,.wav,.mp3,.m4a" multiple />
               </label>
@@ -163,11 +162,14 @@
             <div class="jobs-head">
               <strong id="hubJobsTitle">最近任务</strong>
               <div class="jobs-tools">
+                <span id="queueSummary" class="meta">队列读取中…</span>
+                <button id="queueToggle" class="small ghost" type="button">暂停排队</button>
+                <button id="batchModeToggle" class="small ghost" type="button">批量操作</button>
                 <span id="jobCount" class="meta">0 个任务</span>
                 <button id="refreshJobs" class="small ghost">刷新</button>
-                <button id="newTask" class="small primary">新建任务</button>
               </div>
             </div>
+            <div id="batchActions" class="batch-actions is-hidden"><span id="batchSelectionSummary" class="meta">已选 0 个</span><span id="batchOverallProgress" class="meta">整体进度 0%</span><button id="batchCancel" class="small ghost" type="button">取消选中</button><button id="batchRetry" class="small ghost" type="button">重试选中</button><button id="batchClear" class="small ghost" type="button">退出批量</button></div>
             <div class="hub-task-filters"><input id="hubTaskSearch" type="search" placeholder="搜索文件名或任务 ID" aria-label="搜索任务" /><select id="hubTaskFilter" aria-label="任务状态"><option value="all">全部状态</option><option value="running">处理中</option><option value="editable">可编辑</option><option value="failed">失败 / 已取消</option></select></div>
             <div id="jobList" class="task-list"></div>
             <button class="hub-all-tasks ghost" data-shell-page="tasks" type="button">查看全部任务 →</button>
@@ -338,6 +340,7 @@
           <button id="openAlignment" class="ghost" type="button">校对译文</button>
           <button id="openTranslate" class="ghost" type="button">翻译</button>
           <button id="openClips" class="ghost" type="button">精华切片</button>
+          <button id="openPublish" class="ghost" type="button">发布到 B 站</button>
           <button id="render" class="warn" disabled>检测 FFmpeg...</button>
           <button id="openSettings" class="ghost icon-btn" type="button" title="设置" aria-label="设置">⚙</button>
         </div>
@@ -570,6 +573,43 @@
           <button type="button" data-clip-context-action="export">导出此片段</button>
           <button type="button" data-clip-context-action="merge">合并相邻/重叠片段</button>
           <button type="button" data-clip-context-action="remove" class="danger">移除该片段</button>
+        </div>
+        <div id="publishModal" class="settings-modal is-hidden">
+          <div class="settings-modal-card publish-card">
+            <div class="settings-modal-head">
+              <div><strong>发布到 B 站</strong><span class="modal-subtitle">提交后由 B 站审核，审核和公开状态以创作中心为准</span></div>
+              <button id="closePublish" class="ghost small" type="button" aria-label="关闭">✕</button>
+            </div>
+            <div class="settings-modal-body publish-body">
+              <section class="publish-account">
+                <div><strong>账号</strong><span id="bilibiliAuthStatus" class="meta" role="status">正在检查登录状态…</span></div>
+                <div class="publish-account-actions"><button id="startBilibiliLogin" class="small ghost" type="button">扫码登录</button><button id="logoutBilibili" class="small ghost is-hidden" type="button">退出登录</button></div>
+                <div id="bilibiliQrPanel" class="publish-qr is-hidden"><img id="bilibiliQrImage" alt="B 站登录二维码" /><span id="bilibiliQrStatus" class="meta" role="status">请使用 B 站 App 扫码</span></div>
+              </section>
+              <label for="publishTitle">标题</label>
+              <input id="publishTitle" type="text" maxlength="80" placeholder="视频标题" />
+              <label for="publishDescription">简介</label>
+              <textarea id="publishDescription" rows="7" placeholder="视频简介、章节或来源说明"></textarea>
+              <label for="publishTags">标签</label>
+              <input id="publishTags" type="text" maxlength="220" placeholder="例如：转录, 教程 或 转录 教程" />
+              <span id="publishTagsHint" class="meta">用空格、英文逗号或中文逗号分隔，最多 10 个，每个最多 20 字</span>
+              <label for="publishCategory">投稿分区</label>
+              <select id="publishCategory"><option value="">正在读取 B 站分区…</option></select>
+              <label for="publishCopyright">版权类型</label>
+              <select id="publishCopyright"><option value="original">原创</option><option value="repost">转载</option></select>
+              <label for="publishSource" id="publishSourceLabel" class="is-hidden">转载来源</label>
+              <input id="publishSource" class="is-hidden" type="text" maxlength="200" placeholder="填写原视频或作品来源" />
+              <label for="publishVariant">投稿视频</label>
+              <select id="publishVariant"><option value="original">媒体库中的原视频</option><option value="processed" class="is-hidden">字幕处理后的成片</option></select>
+              <label for="publishDynamic">动态文案（可选）</label>
+              <textarea id="publishDynamic" rows="2" maxlength="233" placeholder="发布时同步到动态，最多 233 字"></textarea>
+              <div class="publish-cover-row"><img id="publishCoverPreview" alt="投稿封面预览" /><div><span id="publishCoverStatus" class="meta">将使用媒体库视频封面</span><label class="small ghost publish-cover-picker" for="publishCoverInput">上传封面<input id="publishCoverInput" type="file" accept="image/jpeg,image/png,image/webp" /></label></div></div>
+              <div id="publishCoverCandidates" class="publish-cover-candidates"></div>
+              <div id="publishStatus" class="meta" role="status"></div>
+              <a id="publishResultLink" class="publish-result-link is-hidden" target="_blank" rel="noopener noreferrer">打开 B 站稿件</a>
+              <div class="actions"><button id="submitPublish" class="primary" type="button">保存并投稿</button><button id="savePublish" class="ghost" type="button">只保存草稿</button><button id="cancelPublish" class="ghost" type="button">关闭</button></div>
+            </div>
+          </div>
         </div>
         <div id="settingsModal" class="settings-modal is-hidden">
           <div class="settings-modal-card settings-card">

@@ -12,6 +12,7 @@ output/
 examples/*
 !examples/*.md
 runs/
+videos/
 tools/
 models/
 testmd/
