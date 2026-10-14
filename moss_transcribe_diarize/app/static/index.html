@@ -558,10 +558,15 @@
                     </div>
                     <span id="clipCandidateCount">0 个</span>
                   </div>
+                  <div id="clipExportProgress" class="clip-export-progress-panel is-hidden" aria-live="polite">
+                    <div class="clip-export-progress-meta"><span id="clipExportProgressLabel">准备导出</span><strong id="clipExportProgressPercent">0%</strong></div>
+                    <div class="clip-export-progress-track"><span id="clipExportProgressBar"></span></div>
+                  </div>
                   <div id="clipList" class="clip-list clip-pending-list"></div>
                   <div class="clip-pending-footer">
                     <span class="clip-modal-hint">当前来源的片段会显示在主时间轴；右键可导出、删除或合并。</span>
-                    <button id="renderClipQueue" class="primary small" type="button">一键导出全部</button>
+                    <button id="toggleClipExport" class="ghost small" type="button">一键全选</button>
+                    <button id="renderClipQueue" class="primary small" type="button">一键导出选中</button>
                   </div>
                 </section>
                 <div id="clipStatus" class="export-status"></div>
@@ -600,7 +605,7 @@
               <label for="publishSource" id="publishSourceLabel" class="is-hidden">转载来源</label>
               <input id="publishSource" class="is-hidden" type="text" maxlength="200" placeholder="填写原视频或作品来源" />
               <label for="publishVariant">投稿视频</label>
-              <select id="publishVariant"><option value="original">媒体库中的原视频</option><option value="processed" class="is-hidden">字幕处理后的成片</option></select>
+              <select id="publishVariant"><option value="original">媒体库中的原视频</option><option value="processed" class="is-hidden">字幕处理后的成片</option><optgroup id="publishClipOptions" label="已导出切片"></optgroup></select>
               <label for="publishDynamic">动态文案（可选）</label>
               <textarea id="publishDynamic" rows="2" maxlength="233" placeholder="发布时同步到动态，最多 233 字"></textarea>
               <div class="publish-cover-row"><img id="publishCoverPreview" alt="投稿封面预览" /><div><span id="publishCoverStatus" class="meta">将使用媒体库视频封面</span><label class="small ghost publish-cover-picker" for="publishCoverInput">上传封面<input id="publishCoverInput" type="file" accept="image/jpeg,image/png,image/webp" /></label></div></div>

@@ -70,7 +70,11 @@
       score: Number(source.score) || 0,
       selectionMethod: source.selection_method || source.selectionMethod || 'rules',
       lane: source.lane === 'alternate' ? 'alternate' : 'primary',
-      parentId: source.parent_id || source.parentId || ''
+      parentId: source.parent_id || source.parentId || '',
+      exported: source.exported === true,
+      renderedClipId: source.rendered_clip_id || source.renderedClipId || '',
+      exportSelected: false,
+      exportState: source.exported ? '已导出' : '未导出'
     };
   }
 

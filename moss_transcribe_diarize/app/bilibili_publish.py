@@ -454,6 +454,98 @@ class BilibiliPublishService:
             thread.start()
         return self.jobs.publish_draft(job_id)
 
+    def submit_clips(self, job_id: str, clip_ids: list[str]) -> dict[str, Any]:
+        """Queue explicitly selected rendered clips, one at a time."""
+        if not self._credentials:
+            raise RuntimeError("请先扫码登录 B 站账号")
+        job = self.jobs.get_job(job_id)
+        clips = {str(item.get("clip_id")): item for item in self.jobs.list_clip_publish(job_id)}
+        selected = [clips[clip_id] for clip_id in dict.fromkeys(clip_ids) if clip_id in clips]
+        if not selected:
+            raise ValueError("没有找到可投稿的切片")
+        draft = self.jobs.publish_draft(job_id)
+        queued = []
+        for clip in selected:
+            if clip.get("publish_info", {}).get("status") == "submitted":
+                continue
+            media_path = job.clips_dir / clip["clip_id"] / "video.mp4"
+            if not media_path.is_file():
+                clip["publish_info"] = {**clip.get("publish_info", {}), "status": "failed", "error": "切片视频尚未渲染"}
+                self.jobs.update_clip_publish(job_id, clip["clip_id"], clip)
+                continue
+            payload = dict(draft)
+            for key in ("title", "description", "copyright", "source", "dynamic"):
+                if clip.get(key) not in (None, ""):
+                    payload[key] = clip[key]
+            if clip.get("tags"):
+                payload["tags"] = clip["tags"]
+            if int(clip.get("tid") or 0) > 0:
+                payload["tid"] = clip["tid"]
+            title = str(payload.get("title") or f"{job.media_name} - 切片").strip()[:80]
+            payload["title"] = title
+            cover_path = Path(clip.get("cover_path") or job.thumbnail_path or "")
+            if not cover_path.is_file():
+                self.jobs._ensure_job_thumbnail(job)
+                cover_path = Path(job.thumbnail_path or "")
+            if not cover_path.is_file():
+                raise ValueError("未找到切片封面")
+            try:
+                clip["publish_info"] = {**clip.get("publish_info", {}), "status": "uploading", "error": ""}
+                clip["state"] = "publishing"
+                self.jobs.update_clip_publish(job_id, clip["clip_id"], clip)
+                result = self._uploader(media_path, cover_path, payload, dict(self._credentials), lambda _p, _phase: None)
+                info = {"status": "submitted", "bvid": result.get("bvid", ""), "aid": result.get("aid"), "url": result.get("url", ""), "error": ""}
+                clip["publish_info"] = info
+                clip["state"] = "published"
+                self.jobs.update_clip_publish(job_id, clip["clip_id"], clip)
+                queued.append({"clip_id": clip["clip_id"], **info})
+            except Exception as exc:
+                info = {**clip.get("publish_info", {}), "status": "failed", "error": _safe_error(exc)}
+                clip["publish_info"] = info
+                clip["state"] = "failed"
+                self.jobs.update_clip_publish(job_id, clip["clip_id"], clip)
+        return {"clips": queued, "requested": len(selected)}
+
+    def submit_clip(self, job_id: str, clip_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._credentials:
+            raise RuntimeError("请先扫码登录 B 站账号")
+        job = self.jobs.get_job(job_id)
+        items = {str(item.get("clip_id")): item for item in self.jobs.list_clip_publish(job_id)}
+        clip = items.get(str(clip_id))
+        if not clip:
+            raise KeyError(f"Unknown clip: {clip_id}")
+        if clip.get("publish_info", {}).get("status") == "submitted" and not payload.get("confirm_duplicate_submission"):
+            raise RuntimeError("这个切片已经投稿过，请确认后再重复投稿")
+        media_path = job.clips_dir / str(clip_id) / "video.mp4"
+        if not media_path.is_file():
+            raise ValueError("切片尚未导出，请先在精华切片中导出")
+        base = self.jobs.publish_draft(job_id)
+        draft = dict(base)
+        draft.update({key: payload[key] for key in ("title", "description", "tags", "tid", "copyright", "source", "dynamic") if key in payload})
+        title = str(draft.get("title") or f"{job.media_name} - 切片").strip()
+        if not title or len(title) > 80:
+            raise ValueError("标题不能为空，且不能超过 80 个字符")
+        tags = draft.get("tags") or []
+        if isinstance(tags, str): tags = [x for x in re.split(r"[,，\s]+", tags) if x]
+        if not tags or len(tags) > 10 or any(len(str(x)) > 20 for x in tags):
+            raise ValueError("B 站投稿需要 1–10 个标签，每个标签不超过 20 个字符")
+        if int(draft.get("tid") or 0) not in {item["tid"] for item in self.categories()}:
+            raise ValueError("请选择有效的 B 站投稿分区")
+        cover_path = Path(payload.get("cover_path") or clip.get("cover_path") or job.thumbnail_path or "")
+        if not cover_path.is_file():
+            self.jobs._ensure_job_thumbnail(job)
+            cover_path = Path(job.thumbnail_path or "")
+        if not cover_path.is_file(): raise ValueError("未找到切片封面")
+        try:
+            result = self._uploader(media_path, cover_path, draft, dict(self._credentials), lambda _p, _phase: None)
+            info = {"status": "submitted", "bvid": result.get("bvid", ""), "aid": result.get("aid"), "url": result.get("url", ""), "error": ""}
+            self.jobs.update_clip_publish(job_id, clip_id, {**clip, **draft, "state": "published", "publish": True, "publish_info": info})
+            return {**clip, **draft, "state": "published", "publish_info": info}
+        except Exception as exc:
+            info = {**clip.get("publish_info", {}), "status": "failed", "error": _safe_error(exc)}
+            self.jobs.update_clip_publish(job_id, clip_id, {**clip, "state": "failed", "publish_info": info})
+            raise RuntimeError(info["error"]) from exc
+
     def _upload_worker(self, job_id: str, media_path: Path, cover_path: Path,
                        draft: dict[str, Any], credentials: dict[str, str]) -> None:
         last_progress = {"value": 0.0, "saved_at": 0.0}

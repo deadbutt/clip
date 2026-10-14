@@ -694,6 +694,35 @@ def create_app(
         except Exception as exc:
             raise _fail(exc) from exc
 
+    @app.post("/api/jobs/{job_id}/clips/{clip_id}/cover")
+    async def upload_clip_cover(job_id: str, clip_id: str, cover: UploadFile = File(...)):
+        try:
+            if not cover.filename:
+                raise ValueError("请选择图片文件")
+            raw = await cover.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024 or not raw:
+                raise ValueError("封面图片不能为空且不能超过 8 MB")
+            from PIL import Image
+            import io
+            with Image.open(io.BytesIO(raw)) as source:
+                source.verify()
+            with Image.open(io.BytesIO(raw)) as source:
+                image = source.convert("RGB")
+            job = manager.get_job(job_id)
+            target = job.clips_dir / str(clip_id) / "cover.jpg"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".tmp.jpg")
+            image.save(temporary, format="JPEG", quality=92, optimize=True)
+            temporary.replace(target)
+            await asyncio.to_thread(manager.update_clip_publish, job_id, clip_id, {"cover_path": str(target)})
+            return {"ok": True, "cover_path": str(target)}
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise _fail(exc) from exc
+
     @app.get("/api/jobs/{job_id}/publish/cover-candidates")
     async def publish_cover_candidates(job_id: str):
         try:
@@ -1395,11 +1424,20 @@ def create_app(
         except Exception as exc:
             raise _fail(exc) from exc
 
+    clip_export_progress: dict[str, float] = {}
+
+    @app.get("/api/jobs/{job_id}/clip-export-progress/{request_id}")
+    def get_clip_export_progress(job_id: str, request_id: str):
+        manager.get_job(job_id)
+        return {"progress": clip_export_progress.get(f"{job_id}/{request_id}", 0.0)}
+
     @app.post("/api/jobs/{job_id}/clips/render")
     async def render_clip(job_id: str, request: Request):
         try:
             payload: Any = await request.json()
             payload = payload if isinstance(payload, dict) else {}
+            progress_key = f"{job_id}/{str(payload.get('request_id') or '')[:100]}"
+            clip_export_progress[progress_key] = 0.0
             # 每个渲染请求起一个 ffmpeg 编码进程,不限制会把机器拖垮;
             # 超出上限的请求在信号量上排队等待,而不是直接失败。
             async with clip_render_semaphore:
@@ -1410,8 +1448,11 @@ def create_app(
                     end=payload.get("end"),
                     style_payload=payload.get("style") if isinstance(payload.get("style"), dict) else None,
                     name=payload.get("name"),
+                    title=payload.get("title"),
+                    progress_callback=lambda ratio: clip_export_progress.update({progress_key: min(0.99, ratio)}),
                 )
-            clip["download_url"] = f"/api/jobs/{job_id}/clips/{clip['filename']}"
+            clip["download_url"] = f"/api/jobs/{job_id}/clips/{clip.get('clip_id')}/{clip['filename']}"
+            clip_export_progress[progress_key] = 1.0
             return clip
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1420,10 +1461,82 @@ def create_app(
         except Exception as exc:
             raise _fail(exc) from exc
 
-    @app.get("/api/jobs/{job_id}/clips/{filename}")
-    def download_clip(job_id: str, filename: str):
+    @app.get("/api/jobs/{job_id}/clip-publish")
+    def list_clip_publish(job_id: str):
         try:
-            path = manager.clip_download_path(job_id, filename)
+            return {"clips": manager.list_clip_publish(job_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/jobs/{job_id}/clips/{clip_id}/publish")
+    async def update_clip_publish(job_id: str, clip_id: str, request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("需要切片投稿设置对象")
+            return await asyncio.to_thread(manager.update_clip_publish, job_id, clip_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/clips/{clip_id}/cover-frame")
+    async def select_clip_cover_frame(job_id: str, clip_id: str, request: Request):
+        try:
+            payload = await request.json()
+            timestamp = float(payload.get("timestamp", 0)) if isinstance(payload, dict) else 0.0
+            path = await asyncio.to_thread(manager.set_clip_cover_frame, job_id, clip_id, timestamp)
+            await asyncio.to_thread(manager.update_clip_publish, job_id, clip_id, {"cover_path": str(path)})
+            return {"ok": True, "cover_path": str(path)}
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/jobs/{job_id}/clips/{clip_id}/cover-candidates")
+    async def clip_cover_candidates(job_id: str, clip_id: str):
+        try:
+            return {"candidates": await asyncio.to_thread(manager.clip_cover_candidates, job_id, clip_id)}
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/clips/publish-selected")
+    async def publish_selected_clips(job_id: str, request: Request):
+        try:
+            payload = await request.json()
+            ids = payload.get("clip_ids") if isinstance(payload, dict) else None
+            if not isinstance(ids, list):
+                raise ValueError("clip_ids 必须是列表")
+            return await asyncio.to_thread(bilibili_publish.submit_clips, job_id, [str(item) for item in ids])
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/clips/{clip_id}/publish-submit")
+    async def submit_clip_publish(job_id: str, clip_id: str, request: Request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("需要切片投稿设置对象")
+            return await asyncio.to_thread(bilibili_publish.submit_clip, job_id, clip_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/jobs/{job_id}/clips/{clip_id}/{filename}")
+    def download_clip(job_id: str, clip_id: str, filename: str):
+        try:
+            path = manager.clip_download_path(job_id, f"{clip_id}/{filename}")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except FileNotFoundError as exc:

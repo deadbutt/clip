@@ -9,7 +9,9 @@ not introduce a second job state machine.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
+import subprocess
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -142,7 +144,7 @@ class ClipOperationsMixin:
                 cached = self._clip_candidates_cache.get(cache_key)
                 if cached is not None:
                     self._clip_candidates_cache[cache_key] = self._clip_candidates_cache.pop(cache_key)
-                    return [dict(item) for item in cached]
+                    return self._annotate_clip_exports(job_id, [dict(item) for item in cached])
         rule_limit = max(limit, min(48, limit * 4)) if selector is not None else limit
         candidates = [
             candidate.to_dict()
@@ -159,12 +161,132 @@ class ClipOperationsMixin:
             )
         ]
         if selector is not None:
-            return selector.rank_clip_candidates(candidates, limit=limit)
+            candidates = selector.rank_clip_candidates(candidates, limit=limit)
+        candidates = self._annotate_clip_exports(job_id, candidates)
+        if selector is not None:
+            return candidates
         if segments_version is not None:
             with self._clip_candidates_cache_lock:
                 self._clip_candidates_cache[cache_key] = [dict(item) for item in candidates]
                 while len(self._clip_candidates_cache) > _CLIP_CANDIDATES_CACHE_MAX:
                     self._clip_candidates_cache.pop(next(iter(self._clip_candidates_cache)), None)
+        return candidates
+
+    def _annotate_clip_exports(self, job_id: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach durable export state to freshly generated candidates."""
+        try:
+            rendered = self.list_clip_publish(job_id)
+        except (KeyError, OSError):
+            rendered = []
+        for candidate in candidates:
+            start = float(candidate.get("start") or 0.0)
+            end = float(candidate.get("end") or 0.0)
+            match = next((item for item in rendered
+                          if abs(float(item.get("source_start") or -99999) - start) < 0.05
+                          and abs(float(item.get("source_end") or -99999) - end) < 0.05), None)
+            candidate["exported"] = bool(match)
+            if match:
+                candidate["rendered_clip_id"] = match.get("clip_id")
+                candidate["rendered_title"] = match.get("title") or candidate.get("title")
+        return candidates
+
+    def _clip_metadata_path(self, job_id: str, clip_id: str) -> Path:
+        job = self.get_job(job_id)
+        safe = _safe_clip_name(clip_id)
+        path = (job.clips_dir / safe / "metadata.json").resolve()
+        if job.clips_dir.resolve() not in path.parents:
+            raise ValueError("切片标识无效")
+        return path
+
+    def _clip_dir(self, job_id: str, clip_id: str) -> Path:
+        job = self.get_job(job_id)
+        path = (job.clips_dir / _safe_clip_name(clip_id)).resolve()
+        if job.clips_dir.resolve() not in path.parents:
+            raise ValueError("切片标识无效")
+        return path
+
+    def list_clip_publish(self, job_id: str) -> list[dict[str, Any]]:
+        job = self.get_job(job_id)
+        if not job.clips_dir.is_dir():
+            return []
+        result = []
+        for metadata_path in sorted(job.clips_dir.glob("*/metadata.json")):
+            try:
+                item = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(item, dict) or item.get("source_start") is None:
+                continue
+            item.setdefault("clip_id", metadata_path.parent.name)
+            item.setdefault("state", "candidate")
+            item.setdefault("keep", False)
+            item.setdefault("publish", False)
+            item.setdefault("publish_info", {"status": "draft", "bvid": "", "aid": None, "url": "", "error": ""})
+            item["clip_id"] = _safe_clip_name(str(item.get("clip_id") or metadata_path.parent.name))
+            item["filename"] = "video.mp4"
+            item["exported"] = (metadata_path.parent / "video.mp4").is_file()
+            item["download_url"] = f"/api/jobs/{job_id}/clips/{item['clip_id']}/video.mp4"
+            item["clip_dir"] = str(metadata_path.parent)
+            item["cover_url"] = f"/api/jobs/{job_id}/clips/{item['clip_id']}/cover.jpg"
+            result.append(item)
+        return result
+
+    def update_clip_publish(self, job_id: str, clip_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        path = self._clip_metadata_path(job_id, clip_id)
+        if not path.is_file():
+            raise FileNotFoundError("切片尚未渲染")
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("切片元数据损坏") from exc
+        if not isinstance(item, dict):
+            raise RuntimeError("切片元数据无效")
+        allowed = {"state", "keep", "publish", "title", "description", "tags", "tid", "copyright", "source", "dynamic", "cover_path", "publish_info"}
+        for key in allowed:
+            if key in payload:
+                item[key] = payload[key]
+        if item.get("keep"):
+            item["state"] = "kept" if item.get("state") in {None, "candidate"} else item.get("state")
+        elif item.get("state") == "kept":
+            item["state"] = "candidate"
+        path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return item
+
+    def set_clip_cover_frame(self, job_id: str, clip_id: str, timestamp: float) -> Path:
+        job = self.get_job(job_id)
+        metadata = next((item for item in self.list_clip_publish(job_id) if str(item.get("clip_id")) == str(clip_id)), None)
+        if not metadata:
+            raise FileNotFoundError("切片尚未导出")
+        tools = detect_ffmpeg()
+        if not tools.ffmpeg:
+            raise RuntimeError("FFmpeg 不可用，无法生成封面")
+        clip_dir = self._clip_dir(job_id, clip_id)
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        target = clip_dir / "cover.jpg"
+        temporary = target.with_suffix(".tmp.jpg")
+        source_time = float(metadata.get("source_start") or 0.0) + max(0.0, float(timestamp))
+        result = subprocess.run([tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{source_time:.3f}", "-i", str(job.input_path), "-frames:v", "1", "-vf", "scale=640:-2", str(temporary)], capture_output=True, timeout=30)
+        if result.returncode != 0 or not temporary.is_file():
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError("无法从切片生成封面")
+        temporary.replace(target)
+        return target
+
+    def clip_cover_candidates(self, job_id: str, clip_id: str, count: int = 6) -> list[dict[str, Any]]:
+        item = next((row for row in self.list_clip_publish(job_id) if row.get("clip_id") == _safe_clip_name(clip_id)), None)
+        if not item:
+            raise FileNotFoundError("切片尚未导出")
+        tools = detect_ffmpeg()
+        if not tools.ffmpeg:
+            raise RuntimeError("FFmpeg 不可用，无法截取封面候选帧")
+        duration = max(0.1, float(item.get("duration") or (float(item["source_end"]) - float(item["source_start"]))))
+        timestamps = [duration * index / max(1, min(int(count), 8)) for index in range(max(1, min(int(count), 8)))]
+        candidates = []
+        for timestamp in timestamps:
+            source_time = float(item["source_start"]) + timestamp
+            result = subprocess.run([tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{source_time:.3f}", "-i", str(self.get_job(job_id).input_path), "-frames:v", "1", "-vf", "scale=640:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"], capture_output=True, timeout=30)
+            if result.returncode == 0 and result.stdout:
+                candidates.append({"timestamp": round(timestamp, 3), "image": "data:image/jpeg;base64," + base64.b64encode(result.stdout).decode("ascii")})
         return candidates
 
     def render_clip(
@@ -175,6 +297,8 @@ class ClipOperationsMixin:
         end: float,
         style_payload: dict[str, Any] | None = None,
         name: str | None = None,
+        title: str | None = None,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         job = self.get_job(job_id)
         if not job.segments_path.exists():
@@ -184,17 +308,36 @@ class ClipOperationsMixin:
         end = max(start + 0.25, float(end))
         style = SubtitleStyle.from_dict(style_payload)
         clip_id = _safe_clip_name(name or f"clip_{start:.2f}_{end:.2f}")
+        # Reuse an existing directory for the same source range.  Otherwise
+        # allocate a suffix so a restarted batch never overwrites or resets
+        # an earlier 01/02 name.
+        if job.clips_dir.is_dir():
+            for existing in job.clips_dir.glob("*/metadata.json"):
+                try:
+                    old = json.loads(existing.read_text(encoding="utf-8"))
+                    if abs(float(old.get("source_start", -99999)) - start) < 0.05 and abs(float(old.get("source_end", -99999)) - end) < 0.05:
+                        clip_id = existing.parent.name
+                        break
+                except (OSError, ValueError, TypeError):
+                    continue
+            else:
+                candidate = clip_id
+                suffix = 2
+                while (job.clips_dir / clip_id).exists():
+                    clip_id = f"{candidate}_{suffix:02d}"
+                    suffix += 1
         clip_key = f"{job.id}/{clip_id}"
         with self._rendering_clips_lock:
             if clip_key in self._rendering_clips:
                 raise RuntimeError("该片段正在渲染中,请等当前渲染完成后再试。")
             self._rendering_clips.add(clip_key)
         try:
-            job.clips_dir.mkdir(parents=True, exist_ok=True)
-            ass_path = job.clips_dir / f"{clip_id}.ass"
-            srt_path = job.clips_dir / f"{clip_id}.srt"
-            metadata_path = job.clips_dir / f"{clip_id}.json"
-            output_path = job.clips_dir / f"{clip_id}.mp4"
+            clip_dir = job.clips_dir / clip_id
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            ass_path = clip_dir / "subtitle.ass"
+            srt_path = clip_dir / "subtitle.srt"
+            metadata_path = clip_dir / "metadata.json"
+            output_path = clip_dir / "video.mp4"
             _segment_data, segments_version = self._load_segments(job_id)
             cache_key = _clip_export_cache_key(
                 job=job,
@@ -214,6 +357,9 @@ class ClipOperationsMixin:
             if cached_metadata is not None:
                 cached_segments = cached_metadata.get("segments")
                 return {
+                    "clip_id": str(cached_metadata.get("clip_id") or clip_id),
+                    **{key: cached_metadata.get(key) for key in ("clip_id", "state", "keep", "publish", "title", "description", "tags", "tid", "copyright", "source", "dynamic", "publish_info") if key in cached_metadata},
+                    "title": str(title or cached_metadata.get("title") or f"切片 {int(start // 60):02d}:{int(start % 60):02d} - {int(end // 60):02d}:{int(end % 60):02d}"),
                     "filename": output_path.name,
                     "path": str(output_path),
                     "start": start,
@@ -248,6 +394,7 @@ class ClipOperationsMixin:
                 start=start,
                 end=end,
                 style=style,
+                progress_callback=progress_callback,
                 cancel_check=lambda: job.id not in self._jobs,
             )
             # Write the cache marker only after ffmpeg succeeds.  If encoding
@@ -257,6 +404,18 @@ class ClipOperationsMixin:
                 metadata_path,
                 json.dumps(
                     {
+                        "clip_id": clip_id,
+                        "state": "candidate",
+                        "keep": False,
+                        "publish": False,
+                        "title": str(title or f"切片 {int(start // 60):02d}:{int(start % 60):02d} - {int(end // 60):02d}:{int(end % 60):02d}"),
+                        "description": "",
+                        "tags": [],
+                        "tid": 0,
+                        "copyright": "original",
+                        "source": "",
+                        "dynamic": "",
+                        "publish_info": {"status": "draft", "bvid": "", "aid": None, "url": "", "error": ""},
                         "cache_key": cache_key,
                         "cache_version": _CLIP_EXPORT_CACHE_VERSION,
                         "source_media": job.media_name,
@@ -275,7 +434,9 @@ class ClipOperationsMixin:
         finally:
             self._rendering_clips.discard(clip_key)
         return {
+            "clip_id": clip_id,
             "filename": output_path.name,
+            "title": str(title or f"切片 {int(start // 60):02d}:{int(start % 60):02d} - {int(end // 60):02d}:{int(end % 60):02d}"),
             "path": str(output_path),
             "start": start,
             "end": end,

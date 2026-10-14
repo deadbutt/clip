@@ -2870,9 +2870,12 @@ class JobManager(ClipOperationsMixin):
 
     def clip_download_path(self, job_id: str, filename: str) -> Path:
         job = self.get_job(job_id)
-        path = (job.clips_dir / Path(filename).name).resolve()
+        relative = Path(filename)
+        if len(relative.parts) != 2:
+            raise FileNotFoundError(filename)
+        path = (job.clips_dir / relative).resolve()
         root = job.clips_dir.resolve()
-        if root not in path.parents or path.suffix.lower() not in {".mp4", ".srt", ".ass", ".json"}:
+        if root not in path.parents or path.suffix.lower() not in {".mp4", ".srt", ".ass", ".json", ".jpg", ".jpeg", ".png", ".webp"}:
             raise FileNotFoundError(filename)
         if not path.exists():
             raise FileNotFoundError(filename)

@@ -195,9 +195,15 @@ const clipActiveSourceLabelEl = document.querySelector('#clipActiveSourceLabel')
 const clipModelRunStateEl = document.querySelector('#clipModelRunState');
 const clipRulesRunStateEl = document.querySelector('#clipRulesRunState');
 const renderClipQueueBtn = document.querySelector('#renderClipQueue');
+const toggleClipExportBtn = document.querySelector('#toggleClipExport');
+const publishClipOptions = document.querySelector('#publishClipOptions');
 const clipStatusEl = document.querySelector('#clipStatus');
 const clipListEl = document.querySelector('#clipList');
 const clipCandidateCountEl = document.querySelector('#clipCandidateCount');
+const clipExportProgressEl = document.querySelector('#clipExportProgress');
+const clipExportProgressLabelEl = document.querySelector('#clipExportProgressLabel');
+const clipExportProgressPercentEl = document.querySelector('#clipExportProgressPercent');
+const clipExportProgressBarEl = document.querySelector('#clipExportProgressBar');
 const clipModelStatusEl = document.querySelector('#clipModelStatus');
 const clipContextMenu = document.querySelector('#clipContextMenu');
 const openProofreadBtn = document.querySelector('#openProofread');
@@ -522,6 +528,7 @@ function openClips() {
   updateClipActions();
   updateTimelineClipRange();
   clipsModal.classList.remove('is-hidden');
+  syncRenderedClipStates();
 }
 function closeClips() { clipsModal.classList.add('is-hidden'); }
 
@@ -544,6 +551,7 @@ function publishPayload() {
     source: publishSourceInput.value,
     upload_variant: publishVariantSelect.value,
     dynamic: publishDynamicInput.value,
+    clip_id: getSelectedPublishClipId(),
   };
 }
 
@@ -671,6 +679,7 @@ async function openPublishDraft() {
     const hasProcessed = (data.available_variants || []).includes('processed');
     if (processedOption) processedOption.classList.toggle('is-hidden', !hasProcessed);
     publishVariantSelect.value = hasProcessed && data.upload_variant === 'processed' ? 'processed' : 'original';
+    await loadPublishClips(data);
     if (data.cover_available) {
       publishCoverPreview.src = apiUrl(`api/jobs/${currentJob.id}/thumbnail`);
       publishCoverPreview.classList.remove('is-hidden');
@@ -692,6 +701,49 @@ async function openPublishDraft() {
   }
 }
 
+async function loadPublishClips(baseDraft = {}) {
+  if (!publishClipOptions || !currentJob) return;
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/clip-publish`);
+    const clips = (data.clips || []).filter((clip) => clip.filename && clip.publish_info?.status !== 'submitted');
+    publishClipOptions.replaceChildren();
+    for (const clip of clips) {
+      const status = clip.publish_info?.status === 'failed' ? ' · 失败可重试' : '';
+      const label = clip.title && !/^input(?:\.|$)/i.test(clip.title) ? clip.title : `切片 ${formatTimelineTime(clip.source_start)} - ${formatTimelineTime(clip.source_end)}`;
+      publishClipOptions.appendChild(new Option(`${label} · ${formatTimelineTime(clip.source_start)}-${formatTimelineTime(clip.source_end)}${status}`, `clip:${clip.clip_id}`));
+    }
+  } catch (error) {
+    publishClipOptions.replaceChildren();
+    publishClipOptions.appendChild(new Option('没有已导出的切片', ''));
+  }
+}
+
+function getSelectedPublishClipId() {
+  const value = publishVariantSelect?.value || '';
+  return value.startsWith('clip:') ? value.slice(5) : '';
+}
+
+function updateClipCoverSource() {
+  const clipId = getSelectedPublishClipId();
+  if (clipId) {
+    loadClipCoverCandidates(clipId);
+  } else {
+    loadPublishCoverCandidates();
+  }
+}
+
+async function loadClipCoverCandidates(clipId) {
+  if (!publishCoverCandidates || !currentJob) return;
+  publishCoverCandidates.textContent = '正在截取当前切片的候选封面…';
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(clipId)}/cover-candidates`);
+    const candidates = data.candidates || [];
+    publishCoverCandidates.innerHTML = candidates.length
+      ? `<span class="meta">从当前切片中选择封面</span><div class="publish-cover-grid">${candidates.map((item) => `<button type="button" class="publish-cover-candidate" data-cover-time="${item.timestamp}"><img src="${item.image}" alt="${item.timestamp} 秒画面" /><small>${item.timestamp}s</small></button>`).join('')}</div>`
+      : '<span class="meta">没有可用的切片画面候选</span>';
+  } catch (error) { publishCoverCandidates.textContent = error.message || '切片候选封面读取失败'; }
+}
+
 async function loadPublishCoverCandidates() {
   if (!publishCoverCandidates || !currentJob) return;
   publishCoverCandidates.textContent = '正在截取视频候选封面…';
@@ -711,7 +763,11 @@ async function savePublishDraft() {
   savePublishBtn.disabled = true;
   publishStatusEl.textContent = '保存中…';
   try {
-    const data = await publishRequest(`api/jobs/${currentJob.id}/publish`, {
+    const clipId = getSelectedPublishClipId();
+    const endpoint = clipId
+      ? `api/jobs/${currentJob.id}/clips/${encodeURIComponent(clipId)}/publish`
+      : `api/jobs/${currentJob.id}/publish`;
+    const data = await publishRequest(endpoint, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(publishPayload()),
     });
@@ -740,7 +796,11 @@ async function submitPublishDraft() {
   submitPublishBtn.disabled = true;
   publishStatusEl.textContent = '正在创建投稿任务…';
   try {
-    const data = await publishRequest(`api/jobs/${currentJob.id}/publish/submit`, {
+    const clipId = getSelectedPublishClipId();
+    const endpoint = clipId
+      ? `api/jobs/${currentJob.id}/clips/${encodeURIComponent(clipId)}/publish-submit`
+      : `api/jobs/${currentJob.id}/publish/submit`;
+    const data = await publishRequest(endpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...publishPayload(), confirm_uncertain_retry: confirmUncertainRetry,
         confirm_duplicate_submission: confirmDuplicateSubmission }),
@@ -1107,6 +1167,24 @@ publishCopyrightSelect?.addEventListener('change', () => {
   publishSourceLabel.classList.toggle('is-hidden', !repost);
 });
 publishTagsInput?.addEventListener('input', updatePublishTagsHint);
+publishVariantSelect?.addEventListener('change', async () => {
+  const clipId = getSelectedPublishClipId();
+  if (!clipId || !currentJob) { updateClipCoverSource(); return; }
+  try {
+    const data = await publishRequest(`api/jobs/${currentJob.id}/clip-publish`);
+    const clip = (data.clips || []).find((item) => String(item.clip_id) === clipId);
+    if (!clip) return;
+    publishTitleInput.value = clip.title || publishTitleInput.value;
+    publishDescriptionInput.value = clip.description || '';
+    publishTagsInput.value = Array.isArray(clip.tags) ? clip.tags.join(', ') : '';
+    publishCopyrightSelect.value = clip.copyright || 'original';
+    publishSourceInput.value = clip.source || '';
+    publishDynamicInput.value = clip.dynamic || '';
+    await loadPublishCategories(clip.tid || 0);
+    publishStatusEl.textContent = clip.publish_info?.status === 'failed' ? `上次失败：${clip.publish_info.error || '可重试'}` : '当前编辑的是这个切片的投稿信息';
+    updateClipCoverSource();
+  } catch (error) { publishStatusEl.textContent = error.message || '读取切片投稿信息失败'; }
+});
 publishCoverInput?.addEventListener('change', async () => {
   const file = publishCoverInput.files?.[0];
   if (!file || !currentJob) return;
@@ -1114,9 +1192,14 @@ publishCoverInput?.addEventListener('change', async () => {
   try {
     const body = new FormData();
     body.append('cover', file, file.name);
-    const data = await publishRequest(`api/jobs/${currentJob.id}/publish/cover`, { method: 'POST', body });
+    const selectedClipId = getSelectedPublishClipId();
+    const data = await publishRequest(selectedClipId
+      ? `api/jobs/${currentJob.id}/clips/${encodeURIComponent(selectedClipId)}/cover`
+      : `api/jobs/${currentJob.id}/publish/cover`, { method: 'POST', body });
     if (!data.cover_available) throw new Error('封面上传失败');
-    publishCoverPreview.src = `${apiUrl(`api/jobs/${currentJob.id}/thumbnail`)}?t=${Date.now()}`;
+    publishCoverPreview.src = selectedClipId
+      ? `${apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(selectedClipId)}.jpg`)}?t=${Date.now()}`
+      : `${apiUrl(`api/jobs/${currentJob.id}/thumbnail`)}?t=${Date.now()}`;
     publishCoverPreview.classList.remove('is-hidden');
     publishCoverStatus.textContent = '已使用自定义封面';
   } catch (error) {
@@ -1130,11 +1213,17 @@ publishCoverCandidates?.addEventListener('click', async (event) => {
   if (!button || !currentJob) return;
   publishCoverStatus.textContent = '正在应用候选封面…';
   try {
-    await publishRequest(`api/jobs/${currentJob.id}/publish/cover-frame`, {
+    const clipId = getSelectedPublishClipId();
+    const coverEndpoint = clipId
+      ? `api/jobs/${currentJob.id}/clips/${encodeURIComponent(clipId)}/cover-frame`
+      : `api/jobs/${currentJob.id}/publish/cover-frame`;
+    await publishRequest(coverEndpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ timestamp: Number(button.dataset.coverTime) }),
     });
-    publishCoverPreview.src = `${apiUrl(`api/jobs/${currentJob.id}/thumbnail`)}?t=${Date.now()}`;
+    publishCoverPreview.src = clipId
+      ? `${apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(clipId)}/cover.jpg`)}?t=${Date.now()}`
+      : `${apiUrl(`api/jobs/${currentJob.id}/thumbnail`)}?t=${Date.now()}`;
     publishCoverPreview.classList.remove('is-hidden');
     publishCoverStatus.textContent = '已选择视频画面作为封面';
   } catch (error) {
@@ -1420,6 +1509,12 @@ findClipsBtn.addEventListener('click', () => selectClipSource('model'));
 findClipsRulesBtn.addEventListener('click', () => selectClipSource('rules'));
 startClipAnalysisBtn.addEventListener('click', () => findClipCandidates(activeClipSource));
 if (renderClipQueueBtn) renderClipQueueBtn.addEventListener('click', renderQueuedClips);
+if (toggleClipExportBtn) toggleClipExportBtn.addEventListener('click', () => {
+  const selectAll = selectedClips.some((clip) => !clip.exported && clip.exportSelected !== true);
+  selectedClips.forEach((clip) => { if (!clip.exported) clip.exportSelected = selectAll; });
+  toggleClipExportBtn.textContent = selectAll ? '取消全选' : '一键全选';
+  renderClipQueue();
+});
 translateZhBtn.addEventListener('click', translateCurrentSubtitles);
 translateEngineSelect?.addEventListener('change', updateTranslateAction);
 restoreTranslationBtn.addEventListener('click', restoreSourceSubtitles);
@@ -5642,6 +5737,18 @@ clipListEl.addEventListener('click', (event) => {
   }
   event.stopPropagation();
   const action = button.dataset.clipAction;
+  if (action === 'publish') {
+    clip.publish = Boolean(button.checked);
+    event.preventDefault();
+    scheduleClipStatePersistence();
+    return;
+  }
+  if (action === 'export-select') {
+    clip.exportSelected = Boolean(button.checked);
+    renderClipQueue();
+    event.preventDefault();
+    return;
+  }
   if (action === 'select') selectClip(id, { seek: true });
   else if (action === 'preview') {
     preview.currentTime = clip.start;
@@ -5689,6 +5796,27 @@ function ensureClipQueueForJob() {
   renderClipQueue();
   syncClipSourceTabs();
   syncClipEditor();
+}
+
+async function syncRenderedClipStates() {
+  if (!currentJob || !selectedClips.length) return;
+  try {
+    const response = await fetch(apiUrl(`api/jobs/${currentJob.id}/clip-publish`), { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) return;
+    const rendered = data.clips || [];
+    selectedClips.forEach((clip) => {
+      const match = rendered.find((item) => Math.abs(Number(item.source_start) - Number(clip.start)) < 0.05 && Math.abs(Number(item.source_end) - Number(clip.end)) < 0.05);
+      if (match) {
+        clip.exported = true;
+        clip.exportSelected = false;
+        clip.renderedId = match.clip_id;
+        clip.exportState = '已导出';
+        clip.exportedTitle = match.title || clip.title;
+      }
+    });
+    renderClipQueue();
+  } catch (_) { /* UI can continue using local candidate state. */ }
 }
 
 function activeClip() {
@@ -5744,11 +5872,13 @@ function removeQueuedClip(id) {
 function renderClipQueue() {
   const alternateCount = selectedClips.filter((clip) => clip.lane === 'alternate').length;
   const primaryCount = selectedClips.length - alternateCount;
+  const exportedCount = selectedClips.filter((clip) => clip.exported).length;
   if (clipCandidateCountEl) {
     clipCandidateCountEl.textContent = alternateCount
-      ? `${primaryCount} 主候选 · ${alternateCount} 重复备选`
-      : `${selectedClips.length} 个`;
+      ? `${exportedCount} 已导出 · ${primaryCount} 主候选 · ${alternateCount} 重复备选`
+      : `${exportedCount} 已导出 · ${selectedClips.length} 个候选`;
   }
+  clipExportProgressEl?.classList.remove('is-hidden');
   if (!selectedClips.length) {
     clipListEl.innerHTML = '<div class="clip-empty">先选择上方的切片来源，再点击“开始切”；生成后会显示在这里，并同步到主时间轴。</div>';
     updateTimelineClipRange();
@@ -5756,12 +5886,12 @@ function renderClipQueue() {
     return;
   }
   clipListEl.innerHTML = selectedClips.map((clip, index) => `
-    <div class="clip-card queue${clip.lane === 'alternate' ? ' alternate' : ''}${clip.id === activeClipId ? ' selected' : ''}" data-clip-id="${escapeHtml(clip.id)}">
+    <div class="clip-card queue${clip.lane === 'alternate' ? ' alternate' : ''}${clip.id === activeClipId ? ' selected' : ''}${clip.exportSelected === true ? ' export-selected' : ''}${clip.exported ? ' clip-is-exported' : ''}" data-clip-id="${escapeHtml(clip.id)}">
       <div class="clip-order">${index + 1}</div>
       <div>
         <div class="clip-card-head">
-          <span>${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round((clip.end - clip.start) * 10) / 10}s</span>
-          <strong>${clip.lane === 'alternate' ? '重复备选' : clip.selectionMethod === 'model' ? 'AI 精选' : clip.selectionMethod === 'manual' ? '手动' : '规则粗筛'}${clip.score ? ' · ' + Math.round(clip.score) : ''}</strong>
+          <span>${clip.exported ? '<span class="clip-completed-badge">✓ 已导出</span>' : `<label class="clip-export-check"><input type="checkbox" data-clip-action="export-select" ${clip.exportState === '导出中' ? 'disabled' : ''} ${clip.exportSelected === true ? 'checked' : ''}> 导出</label>`} ${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)} · ${Math.round((clip.end - clip.start) * 10) / 10}s</span>
+          <strong class="clip-export-state">${clip.exportState || (clip.exported ? '已导出' : '未导出')} · ${clip.lane === 'alternate' ? '重复备选' : clip.selectionMethod === 'model' ? 'AI 精选' : clip.selectionMethod === 'manual' ? '手动' : '规则粗筛'}${clip.score ? ' · ' + Math.round(clip.score) : ''}</strong>
         </div>
         <div class="clip-title">${escapeHtml(clip.title)}</div>
         <div class="clip-reason">${escapeHtml(clip.reason || '可在主时间轴上继续调整范围')}</div>
@@ -5828,6 +5958,7 @@ async function renderSelectedClip() {
     clipStatusEl.textContent = '先从已选切片里选中一个片段。';
     return;
   }
+  if (clip.exported || clip.exportState === '导出中') return;
   const saved = await saveSegments();
   if (!saved) return;
   const start = Number(clip.start || 0);
@@ -5838,27 +5969,36 @@ async function renderSelectedClip() {
   }
   clipStatusEl.textContent = '正在导出切片...';
   try {
-    const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
+    const res = await fetchClipExport(currentJob.id, clip, 0, 1, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         start,
         end,
         style: collectSubtitleStyle(),
-        name: clip.title || `clip_${start.toFixed(1)}_${end.toFixed(1)}`
+        name: clip.title || `clip_${start.toFixed(1)}_${end.toFixed(1)}`,
+        title: clip.title || `切片 ${formatTimelineTime(start)} - ${formatTimelineTime(end)}`
       })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '导出切片失败');
+    clip.exported = true;
+    clip.exportedTitle = data.title || clip.title;
+    clip.exportState = '已导出';
+    clip.exportSelected = false;
+    updateClipExportProgress(1, 1, `已导出：${clip.title || '未命名切片'}`);
+    renderClipQueue();
     const files = data.files || { mp4: data.filename };
     const links = Object.entries(files).map(([kind, filename]) => {
       const label = kind === 'metadata' ? '原片时间映射 JSON' : kind.toUpperCase();
-      const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(filename)}`);
+      const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(data.clip_id || clip.id)}/${encodeURIComponent(filename)}`);
       return `<a href="${href}" target="_blank">${escapeHtml(label)}</a>`;
     }).join(' · ');
     clipStatusEl.innerHTML = `已导出原片 ${formatTimelineTime(data.start)} - ${formatTimelineTime(data.end)}；切片内时间从 00:00 开始：${links}`;
   } catch (err) {
     clipStatusEl.textContent = '导出切片失败：' + (err.message || err);
+    clip.exportState = '导出失败';
+    renderClipQueue();
   } finally {
     updateClipActions();
   }
@@ -5872,44 +6012,94 @@ async function renderQueuedClips() {
   const outputs = [];
   const failures = [];
   try {
-    for (let index = 0; index < selectedClips.length; index += 1) {
-      const clip = selectedClips[index];
+    const exportClips = selectedClips.filter((clip) => clip.exportSelected === true && !clip.exported);
+    if (!exportClips.length) {
+      clipStatusEl.textContent = '请先勾选要导出的切片。';
+      return;
+    }
+    for (let index = 0; index < exportClips.length; index += 1) {
+      const clip = exportClips[index];
       activeClipId = clip.id;
       renderClipQueue();
       setClipRange(clip.start, clip.end, true);
-      clipStatusEl.textContent = `正在导出 ${index + 1}/${selectedClips.length}：${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)}...`;
+      updateClipExportProgress(index, exportClips.length, `正在导出：${clip.title || '未命名切片'}`);
       try {
-        const res = await fetch(apiUrl(`api/jobs/${currentJob.id}/clips/render`), {
+        const res = await fetchClipExport(currentJob.id, clip, index, exportClips.length, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             start: clip.start,
             end: clip.end,
             style: collectSubtitleStyle(),
-            name: `${String(index + 1).padStart(2, '0')}_${clip.title || `clip_${clip.start.toFixed(1)}_${clip.end.toFixed(1)}`}`
+            name: `${String(index + 1).padStart(2, '0')}_${clip.title || `clip_${clip.start.toFixed(1)}_${clip.end.toFixed(1)}`}`,
+            title: clip.title || `切片 ${formatTimelineTime(clip.start)} - ${formatTimelineTime(clip.end)}`
           })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || '导出切片失败');
+        clip.renderedId = data.clip_id;
+        clip.exported = true;
+        clip.exportSelected = false;
+        clip.exportState = '已导出';
+        clip.exportedTitle = data.title || clip.title;
         outputs.push({ index, data });
+        updateClipExportProgress(index + 1, exportClips.length, `已完成：${clip.title || '未命名切片'}`);
       } catch (err) {
+        clip.exportState = '导出失败';
         failures.push({ index, message: err.message || String(err) });
+        updateClipExportProgress(index + 1, exportClips.length, `失败：${clip.title || '未命名切片'}`);
       }
+      renderClipQueue();
+      persistClipSourceState();
     }
     const links = outputs.map(({ data, index }) => {
       const filename = data.filename || (data.files || {}).mp4;
-      const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(filename)}`);
+      const href = apiUrl(`api/jobs/${currentJob.id}/clips/${encodeURIComponent(data.clip_id || selectedClips[index]?.renderedId || '')}/${encodeURIComponent(filename)}`);
       return `<a href="${href}" target="_blank">#${index + 1} MP4</a>`;
     }).join(' · ');
     const failureText = failures.length
       ? `；${failures.length} 个失败（${failures.map((item) => `#${item.index + 1} ${item.message}`).join('；')}）`
       : '';
-    clipStatusEl.innerHTML = `批量导出完成：${outputs.length} 个成功${failureText}${links ? `：${links}` : ''}`;
+    clipStatusEl.innerHTML = `批量导出完成：${outputs.length} 个成功${failureText}${links ? `：${links}` : ''}<div class="clip-export-progress"><span style="width:100%"></span></div>`;
+    updateClipExportProgress(exportClips.length, exportClips.length, `导出完成：${outputs.length}/${exportClips.length}`);
   } catch (err) {
     clipStatusEl.textContent = '批量导出失败：' + (err.message || err);
   } finally {
     updateClipActions();
   }
+}
+
+function updateClipExportProgress(done, total, label) {
+  if (!clipExportProgressEl) return;
+  const percent = total ? Math.round(done / total * 100) : 0;
+  clipExportProgressEl.classList.remove('is-hidden');
+  clipExportProgressLabelEl.textContent = label || '准备导出';
+  clipExportProgressPercentEl.textContent = `${percent}%`;
+  clipExportProgressBarEl.style.width = `${percent}%`;
+}
+
+async function fetchClipExport(jobId, clip, index, total, options) {
+  const requestId = makeClipId();
+  const payload = JSON.parse(options.body);
+  payload.request_id = requestId;
+  clip.exportState = '导出中';
+  renderClipQueue();
+  updateClipExportProgress(index, total, `正在导出：${clip.title}`);
+  let polling = false;
+  const timer = setInterval(async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const res = await fetch(apiUrl(`api/jobs/${jobId}/clip-export-progress/${requestId}`), { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        updateClipExportProgress(index + Number(data.progress || 0), total, `正在导出：${clip.title}`);
+      }
+    } catch (_) {} finally { polling = false; }
+  }, 500);
+  try {
+    return await fetch(apiUrl(`api/jobs/${jobId}/clips/render`), { ...options, body: JSON.stringify(payload) });
+  } finally { clearInterval(timer); }
 }
 
 function jobSummary(job) {

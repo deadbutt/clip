@@ -2433,6 +2433,23 @@ button.ghost {
   background: #fbfdfc;
 }
 #clipsModal .clip-card.queue:hover { border-color: #8bc8be; background: #f4fbf9; }
+#clipsModal .clip-card.queue.export-selected { border-left: 4px solid var(--teal); }
+#clipsModal .clip-card.queue.clip-is-exported,
+#clipsModal .clip-card.queue.clip-is-exported.alternate { border: 1px dashed #b6bec3; border-left: 4px solid #8c979e; background: #edf0f2; box-shadow: none; }
+#clipsModal .clip-card.queue.clip-is-exported .clip-title,
+#clipsModal .clip-card.queue.clip-is-exported .clip-export-state { color: #68757e; }
+#clipsModal .clip-card.queue.clip-is-exported .clip-order { background: #dce2e6; color: #69767e; }
+#clipsModal .clip-completed-badge { display: inline-block; padding: 3px 8px; margin-right: 8px; border-radius: 5px; background: #d6dfe5; color: #52616c; font-weight: 700; }
+#clipsModal .clip-export-check { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; color: var(--teal); margin-right: 8px; }
+#clipsModal .clip-export-check input { width: 16px; height: 16px; accent-color: var(--teal); }
+#clipsModal .clip-export-check input:disabled { opacity: .65; cursor: not-allowed; }
+#clipsModal .clip-export-state { color: #33796d; }
+.clip-export-progress { height: 6px; margin-top: 8px; overflow: hidden; background: #e6efed; border-radius: 3px; }
+.clip-export-progress span { display: block; height: 100%; background: var(--teal); transition: width .25s ease; }
+#clipsModal .clip-export-progress-panel { margin: 8px 0 10px; padding: 8px 10px; background: #f2f8f6; border: 1px solid #dcebe7; border-radius: 8px; }
+#clipsModal .clip-export-progress-meta { display: flex; justify-content: space-between; gap: 12px; color: #39766d; font-size: 12px; }
+#clipsModal .clip-export-progress-track { height: 8px; margin-top: 6px; overflow: hidden; background: #dcebe7; border-radius: 5px; }
+#clipsModal .clip-export-progress-track span { display: block; width: 0; height: 100%; background: var(--teal); transition: width .25s ease; }
 #clipsModal .clip-card.queue.alternate {
   border-color: #d9d8f0;
   background: #fbfaff;
