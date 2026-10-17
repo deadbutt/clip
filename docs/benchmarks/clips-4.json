@@ -1,0 +1,13 @@
+{
+  "stage": "clips",
+  "source": "D:\\MOSS-Transcribe-Diarize\\videos\\0956c23e1712605c326676e34acc598074c4ed76ade1eaa9c0681766e095c23e_input.mp4",
+  "elapsed_sec": 6.492,
+  "peak_tree_rss_mib": 3813.8,
+  "gpu_scope": "all GPUs, device-wide including other processes",
+  "gpu_samples": 9,
+  "gpu_baseline_mib": 189.0,
+  "gpu_peak_used_mib": 189.0,
+  "returncode": 0,
+  "result": "{\"clips\": 4, \"duration_each_sec\": 6, \"workers\": 4, \"output_bytes\": [3986749, 4919304, 4133801, 4289606], \"subtitle_burn\": true}\r\n",
+  "stderr": ""
+}

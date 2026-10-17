@@ -116,6 +116,8 @@ def has_background_audio(
     words: list[tuple[float, float, str]] | None,
     media_path: str | Path,
     work_dir: str | Path,
+    *,
+    prepared_audio_path: str | Path | None = None,
 ) -> bool:
     """用 whisper 词表判断有无持续背景音：语音间隙的响度是否显著。
 
@@ -124,9 +126,12 @@ def has_background_audio(
     """
     try:
         import numpy as np
-        import torchaudio
     except Exception:
         return True
+    try:
+        import soundfile as sf
+    except Exception:
+        sf = None
     if not words or len(words) < 8:
         return True
 
@@ -140,34 +145,66 @@ def has_background_audio(
         # 间隙样本太少（连续说话），无从判断，保守认为有背景音。
         return True
 
-    audio_path: Path | None = None
+    audio_path: Path | None = Path(prepared_audio_path) if prepared_audio_path is not None else None
+    owns_audio = audio_path is None
     try:
         try:
             ffmpeg = detect_ffmpeg().ffmpeg
             out_dir = Path(work_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            audio_path = out_dir / "bgdetect_16k.wav"
-            subprocess.run(
-                [ffmpeg, "-v", "error", "-i", str(media_path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path), "-y"],
-                check=True,
-                capture_output=True,
-                timeout=600,
-            )
-            waveform, sr = torchaudio.load(str(audio_path))
+            if audio_path is None:
+                audio_path = out_dir / "bgdetect_16k.wav"
+            if not audio_path.is_file():
+                subprocess.run(
+                    [ffmpeg, "-v", "error", "-i", str(media_path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path), "-y"],
+                    check=True,
+                    capture_output=True,
+                    timeout=600,
+                )
         except Exception:
             return True
-        data = waveform.mean(dim=0).to("cpu").numpy()
-        total = len(data)
 
-        def rms(start: float, end: float) -> float:
-            a, b = int(start * sr), min(int(end * sr), total)
-            if b - a < int(0.2 * sr):
-                return 0.0
-            chunk = data[a:b]
-            return float(np.sqrt(np.mean(chunk * chunk)))
+        try:
+            if sf is None:
+                raise RuntimeError("soundfile is unavailable")
+            audio_file = sf.SoundFile(str(audio_path))
+            sr = int(audio_file.samplerate)
+            total = len(audio_file)
 
-        speech_rms = sorted(rms(s, e) for s, e in spans if e - s >= 0.2)
-        gap_rms = sorted(rms(s, e) for s, e in gaps)
+            def rms(start: float, end: float) -> float:
+                a, b = int(start * sr), min(int(end * sr), total)
+                if b - a < int(0.2 * sr):
+                    return 0.0
+                audio_file.seek(max(0, a))
+                chunk = audio_file.read(max(0, b - a), dtype="float32", always_2d=False)
+                if getattr(chunk, "ndim", 1) > 1:
+                    chunk = chunk.mean(axis=1)
+                return float(np.sqrt(np.mean(chunk * chunk))) if len(chunk) else 0.0
+
+            speech_rms = sorted(rms(s, e) for s, e in spans if e - s >= 0.2)
+            gap_rms = sorted(rms(s, e) for s, e in gaps)
+            audio_file.close()
+        except Exception:
+            # Keep the previous conservative fallback for unusual WAV codecs.
+            try:
+                import torchaudio
+
+                waveform, sr = torchaudio.load(str(audio_path))
+                data = waveform.mean(dim=0).to("cpu").numpy()
+                total = len(data)
+
+                def rms(start: float, end: float) -> float:
+                    a, b = int(start * sr), min(int(end * sr), total)
+                    if b - a < int(0.2 * sr):
+                        return 0.0
+                    chunk = data[a:b]
+                    return float(np.sqrt(np.mean(chunk * chunk)))
+
+                speech_rms = sorted(rms(s, e) for s, e in spans if e - s >= 0.2)
+                gap_rms = sorted(rms(s, e) for s, e in gaps)
+            except Exception:
+                return True
+
         if not speech_rms or not gap_rms:
             return True
         speech_mid = speech_rms[len(speech_rms) // 2]
@@ -178,7 +215,7 @@ def has_background_audio(
     except Exception:
         return True
     finally:
-        if audio_path is not None:
+        if owns_audio and audio_path is not None:
             try:
                 audio_path.unlink(missing_ok=True)
             except OSError:

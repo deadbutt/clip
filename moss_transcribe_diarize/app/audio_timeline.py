@@ -9,8 +9,12 @@
 重抽出的音频与视频播放时间轴完全对齐（已实测验证为插静音而非拉伸）。
 """
 
+import io
 import json
+import math
 import subprocess
+import tempfile
+from itertools import chain
 from pathlib import Path
 
 from .ffmpeg import detect_ffmpeg
@@ -58,43 +62,48 @@ def analyze_audio_timeline(path: str | Path) -> list[tuple[float, float]] | None
     ffprobe = tools.ffprobe
     if not ffprobe:
         return None
+    # Stream ffprobe output through a temporary file: subprocess never holds
+    # the entire packet dump in stdout, and parsing retains only numeric PTS.
+    # The exact median/gap algorithm below is unchanged.
     try:
-        proc = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_packets",
-                "-show_entries",
-                "packet=pts_time",
-                "-of",
-                "json",
-                str(Path(path).expanduser()),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as packet_file:
+            proc = subprocess.run(
+                [
+                    ffprobe, "-v", "error", "-select_streams", "a:0",
+                    "-show_packets", "-show_entries", "packet=pts_time",
+                    "-of", "csv=p=0", str(Path(path).expanduser()),
+                ],
+                stdout=packet_file,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=120,
+            )
+            if proc.returncode != 0:
+                return None
+            packet_file.seek(0)
+            # Old adapters/tests may still return JSON in CompletedProcess.
+            reader = io.StringIO(proc.stdout) if isinstance(proc.stdout, str) else packet_file
+            first_line = reader.readline()
+            if first_line.lstrip().startswith("{"):
+                try:
+                    packets = json.loads(first_line + reader.read()).get("packets") or []
+                    raw_values = (packet.get("pts_time") for packet in packets)
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    return None
+            else:
+                raw_values = chain((first_line,), reader)
+            pts: list[float] = []
+            for raw in raw_values:
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    pts.append(value)
+            return _holes_from_pts(pts)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode != 0:
-        return None
-    try:
-        packets = json.loads(proc.stdout).get("packets") or []
-    except json.JSONDecodeError:
-        return None
-    pts: list[float] = []
-    for packet in packets:
-        raw = packet.get("pts_time")
-        if raw is None:
-            continue
-        try:
-            pts.append(float(raw))
-        except (TypeError, ValueError):
-            continue
-    return _holes_from_pts(pts)
+
 
 
 def total_hole_seconds(holes: list[tuple[float, float]] | None) -> float:

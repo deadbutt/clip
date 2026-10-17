@@ -1,0 +1,62 @@
+{
+  "source": "D:\\MOSS-Transcribe-Diarize\\videos\\0956c23e1712605c326676e34acc598074c4ed76ade1eaa9c0681766e095c23e_input.mp4",
+  "duration_sec": 1059.108571,
+  "video": [
+    {
+      "codec_name": "h264",
+      "width": 1920,
+      "height": 1080,
+      "avg_frame_rate": "60/1"
+    }
+  ],
+  "encoder": "libx264",
+  "preset": "veryfast",
+  "crf": 18,
+  "subtitle": "same full-length Performance benchmark subtitle as original test",
+  "samples": [
+    {
+      "elapsed_sec": 0.65,
+      "percent": 0.15,
+      "effective_speed": 2.5
+    },
+    {
+      "elapsed_sec": 31.12,
+      "percent": 19.86,
+      "effective_speed": 6.76
+    },
+    {
+      "elapsed_sec": 61.62,
+      "percent": 39.49,
+      "effective_speed": 6.787
+    },
+    {
+      "elapsed_sec": 92.06,
+      "percent": 56.79,
+      "effective_speed": 6.533
+    },
+    {
+      "elapsed_sec": 122.5,
+      "percent": 74.71,
+      "effective_speed": 6.459
+    },
+    {
+      "elapsed_sec": 152.9,
+      "percent": 93.44,
+      "effective_speed": 6.473
+    }
+  ],
+  "elapsed_sec": 163.242,
+  "output_bytes": 760511241,
+  "success": true,
+  "effective_speed": 6.488,
+  "output_video": [
+    {
+      "codec_name": "h264",
+      "width": 1920,
+      "height": 1080,
+      "avg_frame_rate": "60/1",
+      "nb_frames": "63542"
+    }
+  ],
+  "temporary_media_cleaned": true
+}

@@ -129,7 +129,7 @@ class ConnectionResetNoiseTest(unittest.TestCase):
             seen.append("silenced again")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             asyncio.run(main())
         self.assertEqual(seen, ["silenced", "silenced again"])
 
@@ -187,47 +187,47 @@ class SerialDemucsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             app = create_app(
                 model_path="fake-model",
-                runs_dir=tmpdir,
+                runs_dir=Path(tmpdir) / "runs",
                 max_new_tokens=8,
                 diarization_backend="pyannote",
             )
             app.state.manager.model_runner = OrderedRunner()
-            client = TestClient(app)
-            with (
-                patch(
-                    "moss_transcribe_diarize.app.vocal_separator.vocal_separation_available",
-                    return_value=True,
-                ),
-                patch(
-                    "moss_transcribe_diarize.app.vocal_separator.separate_vocals",
-                    side_effect=fake_separate_vocals,
-                ),
-                patch(
-                    "moss_transcribe_diarize.app.vocal_separator.has_background_audio",
-                    return_value=False,
-                ),
-                patch("moss_transcribe_diarize.app.jobs._vram_allows_parallel_demucs", return_value=False),
-                patch(
-                    "moss_transcribe_diarize.app.jobs.label_speakers",
-                    side_effect=lambda media, segs, **kw: (
-                        segs,
-                        SpeakerLabelingInfo(True, False, "stub", 1, len(segs), "stub"),
+            with TestClient(app) as client:
+                with (
+                    patch(
+                        "moss_transcribe_diarize.app.vocal_separator.vocal_separation_available",
+                        return_value=True,
                     ),
-                ),
-            ):
-                created = client.post(
-                    "/api/jobs", files={"file": ("sample.wav", b"audio", "audio/wav")}
-                )
-                self.assertEqual(created.status_code, 200)
-                job_id = created.json()["id"]
-                job = {}
-                for _ in range(60):
-                    job = client.get(f"/api/jobs/{job_id}").json()
-                    if job["status"] in {"waiting_review", "failed"}:
-                        break
-                    time.sleep(0.05)
-            self.assertEqual(job["status"], "waiting_review")
-            self.assertEqual(order, ["transcribe", "demucs"])
+                    patch(
+                        "moss_transcribe_diarize.app.vocal_separator.separate_vocals",
+                        side_effect=fake_separate_vocals,
+                    ),
+                    patch(
+                        "moss_transcribe_diarize.app.vocal_separator.has_background_audio",
+                        return_value=False,
+                    ),
+                    patch("moss_transcribe_diarize.app.jobs._vram_allows_parallel_demucs", return_value=False),
+                    patch(
+                        "moss_transcribe_diarize.app.jobs.label_speakers",
+                        side_effect=lambda media, segs, **kw: (
+                            segs,
+                            SpeakerLabelingInfo(True, False, "stub", 1, len(segs), "stub"),
+                        ),
+                    ),
+                ):
+                    created = client.post(
+                        "/api/jobs", files={"file": ("sample.wav", b"audio", "audio/wav")}
+                    )
+                    self.assertEqual(created.status_code, 200)
+                    job_id = created.json()["id"]
+                    job = {}
+                    for _ in range(60):
+                        job = client.get(f"/api/jobs/{job_id}").json()
+                        if job["status"] in {"waiting_review", "failed"}:
+                            break
+                        time.sleep(0.05)
+                self.assertEqual(job["status"], "waiting_review")
+                self.assertEqual(order, ["transcribe", "demucs"])
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
@@ -239,26 +239,26 @@ class TranscribeProgressTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             runner = ProgressLoopRunner(app.state.manager)
             app.state.manager.model_runner = runner
-            client = TestClient(app)
-            created = client.post(
-                "/api/jobs", files={"file": ("sample.wav", b"audio", "audio/wav")}
-            )
-            self.assertEqual(created.status_code, 200)
-            job_id = created.json()["id"]
-            for _ in range(40):
-                job = client.get(f"/api/jobs/{job_id}").json()
-                if job["status"] == "waiting_review":
-                    break
-                time.sleep(0.05)
-            self.assertEqual(job["status"], "waiting_review")
-            # 第一笔 0.8 生效后，后续 0.15/0.3/0.12 都不得把进度拉回去
-            self.assertEqual(len(runner.observed_progress), 4)
-            for earlier, later in zip(runner.observed_progress, runner.observed_progress[1:]):
-                self.assertGreaterEqual(later, earlier)
-            self.assertAlmostEqual(max(runner.observed_progress), 0.8, places=6)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/jobs", files={"file": ("sample.wav", b"audio", "audio/wav")}
+                )
+                self.assertEqual(created.status_code, 200)
+                job_id = created.json()["id"]
+                for _ in range(40):
+                    job = client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] == "waiting_review":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "waiting_review")
+                # 第一笔 0.8 生效后，后续 0.15/0.3/0.12 都不得把进度拉回去
+                self.assertEqual(len(runner.observed_progress), 4)
+                for earlier, later in zip(runner.observed_progress, runner.observed_progress[1:]):
+                    self.assertGreaterEqual(later, earlier)
+                self.assertAlmostEqual(max(runner.observed_progress), 0.8, places=6)
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
@@ -269,14 +269,14 @@ class UploadWhitelistTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
-            client = TestClient(app)
-            resp = client.post(
-                "/api/jobs",
-                files={"file": ("document.pdf", b"%PDF-1.4", "application/pdf")},
-            )
-            self.assertEqual(resp.status_code, 400)
-            self.assertIn("不支持的文件类型", resp.json()["detail"])
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/jobs",
+                    files={"file": ("document.pdf", b"%PDF-1.4", "application/pdf")},
+                )
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("不支持的文件类型", resp.json()["detail"])
 
     def test_upload_accepts_media_suffix(self):
         from fastapi.testclient import TestClient
@@ -284,14 +284,14 @@ class UploadWhitelistTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             try:
-                client = TestClient(app)
-                resp = client.post(
-                    "/api/jobs",
-                    files={"file": ("video.MKV", b"video-bytes", "application/octet-stream")},
-                )
-                self.assertEqual(resp.status_code, 200)
+                with TestClient(app) as client:
+                    resp = client.post(
+                        "/api/jobs",
+                        files={"file": ("video.MKV", b"video-bytes", "application/octet-stream")},
+                    )
+                    self.assertEqual(resp.status_code, 200)
             finally:
                 app.state.manager.shutdown()
 
@@ -305,20 +305,20 @@ class CookiesTempFileTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
-            client = TestClient(app)
-            cookies_content = (
-                "# Netscape HTTP Cookie File\n"
-                ".youtube.com\tTRUE\t/\tTRUE\t0\tCONSENT\tYES\n"
-            )
-            resp = client.post(
-                "/api/cookies/check",
-                files={"file": ("cookies.txt", cookies_content.encode("utf-8"), "text/plain")},
-                data={"browser": "none"},
-            )
-            self.assertEqual(resp.status_code, 200)
-            leftovers = list(Path(tmpdir).glob("*.cookies.txt"))
-            self.assertEqual(leftovers, [], f"cookies 临时文件泄漏: {leftovers}")
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
+            with TestClient(app) as client:
+                cookies_content = (
+                    "# Netscape HTTP Cookie File\n"
+                    ".youtube.com\tTRUE\t/\tTRUE\t0\tCONSENT\tYES\n"
+                )
+                resp = client.post(
+                    "/api/cookies/check",
+                    files={"file": ("cookies.txt", cookies_content.encode("utf-8"), "text/plain")},
+                    data={"browser": "none"},
+                )
+                self.assertEqual(resp.status_code, 200)
+                leftovers = list((Path(tmpdir) / "runs").glob("*.cookies.txt"))
+                self.assertEqual(leftovers, [], f"cookies 临时文件泄漏: {leftovers}")
 
     def test_url_job_failure_deletes_uploaded_cookies(self):
         """/api/jobs/url 建任务失败(空 URL)时任务未入列,上传的 cookies 临时副本必须删除。"""
@@ -327,22 +327,22 @@ class CookiesTempFileTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
-            client = TestClient(app)
-            resp = client.post(
-                "/api/jobs/url",
-                files={
-                    "cookies_file": (
-                        "cookies.txt",
-                        b"# Netscape HTTP Cookie File\n",
-                        "text/plain",
-                    )
-                },
-                data={"url": ""},
-            )
-            self.assertEqual(resp.status_code, 400)
-            leftovers = list(Path(tmpdir).glob("*.cookies.txt"))
-            self.assertEqual(leftovers, [], f"cookies 临时文件泄漏: {leftovers}")
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/jobs/url",
+                    files={
+                        "cookies_file": (
+                            "cookies.txt",
+                            b"# Netscape HTTP Cookie File\n",
+                            "text/plain",
+                        )
+                    },
+                    data={"url": ""},
+                )
+                self.assertEqual(resp.status_code, 400)
+                leftovers = list((Path(tmpdir) / "runs").glob("*.cookies.txt"))
+                self.assertEqual(leftovers, [], f"cookies 临时文件泄漏: {leftovers}")
 
     def test_startup_sweeps_orphan_cookies_files(self):
         """启动清扫只删上一进程遗留的孤儿 .cookies.txt,待下载任务引用的保留。"""
@@ -352,12 +352,13 @@ class CookiesTempFileTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            runs = Path(tmpdir)
+            runs = Path(tmpdir) / "runs"
+            runs.mkdir()
             orphan = runs / "orphan.cookies.txt"
             orphan.write_text("# leftover\n", encoding="utf-8")
             referenced = runs / "pending.cookies.txt"
             referenced.write_text("# pending job\n", encoding="utf-8")
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             mgr = app.state.manager
             mgr._jobs["job-pending"] = JobRecord(
                 id="job-pending",
@@ -393,7 +394,7 @@ class RenderClipConcurrencyTest(unittest.TestCase):
             ffprobe = "ffprobe"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             mgr = app.state.manager
             job, _ = mgr.create_job_for_upload("video.mp4")
             job.segments_path.write_text("[]", encoding="utf-8")
@@ -419,7 +420,7 @@ class RenderClipCacheTest(unittest.TestCase):
             ffprobe = "ffprobe"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             mgr = app.state.manager
             job, input_path = mgr.create_job_for_upload("video.mp4")
             input_path.write_bytes(b"source-media")
@@ -476,96 +477,96 @@ class AppApiTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             runner = FakeRunner()
             app.state.manager.model_runner = runner
-            client = TestClient(app)
+            with TestClient(app) as client:
 
-            created = client.post(
-                "/api/jobs",
-                files={"file": ("sample.wav", b"audio", "audio/wav")},
-                data={
-                    "prompt": "custom prompt",
-                    "max_new_tokens": "5",
-                    "max_len": "456",
-                    "decoding": "sample",
-                    "temperature": "0.7",
-                },
-            )
-            self.assertEqual(created.status_code, 200)
-            job_id = created.json()["id"]
+                created = client.post(
+                    "/api/jobs",
+                    files={"file": ("sample.wav", b"audio", "audio/wav")},
+                    data={
+                        "prompt": "custom prompt",
+                        "max_new_tokens": "5",
+                        "max_len": "456",
+                        "decoding": "sample",
+                        "temperature": "0.7",
+                    },
+                )
+                self.assertEqual(created.status_code, 200)
+                job_id = created.json()["id"]
 
-            job = {}
-            for _ in range(40):
-                job = client.get(f"/api/jobs/{job_id}").json()
-                if job["status"] == "waiting_review":
-                    break
-                time.sleep(0.05)
-            self.assertEqual(job["status"], "waiting_review")
-            self.assertEqual(job["inference"]["prompt"], "custom prompt")
-            self.assertEqual(job["inference"]["max_new_tokens"], 5)
-            self.assertEqual(job["inference"]["max_length"], 456)
-            self.assertEqual(job["inference"]["decoding"], "sample")
-            self.assertEqual(job["inference"]["temperature"], 0.7)
-            self.assertEqual(job["usage"]["generated_tokens"], 5)
-            self.assertEqual(job["usage"]["max_new_tokens"], 5)
-            self.assertTrue(job["usage"]["possibly_truncated"])
-            self.assertEqual(runner.calls[-1]["prompt"], "custom prompt")
-            self.assertEqual(runner.calls[-1]["max_new_tokens"], 5)
-            self.assertEqual(runner.calls[-1]["max_length"], 456)
-            self.assertEqual(runner.calls[-1]["decoding"], "sample")
-            self.assertEqual(runner.calls[-1]["temperature"], 0.7)
+                job = {}
+                for _ in range(40):
+                    job = client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] == "waiting_review":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "waiting_review")
+                self.assertEqual(job["inference"]["prompt"], "custom prompt")
+                self.assertEqual(job["inference"]["max_new_tokens"], 5)
+                self.assertEqual(job["inference"]["max_length"], 456)
+                self.assertEqual(job["inference"]["decoding"], "sample")
+                self.assertEqual(job["inference"]["temperature"], 0.7)
+                self.assertEqual(job["usage"]["generated_tokens"], 5)
+                self.assertEqual(job["usage"]["max_new_tokens"], 5)
+                self.assertTrue(job["usage"]["possibly_truncated"])
+                self.assertEqual(runner.calls[-1]["prompt"], "custom prompt")
+                self.assertEqual(runner.calls[-1]["max_new_tokens"], 5)
+                self.assertEqual(runner.calls[-1]["max_length"], 456)
+                self.assertEqual(runner.calls[-1]["decoding"], "sample")
+                self.assertEqual(runner.calls[-1]["temperature"], 0.7)
 
-            listed = client.get("/api/jobs")
-            self.assertEqual(listed.status_code, 200)
-            self.assertEqual(listed.json()["jobs"][0]["id"], job_id)
+                listed = client.get("/api/jobs")
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(listed.json()["jobs"][0]["id"], job_id)
 
-            media = client.get(f"/api/jobs/{job_id}/media")
-            self.assertEqual(media.status_code, 200)
+                media = client.get(f"/api/jobs/{job_id}/media")
+                self.assertEqual(media.status_code, 200)
 
-            rerun = client.post(f"/api/jobs/{job_id}/rerun", json={"max_new_tokens": 10})
-            self.assertEqual(rerun.status_code, 200)
-            rerun_id = rerun.json()["id"]
-            self.assertNotEqual(rerun_id, job_id)
-            rerun_job = {}
-            for _ in range(40):
-                rerun_job = client.get(f"/api/jobs/{rerun_id}").json()
-                if rerun_job["status"] == "waiting_review":
-                    break
-                time.sleep(0.05)
-            self.assertEqual(rerun_job["status"], "waiting_review")
-            self.assertEqual(rerun_job["media_name"], "sample.wav")
-            self.assertEqual(rerun_job["inference"]["max_new_tokens"], 10)
-            self.assertEqual(runner.calls[-1]["max_new_tokens"], 10)
+                rerun = client.post(f"/api/jobs/{job_id}/rerun", json={"max_new_tokens": 10})
+                self.assertEqual(rerun.status_code, 200)
+                rerun_id = rerun.json()["id"]
+                self.assertNotEqual(rerun_id, job_id)
+                rerun_job = {}
+                for _ in range(40):
+                    rerun_job = client.get(f"/api/jobs/{rerun_id}").json()
+                    if rerun_job["status"] == "waiting_review":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(rerun_job["status"], "waiting_review")
+                self.assertEqual(rerun_job["media_name"], "sample.wav")
+                self.assertEqual(rerun_job["inference"]["max_new_tokens"], 10)
+                self.assertEqual(runner.calls[-1]["max_new_tokens"], 10)
 
-            segments = client.get(f"/api/jobs/{job_id}/segments").json()["segments"]
-            self.assertEqual(segments[0]["speaker"], "S01")
-            segments[0]["text"] = "edited"
-            updated = client.put(
-                f"/api/jobs/{job_id}/segments",
-                # 前端保存样式时总是提交完整 style；show_speaker 默认关闭，
-                # 显式打开才会在 SRT 里输出说话人前缀。
-                json={"segments": segments, "style": {"show_speaker": True, "speaker_names": {"S01": "Alice"}}},
-            )
-            self.assertEqual(updated.status_code, 200)
-            self.assertEqual(updated.json()["segments"][0]["text"], "edited")
-            self.assertEqual(client.get(f"/api/jobs/{job_id}").json()["subtitle_style"]["speaker_names"]["S01"], "Alice")
+                segments = client.get(f"/api/jobs/{job_id}/segments").json()["segments"]
+                self.assertEqual(segments[0]["speaker"], "S01")
+                segments[0]["text"] = "edited"
+                updated = client.put(
+                    f"/api/jobs/{job_id}/segments",
+                    # 前端保存样式时总是提交完整 style；show_speaker 默认关闭，
+                    # 显式打开才会在 SRT 里输出说话人前缀。
+                    json={"segments": segments, "style": {"show_speaker": True, "speaker_names": {"S01": "Alice"}}},
+                )
+                self.assertEqual(updated.status_code, 200)
+                self.assertEqual(updated.json()["segments"][0]["text"], "edited")
+                self.assertEqual(client.get(f"/api/jobs/{job_id}").json()["subtitle_style"]["speaker_names"]["S01"], "Alice")
 
-            download = client.get(f"/api/jobs/{job_id}/download?kind=srt")
-            self.assertEqual(download.status_code, 200)
-            self.assertIn("edited", download.text)
-            self.assertIn("Alice: edited", download.text)
+                download = client.get(f"/api/jobs/{job_id}/download?kind=srt")
+                self.assertEqual(download.status_code, 200)
+                self.assertIn("edited", download.text)
+                self.assertIn("Alice: edited", download.text)
 
-            class Missing:
-                available = False
+                class Missing:
+                    available = False
 
-            with patch("moss_transcribe_diarize.app.jobs.detect_ffmpeg", return_value=Missing()):
-                render = client.post(f"/api/jobs/{job_id}/render", json={"style": {}})
-            self.assertEqual(render.status_code, 503)
+                with patch("moss_transcribe_diarize.app.jobs.detect_ffmpeg", return_value=Missing()):
+                    render = client.post(f"/api/jobs/{job_id}/render", json={"style": {}})
+                self.assertEqual(render.status_code, 503)
 
-            deleted = client.delete(f"/api/jobs/{job_id}")
-            self.assertEqual(deleted.status_code, 200)
-            self.assertEqual(client.get(f"/api/jobs/{job_id}").status_code, 404)
+                deleted = client.delete(f"/api/jobs/{job_id}")
+                self.assertEqual(deleted.status_code, 200)
+                self.assertEqual(client.get(f"/api/jobs/{job_id}").status_code, 404)
 
     def test_auto_max_new_tokens_bumped_by_duration(self):
         from fastapi.testclient import TestClient
@@ -573,31 +574,31 @@ class AppApiTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             runner = FakeRunner()
             app.state.manager.model_runner = runner
-            client = TestClient(app)
+            with TestClient(app) as client:
 
-            with patch("moss_transcribe_diarize.app.jobs.probe_media_duration", return_value=1800.0):
-                created = client.post(
-                    "/api/jobs",
-                    files={"file": ("sample.wav", b"audio", "audio/wav")},
-                    data={"max_new_tokens": "2048"},
-                )
-                self.assertEqual(created.status_code, 200)
-                job_id = created.json()["id"]
-                job = {}
-                for _ in range(40):
-                    job = client.get(f"/api/jobs/{job_id}").json()
-                    if job["status"] == "waiting_review":
-                        break
-                    time.sleep(0.05)
+                with patch("moss_transcribe_diarize.app.jobs.probe_media_duration", return_value=1800.0):
+                    created = client.post(
+                        "/api/jobs",
+                        files={"file": ("sample.wav", b"audio", "audio/wav")},
+                        data={"max_new_tokens": "2048"},
+                    )
+                    self.assertEqual(created.status_code, 200)
+                    job_id = created.json()["id"]
+                    job = {}
+                    for _ in range(40):
+                        job = client.get(f"/api/jobs/{job_id}").json()
+                        if job["status"] == "waiting_review":
+                            break
+                        time.sleep(0.05)
 
-            self.assertEqual(job["status"], "waiting_review")
-            # 1800s of audio -> recommended 25600, which overrides the requested 2048.
-            self.assertEqual(job["inference"]["max_new_tokens"], 25600)
-            self.assertEqual(job["usage"]["max_new_tokens"], 25600)
-            self.assertEqual(runner.calls[-1]["max_new_tokens"], 25600)
+                self.assertEqual(job["status"], "waiting_review")
+                # 1800s of audio -> recommended 25600, which overrides the requested 2048.
+                self.assertEqual(job["inference"]["max_new_tokens"], 25600)
+                self.assertEqual(job["usage"]["max_new_tokens"], 25600)
+                self.assertEqual(runner.calls[-1]["max_new_tokens"], 25600)
 
     def test_running_job_exposes_live_token_progress(self):
         from fastapi.testclient import TestClient
@@ -605,35 +606,35 @@ class AppApiTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
             runner = BlockingRunner()
             app.state.manager.model_runner = runner
-            client = TestClient(app)
+            with TestClient(app) as client:
 
-            created = client.post(
-                "/api/jobs",
-                files={"file": ("sample.wav", b"audio", "audio/wav")},
-                data={"max_new_tokens": "5"},
-            )
-            self.assertEqual(created.status_code, 200)
-            job_id = created.json()["id"]
-            self.assertTrue(runner.started.wait(timeout=2))
+                created = client.post(
+                    "/api/jobs",
+                    files={"file": ("sample.wav", b"audio", "audio/wav")},
+                    data={"max_new_tokens": "5"},
+                )
+                self.assertEqual(created.status_code, 200)
+                job_id = created.json()["id"]
+                self.assertTrue(runner.started.wait(timeout=2))
 
-            running = client.get(f"/api/jobs/{job_id}").json()
-            self.assertEqual(running["status"], "transcribing")
-            self.assertEqual(running["usage"]["generated_tokens"], 3)
-            self.assertEqual(running["usage"]["max_new_tokens"], 5)
-            self.assertAlmostEqual(running["progress"], 0.55)
+                running = client.get(f"/api/jobs/{job_id}").json()
+                self.assertEqual(running["status"], "transcribing")
+                self.assertEqual(running["usage"]["generated_tokens"], 3)
+                self.assertEqual(running["usage"]["max_new_tokens"], 5)
+                self.assertAlmostEqual(running["progress"], 0.55)
 
-            runner.release.set()
-            finished = {}
-            for _ in range(40):
-                finished = client.get(f"/api/jobs/{job_id}").json()
-                if finished["status"] == "waiting_review":
-                    break
-                time.sleep(0.05)
-            self.assertEqual(finished["status"], "waiting_review")
-            self.assertEqual(finished["usage"]["generated_tokens"], 5)
+                runner.release.set()
+                finished = {}
+                for _ in range(40):
+                    finished = client.get(f"/api/jobs/{job_id}").json()
+                    if finished["status"] == "waiting_review":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(finished["status"], "waiting_review")
+                self.assertEqual(finished["usage"]["generated_tokens"], 5)
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
@@ -653,7 +654,7 @@ class EventsCancelSearchApiTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         app = create_app(
             model_path="fake-model",
-            runs_dir=tmp.name,
+            runs_dir=Path(tmp.name) / "runs",
             max_new_tokens=8,
         )
         app.state.manager.model_runner = runner
@@ -767,11 +768,11 @@ class SegmentsCacheApiTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         app = create_app(
             model_path="fake-model",
-            runs_dir=tmp.name,
+            runs_dir=Path(tmp.name) / "runs",
             max_new_tokens=8,
         )
         app.state.manager.model_runner = FakeRunner()
-        self._runs_dir = Path(tmp.name)
+        self._runs_dir = Path(tmp.name) / "runs"
         return app, TestClient(app)
 
     def _create_done_job(self, client):
@@ -858,7 +859,9 @@ class AiTranslationRoutingApiTest(unittest.TestCase):
         from moss_transcribe_diarize.app.server import create_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = create_app(model_path="fake-model", runs_dir=tmpdir, translator_provider="openai")
+            app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", translator_provider="openai")
+            self.assertEqual(app.state.llm_store.path.resolve(), (Path(tmpdir) / "config" / "llm_profiles.json").resolve())
+            self.assertEqual(app.state.llm_store.list_profiles()["profiles"], [])
             profile = app.state.llm_store.add_profile(
                 {
                     "name": "Test AI",

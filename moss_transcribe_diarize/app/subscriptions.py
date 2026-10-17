@@ -317,6 +317,12 @@ class SubscriptionManager:
     @staticmethod
     def _settings(options: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any]:
         values = {"name": "", "interval_minutes": 10, "mode": "notify", "transcribe": False, "enabled": True,
+                  # Keep automatic polling bounded.  A channel can publish a
+                  # burst of videos while the app is closed; enqueueing all of
+                  # them at once makes the queue hard to control and hides
+                  # failures.  Pending items remain available for the next
+                  # poll or manual confirmation.
+                  "auto_download_limit": 5,
                   "cookies_browser": "firefox", **(previous or {}), **options}
         try:
             interval = int(values["interval_minutes"])
@@ -324,6 +330,12 @@ class SubscriptionManager:
             raise ValueError("检查间隔应为 5–1440 分钟的整数") from exc
         if not 5 <= interval <= 1440:
             raise ValueError("检查间隔应为 5–1440 分钟")
+        try:
+            auto_download_limit = int(values["auto_download_limit"])
+        except (ValueError, TypeError) as exc:
+            raise ValueError("每轮自动下载上限应为 1–20 条的整数") from exc
+        if not 1 <= auto_download_limit <= 20:
+            raise ValueError("每轮自动下载上限应为 1–20 条")
         if values["mode"] not in {"notify", "auto"}:
             raise ValueError("更新操作应为提醒或自动下载")
         if values["cookies_browser"] not in {"none", "firefox", "chrome", "edge", "brave"}:
@@ -331,7 +343,8 @@ class SubscriptionManager:
         if not isinstance(values["enabled"], bool) or not isinstance(values["transcribe"], bool):
             raise ValueError("启用和转录设置应为布尔值")
         return {"name": str(values["name"] or "").strip()[:120], "interval_minutes": interval, "mode": values["mode"],
-                "transcribe": values["transcribe"], "enabled": values["enabled"], "cookies_browser": values["cookies_browser"]}
+                "auto_download_limit": auto_download_limit, "transcribe": values["transcribe"],
+                "enabled": values["enabled"], "cookies_browser": values["cookies_browser"]}
 
     def add(self, options: dict[str, Any]) -> dict[str, Any]:
         settings = self._settings(options)
@@ -385,6 +398,9 @@ class SubscriptionManager:
                 return {"new_count": 0, "scheduled": True}
             self._checking = subscription_id
         new_count = 0
+        fetched_count = 0
+        auto_enqueued_count = 0
+        auto_deferred_count = 0
         try:
             channel_name, videos = self.fetcher.fetch(subscription)
             with self._lock:
@@ -392,6 +408,7 @@ class SubscriptionManager:
                 if not record or not record["enabled"] or self._stop.is_set():
                     return {"new_count": 0, "paused": True}
                 now = self.clock()
+                fetched_count = len(videos)
                 # The first successful follow creates a small local snapshot so
                 # a closed app still shows the five latest cards on next launch.
                 if not record["initialized"]:
@@ -420,14 +437,29 @@ class SubscriptionManager:
                     record.update(initialized=True, baseline_at=now)
                 self._save()
                 if record["mode"] == "auto":
-                    for video in list(self._data["videos"].values()):
-                        if video["subscription_id"] == subscription_id and video["state"] == "pending":
-                            try:
-                                self._download_locked(video, record, automatic=True)
-                            except Exception as exc:
-                                video["error"] = str(exc)
-                                self._save()
-            return {"new_count": new_count}
+                    automatic_candidates = [
+                        video for video in self._data["videos"].values()
+                        if video["subscription_id"] == subscription_id and video["state"] == "pending"
+                    ]
+                    # Newest items are processed first.  Anything beyond the
+                    # configured limit stays pending and is visible in the
+                    # subscription inbox for a later poll/manual download.
+                    automatic_candidates.sort(
+                        key=lambda video: (float(video.get("published_at") or 0), float(video.get("first_seen") or 0)),
+                        reverse=True,
+                    )
+                    limit = int(record.get("auto_download_limit", 5))
+                    auto_deferred_count = max(0, len(automatic_candidates) - limit)
+                    for video in automatic_candidates[:limit]:
+                        try:
+                            self._download_locked(video, record, automatic=True)
+                            auto_enqueued_count += 1
+                        except Exception as exc:
+                            video["error"] = str(exc)
+                            self._save()
+            return {"new_count": new_count, "fetched_count": fetched_count,
+                    "auto_enqueued_count": auto_enqueued_count,
+                    "auto_deferred_count": auto_deferred_count}
         except Exception as exc:
             with self._lock:
                 record = self._data["subscriptions"].get(subscription_id)

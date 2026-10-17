@@ -1821,8 +1821,13 @@ function mergeJobSnapshots(incoming) {
 }
 
 async function refreshJobs(options = {}) {
-  const res = await fetch(apiUrl('api/jobs'), { cache: 'no-store' });
+  const headers = {};
+  if (window.__jobsEtag) headers['If-None-Match'] = window.__jobsEtag;
+  const res = await fetch(apiUrl('api/jobs'), { cache: 'no-store', headers });
+  if (res.status === 304) return;
   if (!res.ok) return;
+  const etag = res.headers.get('ETag');
+  if (etag) window.__jobsEtag = etag;
   const data = await res.json();
   jobs = mergeJobSnapshots(data.jobs || []);
   renderQueueSummary(data.queue || {});
@@ -2326,6 +2331,7 @@ async function startRerunDraft() {
 }
 
 function setVisible(view) {
+  if (view.id !== 'liveView' && window.stopLiveViewer) window.stopLiveViewer();
   document.querySelectorAll('section.content > .view').forEach((item) => item.classList.toggle('is-hidden', item !== view));
   if (window.updateShell) window.updateShell(view);
 }

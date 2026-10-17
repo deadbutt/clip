@@ -10,12 +10,19 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:  # Optional diagnostic dependency; the pipeline works without it.
+    import psutil
+except ImportError:  # pragma: no cover - depends on the host installation
+    psutil = None
 
 from moss_transcribe_diarize.subtitle import (
     SubtitleItem,
@@ -671,6 +678,8 @@ class JobRecord:
     subtitle_file_stamps: dict[str, float] = field(default_factory=dict)
     retry_count: int = 0
     phase_times: dict[str, float] = field(default_factory=dict)
+    phase_memory_mb: dict[str, float] = field(default_factory=dict)
+    phase_gpu_memory_mb: dict[str, float] = field(default_factory=dict)
     error_kind: str | None = None
     # 媒体库引用。input_path 指向 videos/ 中的唯一媒体文件，任务目录不再保存原视频。
     media_id: str = ""
@@ -829,6 +838,8 @@ class JobRecord:
             subtitle_file_stamps=dict(data.get("subtitle_file_stamps") or {}),
             retry_count=int(data.get("retry_count") or 0),
             phase_times={str(k): float(v) for k, v in dict(data.get("phase_times") or {}).items()},
+            phase_memory_mb={str(k): float(v) for k, v in dict(data.get("phase_memory_mb") or {}).items()},
+            phase_gpu_memory_mb={str(k): float(v) for k, v in dict(data.get("phase_gpu_memory_mb") or {}).items()},
             error_kind=data.get("error_kind"),
             media_id=str(data.get("media_id") or ""),
             media_hash=str(data.get("media_hash") or ""),
@@ -875,6 +886,11 @@ class JobManager(ClipOperationsMixin):
         self._queue_condition = threading.Condition()
         self._shutdown_event = threading.Event()
         self._phase_starts: dict[str, float] = {}
+        # source path + size + mtime is a safe process-local hint for repeated
+        # imports. The content hash is still authoritative and is recomputed
+        # whenever the file changes or the process restarts.
+        self._media_hash_cache: dict[tuple[str, int, int], str] = {}
+        self._media_list_cache: tuple[int, list[dict[str, Any]]] | None = None
         self._render_lock = threading.Lock()
         self._translate_lock = threading.Lock()
         self._proofread_lock = threading.Lock()
@@ -904,6 +920,7 @@ class JobManager(ClipOperationsMixin):
         self._tail_audio_cache: dict[str, tuple[tuple[int, int], list[float] | None]] = {}
         self._video_size_cache: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {}
         self._load_existing_jobs()
+        self._cleanup_orphaned_temp_files()
         self._worker = threading.Thread(target=self._worker_loop, name="mtd-job-worker", daemon=True)
         self._worker.start()
 
@@ -939,7 +956,15 @@ class JobManager(ClipOperationsMixin):
         if not source.is_file():
             raise FileNotFoundError(str(source))
         with self._media_lock:
-            digest = _sha256_file(source)
+            source_stat = source.stat()
+            cache_key = (str(source.resolve()), int(source_stat.st_size), int(source_stat.st_mtime_ns))
+            digest = self._media_hash_cache.get(cache_key)
+            if digest is None:
+                digest = _sha256_file(source)
+                self._media_hash_cache[cache_key] = digest
+                # Keep this bounded during long-running batch imports.
+                if len(self._media_hash_cache) > 128:
+                    self._media_hash_cache.pop(next(iter(self._media_hash_cache)))
             existing = self._find_media_by_hash(digest)
             if existing is None:
                 suffix = source.suffix.lower() or ".media"
@@ -971,6 +996,7 @@ class JobManager(ClipOperationsMixin):
             self._media_meta_path(existing).write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            self._media_list_cache = None
             return existing, metadata
 
     def _attach_media(self, job: JobRecord, media_path: str | Path, metadata: dict[str, Any]) -> None:
@@ -1055,6 +1081,13 @@ class JobManager(ClipOperationsMixin):
         return job
 
     def list_media(self) -> list[dict[str, Any]]:
+        try:
+            directory_mtime = self.videos_dir.stat().st_mtime_ns
+        except OSError:
+            directory_mtime = -1
+        cached = self._media_list_cache
+        if cached is not None and cached[0] == directory_mtime:
+            return [dict(item) for item in cached[1]]
         items: list[dict[str, Any]] = []
         for path in sorted(self.videos_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
             if not path.is_file() or path.name.endswith((".cover.jpg", ".media.json")):
@@ -1074,6 +1107,7 @@ class JobManager(ClipOperationsMixin):
                 items.append(data)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
+        self._media_list_cache = (directory_mtime, [dict(item) for item in items])
         return items
 
     def media_path(self, media_id: str) -> Path:
@@ -1350,6 +1384,92 @@ class JobManager(ClipOperationsMixin):
             self._logger_for(job).log(level, message, exc_info=exc_info)
         except Exception:
             pass
+
+    @contextmanager
+    def _measure_phase(self, job: JobRecord, name: str):
+        """Record wall time for an expensive pipeline sub-stage.
+
+        The existing ``phase_times`` field records status transitions. These
+        finer-grained timings make the actual bottleneck visible even when
+        several operations share one status (for example transcription and
+        Demucs). Values are persisted by the next normal job save.
+        """
+        started = time.perf_counter()
+        memory_stop = threading.Event()
+        memory_peak = [0]
+        gpu_peak = [0]
+        memory_thread = None
+        gpu_module = None
+        if psutil is not None:
+            try:
+                process = psutil.Process()
+
+                def sample_memory() -> None:
+                    while not memory_stop.is_set():
+                        try:
+                            memory_peak[0] = max(memory_peak[0], int(process.memory_info().rss))
+                        except (psutil.Error, OSError):
+                            break
+                        memory_stop.wait(0.2)
+
+                memory_thread = threading.Thread(target=sample_memory, name=f"mtd-memory-{name}", daemon=True)
+                memory_thread.start()
+            except (psutil.Error, OSError):
+                memory_thread = None
+        # Only inspect an already loaded allocator. CTranslate2, CUDA context,
+        # FFmpeg and llama-server allocations are outside PyTorch statistics.
+        # Importing torch solely for diagnostics changes cold-start latency.
+        gpu_module = sys.modules.get("torch")
+
+        def sample_gpu_memory() -> None:
+            nonlocal gpu_module
+            while not memory_stop.is_set():
+                try:
+                    gpu_module = sys.modules.get("torch")
+                    cuda = getattr(gpu_module, "cuda", None)
+                    if cuda is not None and cuda.is_initialized():
+                        gpu_peak[0] = max(gpu_peak[0], int(cuda.memory_allocated()))
+                except (RuntimeError, OSError):
+                    return
+                memory_stop.wait(0.2)
+
+        gpu_thread = threading.Thread(target=sample_gpu_memory, name=f"mtd-gpu-memory-{name}", daemon=True)
+        gpu_thread.start()
+        try:
+            yield
+        finally:
+            memory_stop.set()
+            if memory_thread is not None:
+                memory_thread.join(timeout=0.5)
+            if psutil is not None:
+                try:
+                    memory_peak[0] = max(memory_peak[0], int(psutil.Process().memory_info().rss))
+                except (psutil.Error, OSError):
+                    pass
+            if gpu_thread is not None:
+                gpu_thread.join(timeout=0.5)
+            gpu_module = sys.modules.get("torch")
+            if gpu_module is not None:
+                try:
+                    cuda = getattr(gpu_module, "cuda", None)
+                    if cuda is not None and cuda.is_initialized():
+                        gpu_peak[0] = max(gpu_peak[0], int(cuda.memory_allocated()))
+                except (RuntimeError, OSError):
+                    pass
+            elapsed = round(max(0.0, time.perf_counter() - started), 3)
+            job.phase_times[name] = elapsed
+            gpu_mb = 0.0
+            if gpu_peak[0]:
+                gpu_mb = round(gpu_peak[0] / (1024 * 1024), 1)
+                job.phase_gpu_memory_mb[name] = gpu_mb
+            if memory_peak[0]:
+                memory_mb = round(memory_peak[0] / (1024 * 1024), 1)
+                job.phase_memory_mb[name] = memory_mb
+                gpu_text = f", PyTorch CUDA采样分配峰值 {gpu_mb:.1f}MB" if gpu_mb else ""
+                self.job_log(job, f"性能计时 {name}: {elapsed:.3f}s, 进程RSS采样峰值 {memory_mb:.1f}MB{gpu_text}")
+            else:
+                gpu_text = f", PyTorch CUDA采样分配峰值 {gpu_mb:.1f}MB" if gpu_mb else ""
+                self.job_log(job, f"性能计时 {name}: {elapsed:.3f}s{gpu_text}")
 
     def _close_job_logger(self, job_id: str) -> None:
         log = self._job_loggers.pop(job_id, None)
@@ -2211,7 +2331,8 @@ class JobManager(ClipOperationsMixin):
                     translate_kwargs["batch_size"] = batch_size
                 if protected_terms is not None:
                     translate_kwargs["protected_terms"] = protected_terms
-                translations = translator.translate_segments(segments, **translate_kwargs)
+                with self._measure_phase(job, "translation_model"):
+                    translations = translator.translate_segments(segments, **translate_kwargs)
                 elapsed = time.time() - started
                 usage = getattr(translator, "usage_totals", None)
                 if usage and usage.get("requests"):
@@ -2353,7 +2474,8 @@ class JobManager(ClipOperationsMixin):
                     "target": target_kind,
                 }
                 self._touch(job, error=None)
-                result = proofreader.proofread(segments, progress_callback=update_proofread_progress)
+                with self._measure_phase(job, "proofread_model"):
+                    result = proofreader.proofread(segments, progress_callback=update_proofread_progress)
                 usage = getattr(proofreader, "usage_totals", None)
                 if usage and usage.get("requests"):
                     result["token_usage"] = dict(usage)
@@ -2959,6 +3081,54 @@ class JobManager(ClipOperationsMixin):
             except Exception:
                 continue
 
+    def _cleanup_orphaned_temp_files(self, *, minimum_age: float = 3600.0) -> int:
+        """Remove known intermediate artifacts left by an interrupted run.
+
+        Only names produced by the pipeline are eligible, and recent files are
+        retained so a concurrently starting process cannot lose active work.
+        User media and ordinary task outputs are never matched.
+        """
+        now = time.time()
+        names = {
+            "audio_fixed.wav",
+            "pyannote_16k.wav",
+            "speaker_labeler_16k.wav",
+            "background_16k.wav",
+            "bgdetect_16k.wav",
+            "vocals_16k.wav",
+            "vocals_src_44k.wav",
+        }
+        removed = 0
+        roots = (self.runs_dir, self.videos_dir)
+        for root in roots:
+            if not root.is_dir():
+                continue
+            try:
+                candidates = root.rglob("*")
+            except OSError:
+                continue
+            for path in candidates:
+                if not path.is_file():
+                    continue
+                name = path.name.lower()
+                eligible = (
+                    name in names
+                    or name.endswith(".importing")
+                    or name.endswith(".cookies.txt")
+                    or ".tmp." in name
+                    or name.endswith(".tmp")
+                )
+                if not eligible:
+                    continue
+                try:
+                    if now - path.stat().st_mtime < minimum_age:
+                        continue
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        return removed
+
     def _prepare_audio_timeline(self, job: JobRecord) -> str:
         """检测音频轨时间戳窟窿（录屏丢帧），必要时重抽修复时间轴。
 
@@ -2991,9 +3161,11 @@ class JobManager(ClipOperationsMixin):
         vocals_path = None
         vocals_future = None
         vocals_executor = None
+        background_audio_path: Path | None = None
         try:
             if job.source == "url" and job.source_url and not Path(job.input_path).exists():
-                self._download_phase(job)
+                with self._measure_phase(job, "download"):
+                    self._download_phase(job)
 
             self._ensure_job_thumbnail(job)
 
@@ -3006,7 +3178,8 @@ class JobManager(ClipOperationsMixin):
 
             # 录屏文件音频轨可能有 PTS 窟窿（丢帧），会让整条字幕时间轴前移。
             # 转录/人声分离/说话人标记统一改吃修复后的音频，保证时间轴一致。
-            audio_path = self._prepare_audio_timeline(job)
+            with self._measure_phase(job, "audio_timeline"):
+                audio_path = self._prepare_audio_timeline(job)
 
             # 缺口恢复/无 VAD 重试会对小片段从 0.1 重新计进度，导致进度条
             # 反复跳回开头；转录阶段进度单调只升不降。
@@ -3052,17 +3225,23 @@ class JobManager(ClipOperationsMixin):
                 and vocal_separator.vocal_separation_available()
             )
             parallel_demucs = demucs_needed and _vram_allows_parallel_demucs()
+
+            def separate_vocals_measured():
+                # Measure inside the executor: waiting for a completed future
+                # includes unrelated ASR time and overstates Demucs duration.
+                with self._measure_phase(job, "demucs"):
+                    return vocal_separator.separate_vocals(
+                        audio_path,
+                        job.job_dir,
+                        cancel_check=lambda: job.id in self._cancelled_jobs or self._shutdown_event.is_set(),
+                    )
+
             if parallel_demucs:
                 from concurrent.futures import ThreadPoolExecutor
 
                 self.job_log(job, "后台启动 demucs 人声分离（与转录并行）")
                 vocals_executor = ThreadPoolExecutor(max_workers=1)
-                vocals_future = vocals_executor.submit(
-                    vocal_separator.separate_vocals,
-                    audio_path,
-                    job.job_dir,
-                    cancel_check=lambda: job.id in self._cancelled_jobs or self._shutdown_event.is_set(),
-                )
+                vocals_future = vocals_executor.submit(separate_vocals_measured)
             elif demucs_needed:
                 self.job_log(job, "空闲显存不足，demucs 人声分离改为转录完成后串行执行")
 
@@ -3102,16 +3281,17 @@ class JobManager(ClipOperationsMixin):
                 job.generated_tokens = job.generated_tokens or 0
                 self._set_status(job, "postprocessing", 0.85, error=None)
             else:
-                result = self.model_runner.transcribe(
-                    audio_path,
-                    prompt=job.inference_prompt,
-                    max_length=job.max_length,
-                    max_new_tokens=job.max_new_tokens,
-                    decoding=job.decoding,
-                    temperature=job.temperature,
-                    hotwords=self._effective_hotwords(job),
-                    status_callback=update,
-                )
+                with self._measure_phase(job, "whisper"):
+                    result = self.model_runner.transcribe(
+                        audio_path,
+                        prompt=job.inference_prompt,
+                        max_length=job.max_length,
+                        max_new_tokens=job.max_new_tokens,
+                        decoding=job.decoding,
+                        temperature=job.temperature,
+                        hotwords=self._effective_hotwords(job),
+                        status_callback=update,
+                    )
                 self._raise_if_cancelled(job.id)
                 job.transcription_info = {
                     "language": getattr(result, "language", None),
@@ -3156,12 +3336,7 @@ class JobManager(ClipOperationsMixin):
 
                 self.job_log(job, "开始 demucs 人声分离（串行）")
                 vocals_executor = ThreadPoolExecutor(max_workers=1)
-                vocals_future = vocals_executor.submit(
-                    vocal_separator.separate_vocals,
-                    audio_path,
-                    job.job_dir,
-                    cancel_check=lambda: job.id in self._cancelled_jobs or self._shutdown_event.is_set(),
-                )
+                vocals_future = vocals_executor.submit(separate_vocals_measured)
 
             if vocals_future is not None:
                 try:
@@ -3176,9 +3351,17 @@ class JobManager(ClipOperationsMixin):
                     vocals_executor.shutdown(wait=False)
                 # 背景音门控：纯对白音轨（无 BGM）不值得喂分离人声，
                 # 丢弃结果直接用原始音频。
-                if vocals_path is not None and not vocal_separator.has_background_audio(
-                    result.words if result else None, audio_path, job.job_dir
-                ):
+                has_background = False
+                if vocals_path is not None:
+                    with self._measure_phase(job, "background_detection"):
+                        background_audio_path = Path(job.job_dir) / "background_16k.wav"
+                        has_background = vocal_separator.has_background_audio(
+                            result.words if result else None,
+                            audio_path,
+                            job.job_dir,
+                            prepared_audio_path=background_audio_path,
+                        )
+                if vocals_path is not None and not has_background:
                     self.job_log(job, "背景音门控判定无 BGM，丢弃人声轨，pyannote 改用原始音频")
                     try:
                         Path(vocals_path).unlink(missing_ok=True)
@@ -3192,21 +3375,29 @@ class JobManager(ClipOperationsMixin):
                 "开始说话人标记（diarization 对全音频扫描，期间约 1-2 分钟无进度输出，属正常）",
             )
             resolved_speakers = self._resolve_speaker_count(job.speaker_count)
-            segments, speaker_info = label_speakers(
-                audio_path,
-                segments,
-                work_dir=job.job_dir,
-                # 未指定说话人数时给 pyannote 自动检测留空间（原值 2 会把
-                # 三人及以上素材静默压进两个标签）；显式指定时按指定值钳定。
-                max_speakers=resolved_speakers or 4,
-                target_speakers=resolved_speakers,
-                backend=job.diarization_backend,
-                hf_token=self.hf_token,
-                pyannote_model=self.pyannote_model,
-                device=self.diarization_device,
-                words=(result.words if result else checkpoint_words),
-                audio_path=vocals_path,
+            speaker_audio_path = vocals_path or (
+                background_audio_path if background_audio_path is not None and background_audio_path.is_file() else None
             )
+            # Timeline repair already produces mono 16k PCM. Reuse that exact
+            # waveform for pyannote instead of decoding it into a second WAV.
+            if speaker_audio_path is None and audio_path != str(job.input_path):
+                speaker_audio_path = Path(audio_path)
+            with self._measure_phase(job, "speaker_labeling"):
+                segments, speaker_info = label_speakers(
+                    audio_path,
+                    segments,
+                    work_dir=job.job_dir,
+                    # 未指定说话人数时给 pyannote 自动检测留空间（原值 2 会把
+                    # 三人及以上素材静默压进两个标签）；显式指定时按指定值钳定。
+                    max_speakers=resolved_speakers or 4,
+                    target_speakers=resolved_speakers,
+                    backend=job.diarization_backend,
+                    hf_token=self.hf_token,
+                    pyannote_model=self.pyannote_model,
+                    device=self.diarization_device,
+                    words=(result.words if result else checkpoint_words),
+                    audio_path=speaker_audio_path,
+                )
             # 说话人标记可能返回新建的 SubtitleSegment，重新附加 ASR 质量信息，
             # 确保最终写入 segments.json 的对象包含置信度。
             _apply_transcription_quality(
@@ -3216,6 +3407,11 @@ class JobManager(ClipOperationsMixin):
             if vocals_path is not None:
                 try:
                     Path(vocals_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if background_audio_path is not None:
+                try:
+                    background_audio_path.unlink(missing_ok=True)
                 except OSError:
                     pass
             # 时间轴修复音频的使命结束：后续剪辑/烧录用原视频（修复后的
@@ -3248,6 +3444,11 @@ class JobManager(ClipOperationsMixin):
                 # 删除触发的取消 job 已移出 _jobs，不能回写 job.json 复活目录。
                 job.status = "cancelled"
                 self._touch(job, error=None)
+            if background_audio_path is not None:
+                try:
+                    background_audio_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         except Exception as exc:
             if vocals_executor is not None:
                 vocals_future.cancel()
@@ -3257,9 +3458,38 @@ class JobManager(ClipOperationsMixin):
                 self._progress_save_times.pop(job.id, None)
                 return
             self.job_log(job, f"任务失败: {exc}", level=logging.ERROR, exc_info=True)
+            if background_audio_path is not None:
+                try:
+                    background_audio_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             job.error_kind, user_message = _classify_job_failure(exc)
             self._set_status(job, "failed", 1.0, error=user_message)
             self._progress_save_times.pop(job.id, None)
+        finally:
+            def cleanup_audio(_future=None) -> None:
+                # These files are disposable; raw_words/raw_metrics checkpoints
+                # stay intact. A still-running Demucs owns its WAVs until its
+                # future ends, so cancellation must defer cleanup to that point.
+                if _future is not None and self._jobs.get(job.id) is job and job.status in RUNNING_STATES:
+                    return  # A retry has already started and now owns the files.
+                removed = False
+                for name in ("audio_fixed.wav", "background_16k.wav", "vocals_16k.wav", "vocals_src_44k.wav"):
+                    try:
+                        (Path(job.job_dir) / name).unlink()
+                        removed = True
+                    except OSError:
+                        pass
+                if removed and self._jobs.get(job.id) is job:
+                    try:
+                        self._save_job(job)
+                    except OSError:
+                        logger.debug("Could not refresh temporary file diagnostics for %s", job.id, exc_info=True)
+
+            if vocals_future is not None and not vocals_future.done():
+                vocals_future.add_done_callback(cleanup_audio)
+            else:
+                cleanup_audio()
 
     def _download_phase(self, job: JobRecord) -> None:
         from .downloader import download_with_yt_dlp
@@ -3391,14 +3621,15 @@ class JobManager(ClipOperationsMixin):
                         save=self._should_save_live_progress(job.id),
                     )
 
-                burn_ass_subtitles(
-                    job.input_path,
-                    job.ass_path,
-                    job.output_path,
-                    style=style,
-                    progress_callback=on_render_progress,
-                    cancel_check=lambda: job.id in self._cancelled_jobs or job.id not in self._jobs,
-                )
+                with self._measure_phase(job, "render_ffmpeg"):
+                    burn_ass_subtitles(
+                        job.input_path,
+                        job.ass_path,
+                        job.output_path,
+                        style=style,
+                        progress_callback=on_render_progress,
+                        cancel_check=lambda: job.id in self._cancelled_jobs or job.id not in self._jobs,
+                    )
                 self._set_status(job, "done", 1.0, error=None)
             except FFmpegCancelled:
                 self._cancelled_jobs.discard(job.id)
@@ -3645,7 +3876,45 @@ class JobManager(ClipOperationsMixin):
         self._emit_status[job.id] = job.status
 
     def _save_job(self, job: JobRecord) -> None:
-        job.job_path.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = job.to_dict()
+        if job.status in TERMINAL_STATES or job.status == "waiting_review":
+            temp_names = {
+                "audio_fixed.wav",
+                "pyannote_16k.wav",
+                "speaker_labeler_16k.wav",
+                "background_16k.wav",
+                "bgdetect_16k.wav",
+                "vocals_16k.wav",
+                "vocals_src_44k.wav",
+            }
+            temp_files: list[dict[str, Any]] = []
+            total_bytes = 0
+            try:
+                for path in Path(job.job_dir).rglob("*"):
+                    if not path.is_file():
+                        continue
+                    name = path.name.lower()
+                    if not (
+                        name in temp_names
+                        or name.endswith(".importing")
+                        or name.endswith(".cookies.txt")
+                        or ".tmp." in name
+                        or name.endswith(".tmp")
+                    ):
+                        continue
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        continue
+                    total_bytes += size
+                    temp_files.append({"name": path.name, "bytes": size})
+            except OSError:
+                pass
+            payload["diagnostics"] = {
+                "temporary_files": temp_files,
+                "temporary_bytes": total_bytes,
+            }
+        job.job_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _should_save_live_progress(self, job_id: str) -> bool:
         now = time.time()

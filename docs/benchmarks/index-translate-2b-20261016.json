@@ -1,0 +1,21 @@
+{
+  "model": "Index-Translate-2B.Q4_K_M.gguf",
+  "quantization": "Q4_K_M",
+  "server": "llama.cpp build b49650adb",
+  "settings": {"port": 8091, "gpu_layers": 99, "context": 4096, "slots": 4},
+  "samples": [
+    {"source": "The stream is starting now, so make sure the audio is turned on.", "translation": "现在开始流媒体了，请确保音频已打开。", "seconds": 0.377},
+    {"source": "今日はここまでです。最後まで見てくれて、本当にありがとうございました。", "translation": "今天先到这里。非常感谢您一直看到最后。", "seconds": 0.176}
+  ],
+  "index_sequential_20_identical_samples_seconds": 3.243,
+  "index_sequential_average_seconds": 0.162,
+  "hy_mt2_six_mixed_samples_seconds_serial_one_worker": 4.738,
+  "hy_mt2_six_mixed_average_seconds_serial_one_worker": 0.79,
+  "llama_generation_observed_tokens_per_second": {"min": 116.85, "max": 140.70},
+  "notes": [
+    "Index was tested through the same OpenAI-compatible llama-server protocol used by HY-MT2.",
+    "The HY comparison used one worker to measure per-request latency; the application normally uses parallel workers, so this is not a whole-job throughput comparison.",
+    "Index output was fluent on the English/Japanese samples tested and did not leak the instruction or context.",
+    "No default translator setting was changed."
+  ]
+}

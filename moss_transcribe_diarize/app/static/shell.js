@@ -29,11 +29,13 @@
     const page = view === importPage ? mode : view.id;
     get('shellPageTitle').textContent = pageNames[page] || {
       subscriptionsView: '关注更新', aiSettingsView: 'AI 服务',
+      liveView: '直播工作台',
       processingView: '任务进度', downloadedView: '下载完成', workbench: '字幕编辑',
     }[page] || '工作空间';
     document.querySelectorAll('.shell-nav').forEach((button) => {
       const active = button.dataset.shellPage === page
         || (button.id === 'openSubscriptions' && page === 'subscriptionsView')
+        || (button.id === 'openLive' && page === 'liveView')
         || (button.id === 'openAiSettings' && page === 'aiSettingsView');
       button.classList.toggle('active', active);
       if (active) button.setAttribute('aria-current', 'page');

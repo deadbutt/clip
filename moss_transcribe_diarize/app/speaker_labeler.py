@@ -4,6 +4,7 @@ import math
 import os
 import subprocess
 import wave
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -477,12 +478,21 @@ def _extract_audio_file(media_path: str | Path, *, work_dir: str | Path, stem: s
     ]
     # 抽 16k 单声道 wav 是短有界操作;挂死的 ffmpeg 会卡住整条说话人
     # 分离流水线,超时后按提取失败报错。
-    completed = subprocess.run(
-        command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600
-    )
-    if completed.returncode != 0:
-        tail = "\n".join((completed.stderr or completed.stdout or "").splitlines()[-8:])
-        raise RuntimeError(f"audio extraction failed: {tail}")
+    try:
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600
+        )
+        if completed.returncode != 0:
+            tail = "\n".join((completed.stderr or completed.stdout or "").splitlines()[-8:])
+            raise RuntimeError(f"audio extraction failed: {tail}")
+    except BaseException:
+        # The caller cannot own/clean the path until extraction returns.
+        # Remove partial output here, including timeout and interruption paths.
+        try:
+            wav_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return wav_path
 
 
@@ -772,11 +782,82 @@ def _items_in_range(
     return items or None
 
 
+def _build_interval_index(
+    intervals: list[tuple[float, float, str]],
+) -> tuple[list[tuple[float, float, str]], list[float], list[float]]:
+    """Build a small immutable index for chronological overlap queries.
+
+    ``prefix_max_end`` lets callers skip intervals that ended before a query
+    starts, while ``starts`` bounds the right side by the query end.  This is
+    substantially cheaper than scanning every diarization turn for every
+    subtitle word, and keeps the original overlap semantics unchanged.
+    """
+    ordered = sorted(intervals, key=lambda item: (float(item[0]), float(item[1])))
+    starts = [float(item[0]) for item in ordered]
+    prefix_max_end: list[float] = []
+    current = float("-inf")
+    for _start, end, _speaker in ordered:
+        current = max(current, float(end))
+        prefix_max_end.append(current)
+    return ordered, starts, prefix_max_end
+
+
+def _interval_slice(
+    intervals: list[tuple[float, float, str]],
+    starts: list[float],
+    prefix_max_end: list[float],
+    start: float,
+    end: float,
+) -> list[tuple[float, float, str]]:
+    """Return only intervals that can overlap ``[start, end)``."""
+    if not intervals or end <= start:
+        return []
+    first = bisect_right(prefix_max_end, start)
+    stop = bisect_left(starts, end)
+    return [item for item in intervals[first:stop] if item[1] > start]
+
+
 def _assign_turns_to_segments(
     segments: list[SubtitleSegment],
     turns: list[tuple[float, float, str]],
     words: list[tuple[float, float, str]] | None = None,
 ) -> list[SubtitleSegment]:
+    turns, turn_starts, turn_prefix_max_end = _build_interval_index(turns)
+    word_rows: list[tuple[float, float, str]] = [] if words is None else list(words)
+    words_are_sorted = all(
+        float(left[0]) <= float(right[0])
+        for left, right in zip(word_rows, word_rows[1:])
+    )
+    if words_are_sorted and word_rows:
+        word_starts = [float(item[0]) for item in word_rows]
+        word_prefix_max_end: list[float] = []
+        current_word_end = float("-inf")
+        for _start, end, _text in word_rows:
+            current_word_end = max(current_word_end, float(end))
+            word_prefix_max_end.append(current_word_end)
+    else:
+        word_starts = []
+        word_prefix_max_end = []
+
+    def words_in_range(start: float, end: float) -> list[SubtitleItem] | None:
+        if words is None:
+            return None
+        if not words_are_sorted:
+            return _items_in_range(words, start, end)
+        rows = _interval_slice(
+            word_rows,
+            word_starts,
+            word_prefix_max_end,
+            start,
+            end,
+        )
+        items = [
+            SubtitleItem(text=str(text), start=float(ws), end=float(we))
+            for ws, we, text in rows
+            if str(text).strip() and we > start and ws < end
+        ]
+        return items or None
+
     speaker_names: dict[str, str] = {}
     output: list[SubtitleSegment] = []
     previous_source = ""
@@ -802,12 +883,14 @@ def _assign_turns_to_segments(
             end=end,
             speaker=_map(speaker_raw),
             text=text.strip(),
-            items=_items_in_range(words, start, end),
+            items=words_in_range(start, end),
         ))
 
     for segment in segments:
         overlaps: dict[str, float] = {}
-        for t_start, t_end, t_speaker in turns:
+        for t_start, t_end, t_speaker in _interval_slice(
+            turns, turn_starts, turn_prefix_max_end, segment.start, segment.end
+        ):
             ov = max(0.0, min(segment.end, t_end) - max(segment.start, t_start))
             if ov > 0:
                 overlaps[t_speaker] = overlaps.get(t_speaker, 0.0) + ov
@@ -820,7 +903,17 @@ def _assign_turns_to_segments(
         # 合并成子段。比按 turn 边界硬切更稳：边界骑跨的词按真实重叠归属，
         # 且 "No! Child!" 这类紧接换人的短插话能按词切开、不再整段归错人。
         seg_words = [
-            w for w in words
+            w for w in (
+                _interval_slice(
+                    word_rows,
+                    word_starts,
+                    word_prefix_max_end,
+                    segment.start,
+                    segment.end,
+                )
+                if words_are_sorted
+                else words
+            )
             if w[1] > segment.start and w[0] < segment.end and str(w[2]).strip()
         ]
         if not seg_words:
@@ -831,7 +924,9 @@ def _assign_turns_to_segments(
         for ws, we, wtext in seg_words:
             best_speaker = ""
             best_overlap = 0.0
-            for t_start, t_end, t_speaker in turns:
+            for t_start, t_end, t_speaker in _interval_slice(
+                turns, turn_starts, turn_prefix_max_end, ws, we
+            ):
                 ov = max(0.0, min(we, t_end) - max(ws, t_start))
                 if ov > best_overlap:
                     best_overlap = ov

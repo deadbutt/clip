@@ -209,6 +209,10 @@ test('batch clips continue after one item fails', async ({ page }) => {
   await page.locator('#findClipsRules').click();
   await page.locator('#startClipAnalysis').click();
   await expect(page.locator('#clipList .clip-card')).toHaveCount(3);
+  const exportChecks = page.locator('#clipList input[data-clip-action="export-select"]');
+  for (let index = 0; index < 3; index += 1) {
+    await exportChecks.nth(index).click();
+  }
   await page.locator('#renderClipQueue').click();
   await expect.poll(() => state.clipRenderRequests).toBe(3);
   await expect(page.locator('#clipStatus')).toContainText('2 个成功');

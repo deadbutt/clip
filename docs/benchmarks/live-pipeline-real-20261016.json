@@ -1,0 +1,43 @@
+{
+  "state": "stopped",
+  "error": null,
+  "warning": null,
+  "language": "en",
+  "translate": true,
+  "received_seconds": 12.0,
+  "processed_seconds": 12.0,
+  "backlog_seconds": 0,
+  "dropped_windows": 0,
+  "translation_skipped": 0,
+  "audio_queue": 0,
+  "translation_queue": 0,
+  "rows": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 4.92,
+      "source": "I don't think that would be a retirement though, right? You wouldn't, no, it's not selected. Well, you know, but look,",
+      "translation": "不过，我觉得那应该不算退休吧？你不会的，不，它没有被选中。嗯，你知道的，但你看，",
+      "translation_state": "done"
+    },
+    {
+      "id": 2,
+      "start": 5.18,
+      "end": 11.02,
+      "source": "it has been a, it's been one of those years. It's been a weird, has it been a weird year? Or is that just me? I don't mean for",
+      "translation": "这已经算是一个……这已经算是一个那样的年份了。这真是一个奇怪的一年，是不是？或者只是我自己的想法？我并非有意……",
+      "translation_state": "done"
+    },
+    {
+      "id": 3,
+      "start": 11.04,
+      "end": 11.92,
+      "source": "the counter, like I just mean",
+      "translation": "计数器，就像我只是想说……",
+      "translation_state": "done"
+    }
+  ],
+  "elapsed_seconds": 10.362,
+  "source_run": "11a0ae8d36ff",
+  "source_start_seconds": 120
+}

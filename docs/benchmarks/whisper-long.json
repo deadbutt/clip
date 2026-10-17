@@ -1,0 +1,13 @@
+{
+  "stage": "whisper",
+  "source": "D:\\MOSS-Transcribe-Diarize\\videos\\0956c23e1712605c326676e34acc598074c4ed76ade1eaa9c0681766e095c23e_input.mp4",
+  "elapsed_sec": 149.325,
+  "peak_tree_rss_mib": 2049.4,
+  "gpu_scope": "all GPUs, device-wide including other processes",
+  "gpu_samples": 255,
+  "gpu_baseline_mib": 189.0,
+  "gpu_peak_used_mib": 2530.0,
+  "returncode": 0,
+  "result": "{\"characters\": 30995, \"words\": 2311, \"runtime\": {\"backend\": \"whisper\", \"path\": \"models/faster-whisper-large-v3-turbo\", \"engine\": \"faster-whisper\", \"device\": \"cuda\", \"dtype\": \"float16\", \"language\": null, \"beam_size\": 5, \"vad_filter\": true, \"condition_on_previous_text\": true, \"repetition_penalty\": 1.05, \"no_repeat_ngram_size\": 3, \"vad_min_silence_duration_ms\": null, \"vad_speech_pad_ms\": null, \"vad_threshold\": null, \"hallucination_silence_threshold\": 2.0, \"fallback_errors\": []}}\r\n",
+  "stderr": ""
+}

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -13,6 +14,7 @@ from .bilibili_publish import BilibiliPublishService
 from .events import EventHub
 from .ffmpeg import detect_ffmpeg
 from .jobs import JobManager
+from .live_streams import LiveStreamManager
 from .subscriptions import SubscriptionManager
 from .whisper_runner import WhisperRunner
 
@@ -131,6 +133,9 @@ def create_app(
         try:
             yield
         finally:
+            await asyncio.to_thread(live_preview.close)
+            await asyncio.to_thread(live_subtitles.close)
+            await asyncio.to_thread(live_streams.shutdown)
             bilibili_publish.shutdown(timeout=5.0)
             subscriptions.stop()
             manager.shutdown(wait=True, timeout=5.0)
@@ -160,6 +165,19 @@ def create_app(
         diarization_device=diarization_device,
     )
     app.state.manager = manager
+    live_streams = LiveStreamManager(Path(runs_dir).parent / "videos")
+    app.state.live_streams = live_streams
+    from .live_subtitles import LiveSubtitleService
+
+    live_subtitles = LiveSubtitleService(runner, Path(runs_dir).parent / "videos" / "live" / "subtitles")
+    app.state.live_subtitles = live_subtitles
+    from .live_preview import LivePreviewService
+
+    live_preview = LivePreviewService(Path(runs_dir).parent / "cache" / "live-preview")
+    app.state.live_preview = live_preview
+    from .live_api import register_live_routes
+
+    register_live_routes(app, live_streams, manager)
     subscriptions = SubscriptionManager(Path(runs_dir).parent / "config", manager)
     app.state.subscriptions = subscriptions
     bilibili_publish = BilibiliPublishService(Path(runs_dir).parent / "config", manager)
@@ -323,8 +341,19 @@ def create_app(
         }
 
     @app.get("/api/jobs")
-    def list_jobs():
-        return {"jobs": [job.to_dict() for job in manager.list_jobs()], "queue": manager.queue_info()}
+    def list_jobs(request: Request):
+        current_jobs = manager.list_jobs()
+        queue_info = manager.queue_info()
+        version_source = "|".join(
+            f"{job.id}:{job.status}:{job.progress:.6f}:{job.updated_at:.6f}"
+            for job in current_jobs
+        ) + "|queue=" + json.dumps(queue_info, sort_keys=True, ensure_ascii=False)
+        etag = '"' + hashlib.sha1(version_source.encode("utf-8")).hexdigest() + '"'
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        payload = {"jobs": [job.to_dict() for job in current_jobs], "queue": queue_info}
+        return JSONResponse(payload, headers=headers)
 
     @app.get("/api/subscriptions")
     def list_subscriptions():

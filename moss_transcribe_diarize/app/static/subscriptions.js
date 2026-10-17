@@ -88,23 +88,18 @@
     $('subscriptionFeedTitle').textContent = sub ? displayName(sub) : '所有频道的更新';
     const details = $('subscriptionChannelDetails');
     details.classList.toggle('is-hidden', !sub);
-    details.innerHTML = sub ? `<div class="channel-overview"><span class="subscription-platform ${escapeHtml(sub.platform)}">${platformName(sub.platform)}</span><span class="meta">${sub.enabled ? `每 ${sub.interval_minutes} 分钟检查 · ${sub.mode === 'auto' ? '自动下载' : '提醒后确认下载'}` : '已暂停检查'}${sub.transcribe ? ' · 自动转录' : ''}</span><a href="${escapeHtml(sub.url)}" target="_blank" rel="noreferrer" class="meta">频道主页 ↗</a></div>
+    details.innerHTML = sub ? `<div class="channel-overview"><span class="subscription-platform ${escapeHtml(sub.platform)}">${platformName(sub.platform)}</span><span class="meta">${sub.enabled ? `每 ${sub.interval_minutes} 分钟检查 · ${sub.mode === 'auto' ? `自动下载（每轮最多 ${sub.auto_download_limit || 5} 条）` : '提醒后确认下载'}` : '已暂停检查'}${sub.transcribe ? ' · 自动转录' : ''}</span><a href="${escapeHtml(sub.url)}" target="_blank" rel="noreferrer" class="meta">频道主页 ↗</a></div>
       <details class="channel-management" data-subscription-id="${escapeHtml(sub.id)}"><summary>频道设置与检查</summary><div class="channel-management-body"><div class="meta">${sub.initialized ? `上次检查：${date(sub.last_checked)}` : '正在建立首次记录，历史视频不会自动下载'}</div>${sub.last_error ? `<div class="error">${escapeHtml(sub.last_error)}</div>` : ''}<div class="actions"><button type="button" class="small ghost" data-sub-action="check" ${!sub.enabled || sub.checking ? 'disabled' : ''}>${sub.checking ? '检查中…' : '检查'}</button><button class="small ghost" type="button" data-sub-action="toggle">${sub.enabled ? '暂停' : '恢复'}</button><button class="small ghost" type="button" data-sub-action="edit">编辑</button><button class="small ghost" type="button" data-sub-action="delete">取消关注</button></div></div></details>` : '';
     if (keepManagementOpen && sub) details.querySelector('.channel-management').open = true;
   }
   function renderVideos() {
     const filter = $('subscriptionVideoFilter').value;
     const scoped = data.videos.filter((v) => !selectedId || v.subscription_id === selectedId);
-    const recent = filter === 'all'
-      ? scoped.sort((a, b) => Number(b.published_at || 0) - Number(a.published_at || 0)
-        || Number(b.first_seen || 0) - Number(a.first_seen || 0))
-        .filter((video) => {
-          const count = scoped.slice(0, scoped.indexOf(video) + 1)
-            .filter((candidate) => candidate.subscription_id === video.subscription_id).length;
-          return count <= 5;
-        })
-      : scoped;
-    const videos = recent.filter((v) => filter === 'all' || (filter === 'unread' ? v.unread : filter === 'pending' ? v.state === 'pending' : v.is_new && v.state !== 'ignored'));
+    const videos = scoped.filter((v) => filter === 'all' || (filter === 'unread' ? v.unread : filter === 'pending' ? v.state === 'pending' : v.is_new && v.state !== 'ignored'));
+    if (filter === 'all') {
+      videos.sort((a, b) => Number(b.published_at || 0) - Number(a.published_at || 0)
+        || Number(b.first_seen || 0) - Number(a.first_seen || 0));
+    }
     const sub = data.subscriptions.find((s) => s.id === selectedId);
     const unread = sub ? Number(sub.unread_count ?? unreadFor(sub.id)) : data.unread_count || 0;
     $('subscriptionVideoCount').textContent = `${videos.length} 个视频 · ${unread} 条未读`;
@@ -170,9 +165,15 @@
     $('subscriptionSubmit').textContent = '添加关注';
     $('subscriptionCancelEdit').textContent = '取消';
     updatePlaceholder();
+    updateAutoLimitVisibility();
   }
   function updatePlaceholder() {
     $('subscriptionSource').placeholder = $('subscriptionPlatform').value === 'youtube' ? '频道链接、@账号或 UC 频道 ID' : 'UP 主主页链接或数字 UID';
+  }
+  function updateAutoLimitVisibility() {
+    const visible = $('subscriptionMode').value === 'auto';
+    $('subscriptionAutoLimitField').classList.toggle('is-hidden', !visible);
+    $('subscriptionAutoLimit').classList.toggle('is-hidden', !visible);
   }
   function edit(sub) {
     editingId = sub.id;
@@ -183,11 +184,13 @@
     $('subscriptionName').value = sub.name;
     $('subscriptionMode').value = sub.mode;
     $('subscriptionInterval').value = sub.interval_minutes;
+    $('subscriptionAutoLimit').value = String(sub.auto_download_limit || 5);
     $('subscriptionBrowser').value = sub.cookies_browser;
     $('subscriptionTranscribe').checked = sub.transcribe;
     $('subscriptionFormTitle').textContent = '编辑关注';
     $('subscriptionSubmit').textContent = '保存设置';
     $('subscriptionCancelEdit').classList.remove('is-hidden');
+    updateAutoLimitVisibility();
     $('subscriptionDialog').showModal();
   }
   async function act(button, callback) {
@@ -204,6 +207,7 @@
       message(editingId ? '保存设置中…' : '正在添加并读取频道近期视频…');
       const payload = { name: $('subscriptionName').value, mode: $('subscriptionMode').value,
         interval_minutes: Number($('subscriptionInterval').value), transcribe: $('subscriptionTranscribe').checked,
+        auto_download_limit: Number($('subscriptionAutoLimit').value),
         cookies_browser: $('subscriptionBrowser').value };
       let result;
       if (editingId) result = await request(`api/subscriptions/${editingId}`, 'PUT', payload);
@@ -231,7 +235,9 @@
       if (action === 'check') {
         message(`正在检查 ${displayName(sub)}…`);
         const result = await request(`api/subscriptions/${sub.id}/check`, 'POST');
-        message(result.error || (result.scheduled ? '已安排检查，请稍后查看结果。' : `检查完成，发现 ${result.new_count || 0} 个新视频。`), !!result.error);
+        const queued = Number(result.auto_enqueued_count || 0);
+        const deferred = Number(result.auto_deferred_count || 0);
+        message(result.error || (result.scheduled ? '已安排检查，请稍后查看结果。' : `检查完成，发现 ${result.new_count || 0} 个新视频${queued ? `，自动加入 ${queued} 个下载任务` : ''}${deferred ? `，还有 ${deferred} 个待处理` : ''}。`), !!result.error);
       } else if (action === 'toggle') {
         await request(`api/subscriptions/${sub.id}`, 'PUT', { enabled: !sub.enabled });
         message(sub.enabled ? '已暂停自动检查。' : '已恢复自动检查。');
@@ -269,7 +275,9 @@
     const result = await request('api/subscriptions/check', 'POST');
     const results = result.results || [];
     const errors = results.filter((r) => r.error).length;
-    message(`检查完成，发现 ${results.reduce((n, r) => n + (r.new_count || 0), 0)} 个新视频${errors ? `，${errors} 个频道检查失败，请查看频道详情` : ''}。`, errors > 0);
+    const queued = results.reduce((n, r) => n + Number(r.auto_enqueued_count || 0), 0);
+    const deferred = results.reduce((n, r) => n + Number(r.auto_deferred_count || 0), 0);
+    message(`检查完成，发现 ${results.reduce((n, r) => n + (r.new_count || 0), 0)} 个新视频${queued ? `，自动加入 ${queued} 个下载任务` : ''}${deferred ? `，还有 ${deferred} 个待处理` : ''}${errors ? `，${errors} 个频道检查失败，请查看频道详情` : ''}。`, errors > 0);
   }));
   $('readSubscriptionUpdates').addEventListener('click', () => act($('readSubscriptionUpdates'), async () => { await request('api/subscriptions/read', 'POST'); message('已标记全部更新为已读。'); }));
   $('enableSubscriptionNotifications').addEventListener('click', async () => {
@@ -292,6 +300,7 @@
   $('subscriptionSearch').addEventListener('input', renderChannels);
   $('allSubscriptionUpdates').addEventListener('click', () => { selectedId = null; renderChannels(); renderVideos(); });
   $('subscriptionPlatform').addEventListener('change', updatePlaceholder);
+  $('subscriptionMode').addEventListener('change', updateAutoLimitVisibility);
   $('subscriptionVideoFilter').addEventListener('change', renderVideos);
   $('subscriptionVideos').addEventListener('error', (event) => {
     if (event.target.matches('img.subscription-thumbnail')) {
@@ -303,6 +312,7 @@
     }
   }, true);
   window.MtdSubscriptions = { open, refresh: load };
+  updateAutoLimitVisibility();
   load();
   setInterval(load, 15000);
 })();

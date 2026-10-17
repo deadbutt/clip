@@ -1,0 +1,13 @@
+{
+  "stage": "translation",
+  "source": "runs\\11a0ae8d36ff\\segments.source.json",
+  "elapsed_sec": 51.02,
+  "peak_tree_rss_mib": 786.7,
+  "gpu_scope": "all GPUs, device-wide including other processes",
+  "gpu_samples": 80,
+  "gpu_baseline_mib": 189.0,
+  "gpu_peak_used_mib": 510.0,
+  "returncode": 0,
+  "result": "{\"segments\": 2722, \"runtime\": {\"available\": true, \"backend\": \"local-mt\", \"model\": \"Helsinki-NLP/opus-mt-en-zh\", \"model_dir\": \"models\\\\opus-mt-en-zh-ct2-int8\", \"tokenizer_dir\": \"models\\\\opus-mt-en-zh\", \"device\": \"cuda\", \"compute_type\": \"float16\", \"beam_size\": 1, \"target_prefix\": \">>cmn_Hans<<\"}}\r\n",
+  "stderr": ""
+}

@@ -50,6 +50,24 @@ def _holey_pts() -> list[float]:
 
 
 class HolesFromPtsTest(unittest.TestCase):
+    def test_csv_matches_json_and_ignores_invalid_timestamps(self):
+        pts = _holey_pts()
+        expected = self._analyze(pts)
+        stdout = "N/A\nNaN\ninf\n\n" + "\n".join(f"{p:.6f}" for p in pts)
+        with (
+            patch.object(audio_timeline, "detect_ffmpeg", return_value=_FakeTools()),
+            patch.object(audio_timeline.subprocess, "run", return_value=_FakeProc(stdout=stdout)),
+        ):
+            self.assertEqual(audio_timeline.analyze_audio_timeline("fake.mp4"), expected)
+
+    def test_json_packet_without_timestamp_is_ignored(self):
+        stdout = json.dumps({"packets": [{}, {"pts_time": None}, *[{"pts_time": p} for p in _clean_pts(500)]]})
+        with (
+            patch.object(audio_timeline, "detect_ffmpeg", return_value=_FakeTools()),
+            patch.object(audio_timeline.subprocess, "run", return_value=_FakeProc(stdout=stdout)),
+        ):
+            self.assertEqual(audio_timeline.analyze_audio_timeline("fake.mp4"), [])
+
     def _analyze(self, pts):
         with (
             patch.object(audio_timeline, "detect_ffmpeg", return_value=_FakeTools()),
@@ -143,7 +161,7 @@ class PrepareAudioTimelineTest(unittest.TestCase):
     def _make_manager(self, tmpdir):
         from moss_transcribe_diarize.app.server import create_app
 
-        app = create_app(model_path="fake-model", runs_dir=tmpdir, max_new_tokens=8)
+        app = create_app(model_path="fake-model", runs_dir=Path(tmpdir) / "runs", max_new_tokens=8)
         return app.state.manager
 
     def test_holes_below_threshold_pass_through(self):

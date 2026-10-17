@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="stylesheet" href="/static/subscriptions.css" />
   <link rel="stylesheet" href="/static/shell.css" />
+  <link rel="stylesheet" href="/static/live.css" />
 </head>
 <body>
   <aside class="app-sidebar" aria-label="主导航">
@@ -18,6 +19,7 @@
       <button class="shell-nav active" data-shell-page="home" type="button"><span aria-hidden="true">⌂</span> 首页</button>
       <button class="shell-nav" data-shell-page="tasks" type="button"><span aria-hidden="true">▤</span> 任务中心 <span id="navJobCount" class="nav-count">0</span></button>
       <button id="openSubscriptions" class="shell-nav" type="button"><span aria-hidden="true">◉</span> 关注更新 <span id="subscriptionBadge" class="subscription-badge is-hidden">0</span></button>
+      <button id="openLive" class="shell-nav" type="button"><span aria-hidden="true">◌</span> 直播工作台</button>
       <button id="openAiSettings" class="shell-nav" type="button"><span aria-hidden="true">◇</span> AI 服务</button>
     </nav>
     <div class="sidebar-footer"><span class="nav-caption">本地工作环境</span><span id="runtime" class="pill">检测中</span><p>素材与项目保存在本机</p></div>
@@ -176,6 +178,13 @@
           </div>
         </div>
       </section>
+      <section id="liveView" class="view live-view is-hidden">
+        <div class="live-page">
+          <div class="live-page-head"><div><span class="signal-eyebrow">LIVE DESK / STREAM</span><h2 class="view-title">直播工作台</h2><p class="meta">观看、实时翻译和录制彼此独立；录制完成后再进入 Whisper 高质量转录。</p></div><button id="liveRefresh" class="ghost small" type="button">刷新状态</button></div>
+          <div class="panel live-add-panel"><div class="live-add-row"><input id="liveUrl" type="url" placeholder="粘贴 B 站、Twitch、斗鱼、虎牙、抖音、YouTube Live 等直播链接" /><select id="liveQuality"><option value="best">最高画质</option><option value="720p">720p</option><option value="480p">480p</option><option value="worst">最低画质</option></select><button id="liveAdd" class="primary" type="button">添加直播间</button></div><div id="livePlatforms" class="meta live-platforms"></div><div id="liveMessage" class="meta" role="status"></div><p class="meta live-add-help">视频画面在平台原直播页观看；本工作台显示实时原文和中文翻译，录制则由本项目单独保存。</p></div>
+          <div id="liveSessions" class="live-sessions"></div>
+        </div>
+      </section>
       <section id="subscriptionsView" class="view subscriptions-view is-hidden">
         <div class="subscriptions-page">
           <div class="subscriptions-page-head">
@@ -197,6 +206,7 @@
                 <label for="subscriptionSource">频道主页 / 账号</label><input id="subscriptionSource" type="text" required maxlength="512" placeholder="频道链接、@账号或 UC 频道 ID" />
                 <label for="subscriptionName">备注名称（可选）</label><input id="subscriptionName" type="text" maxlength="120" placeholder="例如：星ソラノ" />
                 <div class="subscription-form-row"><div><label for="subscriptionMode">发现更新后</label><select id="subscriptionMode"><option value="notify">提醒，确认后下载</option><option value="auto">自动下载</option></select></div><div><label for="subscriptionInterval">检查间隔</label><select id="subscriptionInterval"><option value="5">5 分钟</option><option value="10" selected>10 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440">每天</option></select></div></div>
+                <label id="subscriptionAutoLimitField" for="subscriptionAutoLimit">每轮自动下载上限</label><select id="subscriptionAutoLimit"><option value="1">1 条</option><option value="3">3 条</option><option value="5" selected>5 条（推荐）</option><option value="10">10 条</option><option value="20">20 条</option></select>
                 <label for="subscriptionBrowser">检查与下载登录态</label><select id="subscriptionBrowser"><option value="firefox" selected>Firefox（推荐，检查和下载共用）</option><option value="none">不使用（公开视频）</option><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="brave">Brave</option></select>
                 <label class="subscription-checkbox"><input id="subscriptionTranscribe" type="checkbox" /> 下载完成后自动转录</label>
                 <p class="meta subscription-help">首次关注只记录近期视频，不会自动下载历史投稿。后台服务运行时持续检查，关闭页面不影响检查。</p>
@@ -734,5 +744,6 @@
 <script src="/static/app.js"></script>
 <script src="/static/subscriptions.js"></script>
 <script src="/static/shell.js"></script>
+<script src="/static/live.js"></script>
 </body>
 </html>

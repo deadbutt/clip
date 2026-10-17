@@ -87,6 +87,11 @@ class LocalMtTranslator:
         target_spm = tokenizer_dir / "target.spm"
         if not source_spm.exists() or not target_spm.exists():
             raise FileNotFoundError(f"source.spm and target.spm are required in {tokenizer_dir}")
+        # Translation can run before the first ASR task. Register bundled CUDA
+        # DLLs here as well, rather than depending on Whisper having done so.
+        from .whisper_runner import _ensure_cuda_dlls_available
+
+        _ensure_cuda_dlls_available(self.device)
         self._translator = ctranslate2.Translator(
             str(model_dir),
             device=self.device,

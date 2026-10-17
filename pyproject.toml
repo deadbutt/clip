@@ -27,8 +27,10 @@ dependencies = [
 mtd-subtitle = "moss_transcribe_diarize.app.cli:main"
 mtd-subtitle-web = "moss_transcribe_diarize.app.web_cli:main"
 mtd-translate-opus-run = "moss_transcribe_diarize.app.opus_run_translator:main"
+mtd-live-overlay = "moss_transcribe_diarize.app.live_overlay:main"
 
 [project.optional-dependencies]
+live = ["streamlink>=8.6,<9"]
 torch-runtime = [
   "torch>=2.8",
   "torchaudio>=2.8",

@@ -225,6 +225,41 @@ class WhisperRunner:
                 language_samples=list(self._language_samples),
             )
 
+    def transcribe_live_window(self, audio, *, language: str | None = None, stop_event=None) -> dict:
+        """复用模型和互斥锁，只识别当前 16kHz 音频窗口，不执行离线补漏。"""
+        import numpy as np
+
+        samples = np.asarray(audio, dtype=np.float32)
+        if not len(samples) or float(np.sqrt(np.mean(samples ** 2))) < 1e-4:
+            return {"language": language, "words": []}
+        with self._lock:
+            if stop_event is not None and stop_event.is_set():
+                return {"language": language, "words": []}
+            self._ensure_loaded()
+            if self._engine != "faster-whisper":
+                raise RuntimeError("实时字幕需要 faster-whisper；当前离线回退引擎不支持增量识别")
+            # 直播窗口很短，beam=1 容易把中文口语和游戏术语解成相近外语。
+            # 复用离线提示词，并保留适度 beam，避免自动语言检测和 VAD 抢走有效字词。
+            selected_language = language or self.language
+            segments, info = self._model.transcribe(
+                samples, language=selected_language, beam_size=max(3, min(int(self.beam_size), 5)),
+                initial_prompt=_whisper_initial_prompt(DEFAULT_PROMPT, selected_language),
+                condition_on_previous_text=False, word_timestamps=True,
+                vad_filter=True, vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 300},
+                temperature=0.0, no_speech_threshold=0.6,
+                hallucination_silence_threshold=2.0,
+            )
+            words = []
+            for segment in segments:
+                text = str(segment.text or "").strip()
+                if _is_likely_hallucination(
+                    text, avg_logprob=float(segment.avg_logprob),
+                    no_speech_prob=float(segment.no_speech_prob), prompt=None,
+                ):
+                    continue
+                words.extend((float(w.start), float(w.end), w.word) for w in segment.words or [] if w.word.strip())
+            return {"language": getattr(info, "language", language), "words": words}
+
     def _detect_recording_language(self, audio_path: str | Path) -> None:
         """Combine language probabilities from positions across the recording.
 

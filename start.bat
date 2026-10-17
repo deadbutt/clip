@@ -38,7 +38,7 @@ if exist "models\opus-mt-en-zh-ct2-int8\model.bin" if exist "models\opus-mt-en-z
 )
 
 start "" /min powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$url='http://127.0.0.1:7860'; $ready=$url + '/api/runtime'; for ($i=0; $i -lt 90; $i++) { try { $r=Invoke-WebRequest -UseBasicParsing -Uri $ready -TimeoutSec 1; if ($r.StatusCode -eq 200) { Start-Process $url; exit 0 } } catch { Start-Sleep -Milliseconds 700 } }; Start-Process $url"
+  "$url='http://127.0.0.1:7860'; $edge=@($env:ProgramFiles+'\Microsoft\Edge\Application\msedge.exe',$env:ProgramFiles+' (x86)\Microsoft\Edge\Application\msedge.exe',$env:LOCALAPPDATA+'\Microsoft\Edge\Application\msedge.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1; function Open-Workbench { if ($edge) { Start-Process -FilePath $edge -ArgumentList $url } else { Start-Process $url } }; $ready=$url + '/api/runtime'; for ($i=0; $i -lt 90; $i++) { try { $r=Invoke-WebRequest -UseBasicParsing -Uri $ready -TimeoutSec 1; if ($r.StatusCode -eq 200) { Open-Workbench; exit 0 } } catch { Start-Sleep -Milliseconds 700 } }; Open-Workbench"
 
 ".venv\Scripts\mtd-subtitle-web.exe" ^
   --backend whisper ^

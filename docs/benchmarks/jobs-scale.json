@@ -1,0 +1,20 @@
+[
+  {
+    "jobs": 100,
+    "discovery_sec": 0.0132,
+    "parse_sec": 0.0277,
+    "sort_sec": 0.0
+  },
+  {
+    "jobs": 1000,
+    "discovery_sec": 0.1767,
+    "parse_sec": 0.295,
+    "sort_sec": 0.0002
+  },
+  {
+    "jobs": 5000,
+    "discovery_sec": 3.0625,
+    "parse_sec": 4.9859,
+    "sort_sec": 0.0014
+  }
+]

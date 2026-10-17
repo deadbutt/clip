@@ -128,6 +128,19 @@ def test_auto_download_new_videos_only_and_transcription_opt_in(tmp_path):
     assert jobs.created[0][1]["cookies_browser"] == "firefox"
 
 
+def test_auto_download_is_bounded_and_leaves_remaining_updates_pending(tmp_path):
+    service, feed, jobs, sub = make_service(tmp_path, mode="auto", auto_download_limit=2)
+    feed.videos.extend(video(f"new-{i}", 300 + i) for i in range(5))
+    result = service.check(sub["id"])
+    assert result["new_count"] == 5
+    assert result["auto_enqueued_count"] == 2
+    assert result["auto_deferred_count"] == 3
+    assert len(jobs.created) == 2
+    states = {entry["video_id"]: entry["state"] for entry in service.snapshot()["videos"]}
+    assert sum(state == "enqueued" for state in states.values()) == 2
+    assert sum(state == "pending" for state in states.values()) == 3
+
+
 def test_failed_initial_fetch_cannot_trigger_a_historical_download(tmp_path):
     feed = Feed()
     feed.error = "network unavailable"
@@ -206,7 +219,7 @@ def test_ignored_updates_are_not_later_auto_downloaded(tmp_path):
     assert service.snapshot()["unread_count"] == 0
 
 
-@pytest.mark.parametrize("settings", [{"interval_minutes": 1}, {"mode": "upload"}, {"transcribe": "false"}, {"cookies_browser": "invalid"}])
+@pytest.mark.parametrize("settings", [{"interval_minutes": 1}, {"mode": "upload"}, {"transcribe": "false"}, {"cookies_browser": "invalid"}, {"auto_download_limit": 0}, {"auto_download_limit": 21}])
 def test_invalid_settings_do_not_create_a_subscription(tmp_path, settings):
     with pytest.raises(ValueError):
         make_service(tmp_path, **settings)

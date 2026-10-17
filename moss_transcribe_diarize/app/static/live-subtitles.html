@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>实时字幕</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    /* 页面本身全透明：如果宿主窗口（Document PiP）允许透明，桌面就能透出来；
+       如果浏览器给窗口铺了自己的底色，下面这几块半透明面板仍然保证字看得清。 */
+    html, body { background: transparent; }
+    body { margin: 0; min-width: 320px; color: #f5faf9; display: flex; flex-direction: column; min-height: 100vh; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; background: rgba(15, 119, 112, .82); backdrop-filter: blur(6px); border-radius: 10px 10px 0 0; cursor: move; user-select: none; }
+    h1 { margin: 0; font-size: 15px; font-weight: 700; }
+    button { border: 1px solid #bde5df; border-radius: 6px; background: rgba(255, 255, 255, .9); color: #20504c; padding: 5px 9px; cursor: pointer; }
+    main { flex: 1; display: grid; gap: 10px; padding: 12px 14px; background: rgba(18, 30, 34, .74); backdrop-filter: blur(6px); border-radius: 0 0 10px 10px; overflow: auto; }
+    #status { color: #b7cfcc; font-size: 12px; }
+    .line { display: grid; gap: 4px; padding: 9px 0; border-bottom: 1px solid #ffffff1c; }
+    .line:last-child { border-bottom: 0; }
+    .source { color: #fff; font-size: 17px; line-height: 1.45; overflow-wrap: anywhere; text-shadow: 0 1px 3px rgba(0, 0, 0, .55); }
+    .translation { color: #8fe2b5; font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; text-shadow: 0 1px 3px rgba(0, 0, 0, .55); }
+    .time { color: #9bb4b1; font-size: 11px; }
+    .empty { color: #b7cfcc; font-size: 13px; }
+    .error { color: #ff9b9b; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header><h1 id="title">实时字幕</h1><button id="stop" type="button">停止并关闭</button></header>
+  <main><div id="status">正在连接字幕服务…</div><div id="rows"><div class="empty">等待下一段语音…</div></div></main>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const id = params.get('session');
+      const api = (path) => path;
+      const status = document.getElementById('status');
+      const rows = document.getElementById('rows');
+      const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+      let timer = null;
+      async function refresh() {
+        if (!id) return;
+        try {
+          const response = await fetch(api(`/api/live/sessions/${encodeURIComponent(id)}/subtitles`), { cache: 'no-store' });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || '字幕服务不可用');
+          document.title = data.title ? `实时字幕 · ${data.title}` : '实时字幕';
+          const state = { starting: '正在启动', recognizing: '正在识别', listening: '等待下一段音频', stopping: '正在停止', stopped: '已停止', error: '识别失败' }[data.state] || data.state || '连接中';
+          status.textContent = `${state} · 已接收 ${Number(data.received_seconds || 0).toFixed(0)} 秒`;
+          if (data.error) status.className = 'error';
+          const recent = (data.rows || []).slice(-8);
+          rows.innerHTML = recent.length ? recent.map((row) => `<div class="line"><div class="time">${Number(row.start || 0).toFixed(1)}s</div><div class="source">${esc(row.source)}</div><div class="translation">${esc(row.translation || '翻译中…')}</div></div>`).join('') : '<div class="empty">等待下一段语音…</div>';
+        } catch (error) { status.textContent = error.message; status.className = 'error'; }
+      }
+      document.getElementById('stop').addEventListener('click', async () => {
+        document.getElementById('stop').disabled = true;
+        try { await fetch(api(`/api/live/sessions/${encodeURIComponent(id)}/subtitles/stop`), { method: 'POST', keepalive: true }); } finally {
+          // 在 Document PiP 里本页是被嵌进去的 iframe，window.close() 关不掉外层浮窗，
+          // 所以交给父页面收尾；独立弹窗里 window.parent === window，这条消息没人处理，无副作用。
+          try { window.parent.postMessage({ type: 'mtd-live-subtitles-closed' }, location.origin); } catch (_) {}
+          window.close();
+        }
+      });
+      window.addEventListener('beforeunload', () => { if (id) navigator.sendBeacon?.(api(`/api/live/sessions/${encodeURIComponent(id)}/subtitles/stop`), new Blob([], { type: 'application/json' })); });
+      refresh();
+      timer = setInterval(refresh, 1500);
+      window.addEventListener('unload', () => clearInterval(timer));
+    })();
+  </script>
+</body>
+</html>

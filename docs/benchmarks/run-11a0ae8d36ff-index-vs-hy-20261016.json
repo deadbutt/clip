@@ -1,0 +1,1410 @@
+{
+  "run": "runs/11a0ae8d36ff",
+  "source_segments": 200,
+  "index_seconds": 17.23,
+  "index_avg_seconds": 0.0862,
+  "hy_seconds": 16.605,
+  "hy_avg_seconds": 0.083,
+  "rows": [
+    {
+      "index": 1,
+      "start": 0.0,
+      "source": "The media asked me, what do you think about the egg?",
+      "index_translate": "媒体问我，你对这个蛋有什么看法？",
+      "hy_mt2": "媒体问我，你对鸡蛋有什么看法？"
+    },
+    {
+      "index": 2,
+      "start": 4.16,
+      "source": "I think there are some more important ones than chicken.",
+      "index_translate": "我觉得有些东西比鸡更重要。",
+      "hy_mt2": "我认为有些东西比鸡肉更重要。"
+    },
+    {
+      "index": 3,
+      "start": 7.62,
+      "source": "I'm preparing the next game.",
+      "index_translate": "我正在准备下一款游戏。",
+      "hy_mt2": "我正在准备下一款游戏。"
+    },
+    {
+      "index": 4,
+      "start": 9.04,
+      "source": "We play them.",
+      "index_translate": "我们玩他们。",
+      "hy_mt2": "我们播放它们。"
+    },
+    {
+      "index": 5,
+      "start": 9.82,
+      "source": "I watch Skybox.",
+      "index_translate": "我观看Skybox。",
+      "hy_mt2": "我正在看 Skybox。"
+    },
+    {
+      "index": 6,
+      "start": 11.7,
+      "source": "Yeah, but did you know what?",
+      "index_translate": "是啊，但你知道吗？",
+      "hy_mt2": "是的，但你知道什么吗？"
+    },
+    {
+      "index": 7,
+      "start": 12.58,
+      "source": "Beepop.",
+      "index_translate": "Beepop。",
+      "hy_mt2": "贝波普。"
+    },
+    {
+      "index": 8,
+      "start": 13.32,
+      "source": "BeepoP.",
+      "index_translate": "BeepoP。",
+      "hy_mt2": "贝波普。"
+    },
+    {
+      "index": 9,
+      "start": 14.22,
+      "source": "BePoP!",
+      "index_translate": "BePoP！",
+      "hy_mt2": "贝波普！"
+    },
+    {
+      "index": 10,
+      "start": 14.72,
+      "source": "After this game, I stopped prepping my side because every\ntime what I see is not what you get.",
+      "index_translate": "打完这场比赛后，我就不再准备我的侧边了，因为每次我看到的东西都不是你看到的。",
+      "hy_mt2": "这场比赛之后，我就不再准备侧身动作了，因为每次我看到的样子，和实际得到的结果都不一样。"
+    },
+    {
+      "index": 11,
+      "start": 20.62,
+      "source": "Eight rounds in a row, beepoP, beepop.",
+      "index_translate": "连续八轮，哔波P，哔波P。",
+      "hy_mt2": "连续八轮，哔哔P，哔哔P。"
+    },
+    {
+      "index": 12,
+      "start": 22.34,
+      "source": "I can't give away the way I think because then another idea comes and then,\nokay, that stuff I can do when I retire.",
+      "index_translate": "我不能透露我的想法，因为那样又会冒出另一个想法，\n好吧，那些事情我退休后再做。",
+      "hy_mt2": "我无法透露我的想法，因为这时又会有新的想法出现，嗯，那些事情我可以在退休后去做。"
+    },
+    {
+      "index": 13,
+      "start": 29.52,
+      "source": "I would say everything.",
+      "index_translate": "我可以说一切。",
+      "hy_mt2": "我会说出一切。"
+    },
+    {
+      "index": 14,
+      "start": 30.32,
+      "source": "I don't care.",
+      "index_translate": "我不管。",
+      "hy_mt2": "我不在乎。"
+    },
+    {
+      "index": 15,
+      "start": 30.94,
+      "source": "I think everything is coming.",
+      "index_translate": "我觉得一切都会好起来的。",
+      "hy_mt2": "我觉得一切都会到来。"
+    },
+    {
+      "index": 16,
+      "start": 32.32,
+      "source": "For free, for free.",
+      "index_translate": "免费，免费。",
+      "hy_mt2": "For free, for free."
+    },
+    {
+      "index": 17,
+      "start": 34.46,
+      "source": "So, I want to just first start by saying,\nI know you guys have done these with me a lot.",
+      "index_translate": "所以，我想先说一点，\n我知道你们之前和我做过很多次这些。",
+      "hy_mt2": "所以，我想先说一下：我知道你们已经和我一起做过很多次了。"
+    },
+    {
+      "index": 18,
+      "start": 39.3,
+      "source": "There's one thing I requested if we\nwere going to do one like this again,",
+      "index_translate": "如果以后还要做类似的项目，我提了一个要求。",
+      "hy_mt2": "如果我们要再做这样的事情，我有一个请求。"
+    },
+    {
+      "index": 19,
+      "start": 42.2,
+      "source": "and it was a bigger table because sometimes\nwe sit and we're very cramped.",
+      "index_translate": "而且桌子更大，因为有时我们坐起来会非常拥挤。",
+      "hy_mt2": "因为有时候我们坐在一起时空间非常狭窄，所以就用了更大的桌子。"
+    },
+    {
+      "index": 20,
+      "start": 46.1,
+      "source": "So, we've got a bigger table.",
+      "index_translate": "所以，我们有一个更大的表格了。",
+      "hy_mt2": "所以，我们有了更大的桌子。"
+    },
+    {
+      "index": 21,
+      "start": 47.12,
+      "source": "We've got lots of space.",
+      "index_translate": "我们有很多空间。",
+      "hy_mt2": "我们有很多空间。"
+    },
+    {
+      "index": 22,
+      "start": 47.86,
+      "source": "We got lots room, all right?",
+      "index_translate": "我们有很多空间，对吧？",
+      "hy_mt2": "我们有很多空间，对吧？"
+    },
+    {
+      "index": 23,
+      "start": 49.18,
+      "source": "And we got lots of time.",
+      "index_translate": "而且我们有很多时间。",
+      "hy_mt2": "我们有很多时间。"
+    },
+    {
+      "index": 24,
+      "start": 50.78,
+      "source": "So I'm very happy for all of you\njoining me here today to talk again.",
+      "index_translate": "所以，我非常高兴今天有你们所有人来和我一起再次交流。",
+      "hy_mt2": "所以，我很高兴你们今天都来和我一起再聊一会儿。"
+    },
+    {
+      "index": 25,
+      "start": 53.9,
+      "source": "I love these because I get to be a passenger,\nand you guys all definitely can get stuck in, which is great.",
+      "index_translate": "我喜欢这些，因为我可以当乘客，而且你们肯定也很容易卡住，这很棒。",
+      "hy_mt2": "我喜欢这些，因为我可以当个乘客，而你们肯定也会陷入其中，这太好了。"
+    },
+    {
+      "index": 26,
+      "start": 59.18,
+      "source": "So I encourage, as normal, a conversation, right?",
+      "index_translate": "所以，我像往常一样鼓励大家进行对话，对吧？",
+      "hy_mt2": "所以，我一如既往地鼓励大家进行对话，对吧？"
+    },
+    {
+      "index": 27,
+      "start": 62.7,
+      "source": "You say whatever you want.",
+      "index_translate": "你想说什么就说什么。",
+      "hy_mt2": "你想说什么就说什么。"
+    },
+    {
+      "index": 28,
+      "start": 63.86,
+      "source": "Do whatever you want.",
+      "index_translate": "想做什么就做什么。",
+      "hy_mt2": "做你想做的事。"
+    },
+    {
+      "index": 29,
+      "start": 64.46,
+      "source": "Let's get into it, shall we?",
+      "index_translate": "我们开始吧！",
+      "hy_mt2": "我们开始吧，好吗？"
+    },
+    {
+      "index": 30,
+      "start": 65.64,
+      "source": "You hear the young players playing and us talking.",
+      "index_translate": "你听到年轻球员们在打球，我们也在交谈。",
+      "hy_mt2": "你能听到年轻球员们的比赛以及我们说话的声音。"
+    },
+    {
+      "index": 31,
+      "start": 68.28,
+      "source": "Yes, yeah.",
+      "index_translate": "是的，是的。",
+      "hy_mt2": "是的，没错。"
+    },
+    {
+      "index": 32,
+      "start": 69.16,
+      "source": "That's what we get paid for, no?",
+      "index_translate": "这就是我们拿工资干的事，对吧？",
+      "hy_mt2": "这就是我们获得报酬的原因，对吧？"
+    },
+    {
+      "index": 33,
+      "start": 70.28,
+      "source": "Well, we can do an in-game leader one next time,\nright, if you want?",
+      "index_translate": "嗯，下次我们可以做一个游戏内领袖角色，\n对吧？如果你愿意的话。",
+      "hy_mt2": "嗯，下次我们可以搞一个游戏内领袖角色，对吧，如果你愿意的话？"
+    },
+    {
+      "index": 34,
+      "start": 74.8,
+      "source": "No, I don't show much that's bullshit.",
+      "index_translate": "不，我不展示太多没用的东西。",
+      "hy_mt2": "不，我不太会展示那些无用的东西。"
+    },
+    {
+      "index": 35,
+      "start": 76.48,
+      "source": "Now you don't want to play that?",
+      "index_translate": "现在你不想玩了？",
+      "hy_mt2": "现在你不想玩那个了？"
+    },
+    {
+      "index": 36,
+      "start": 77.5,
+      "source": "No.",
+      "index_translate": "No.",
+      "hy_mt2": "不。我不会展示太多无用的内容。"
+    },
+    {
+      "index": 37,
+      "start": 77.78,
+      "source": "Then we bring Fallen back.",
+      "index_translate": "然后我们把堕落者带回来。",
+      "hy_mt2": "那么我们再带来《Fallen》。"
+    },
+    {
+      "index": 38,
+      "start": 79.72,
+      "source": "Might be testing.",
+      "index_translate": "可能是测试。",
+      "hy_mt2": "可能是测试环节。"
+    },
+    {
+      "index": 39,
+      "start": 81.0,
+      "source": "We're not going to think about it now.",
+      "index_translate": "我们现在不讨论这个。",
+      "hy_mt2": "我们现在不打算考虑这个了。"
+    },
+    {
+      "index": 40,
+      "start": 84.1,
+      "source": "Last time we were talking,\nthat's when we went all retirement heavy with the conversation,\nright?",
+      "index_translate": "上次我们聊天的时候，\n话题就完全转向退休了，\n对吧？",
+      "hy_mt2": "上次我们谈话时，\n我们确实一直都在谈论退休的事，对吧？"
+    },
+    {
+      "index": 41,
+      "start": 88.6,
+      "source": "And then now, since then you've announced it, right?",
+      "index_translate": "然后现在，既然你已经宣布了，对吧？",
+      "hy_mt2": "那么现在，从那以后你就宣布了这件事，对吧？"
+    },
+    {
+      "index": 42,
+      "start": 90.98,
+      "source": "Now you're having a kid.",
+      "index_translate": "现在你有了孩子。",
+      "hy_mt2": "现在你有了孩子。"
+    },
+    {
+      "index": 43,
+      "start": 93.24,
+      "source": "You never talk about retirement.",
+      "index_translate": "你从不谈论退休。",
+      "hy_mt2": "你从来都不谈论退休的事。"
+    },
+    {
+      "index": 44,
+      "start": 94.94,
+      "source": "I don't think I've ever heard you talk about retirement.",
+      "index_translate": "我好像从没听你说过退休的事。",
+      "hy_mt2": "我觉得我从未听过你谈论过退休的事。"
+    },
+    {
+      "index": 45,
+      "start": 96.16,
+      "source": "You're never going to stop it.",
+      "index_translate": "你永远无法阻止它。",
+      "hy_mt2": "你永远也阻止不了它。"
+    },
+    {
+      "index": 46,
+      "start": 97.6,
+      "source": "They don't know.",
+      "index_translate": "他们不知道。",
+      "hy_mt2": "他们不知道。"
+    },
+    {
+      "index": 47,
+      "start": 98.4,
+      "source": "They're all this year, but didn't talk about it.",
+      "index_translate": "他们今年都在这，但没提过这件事。",
+      "hy_mt2": "都是今年的事，但没讨论过。"
+    },
+    {
+      "index": 48,
+      "start": 100.06,
+      "source": "I talked a little bit about it with Faze.",
+      "index_translate": "我跟Faze聊了会儿。",
+      "hy_mt2": "我和Faze稍微谈了一下这件事。"
+    },
+    {
+      "index": 49,
+      "start": 102.0,
+      "source": "Okay.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 50,
+      "start": 102.32,
+      "source": "About John Falcons.",
+      "index_translate": "关于约翰·法尔克斯。",
+      "hy_mt2": "关于约翰·猎鹰队。"
+    },
+    {
+      "index": 51,
+      "start": 103.62,
+      "source": "It was opening a door, but that one got shut really fast.",
+      "index_translate": "他刚打开门，但门就关得特别快。",
+      "hy_mt2": "他正在打开一扇门，但那扇门很快就关上了。"
+    },
+    {
+      "index": 52,
+      "start": 107.2,
+      "source": "And now there's no need for that conversation.",
+      "index_translate": "现在，那段对话已经没有必要了。",
+      "hy_mt2": "现在就不需要进行那次对话了。"
+    },
+    {
+      "index": 53,
+      "start": 108.92,
+      "source": "And I think for you it's a ways off.",
+      "index_translate": "而且我觉得对你来说，这还早得很。",
+      "hy_mt2": "我认为对你来说，这还差得远呢。"
+    },
+    {
+      "index": 54,
+      "start": 111.98,
+      "source": "The way we're playing currently.",
+      "index_translate": "我们目前的游戏方式。",
+      "hy_mt2": "我们目前所进行的比赛方式。"
+    },
+    {
+      "index": 55,
+      "start": 115.38,
+      "source": "That's always appealing.",
+      "index_translate": "这总是很有吸引力。",
+      "hy_mt2": "那总是很有吸引力。"
+    },
+    {
+      "index": 56,
+      "start": 119.3,
+      "source": "I don't think that would be a retirement though, right?",
+      "index_translate": "不过，我觉得那应该不算退休吧？",
+      "hy_mt2": "我觉得那算不上是退休吧？对不对？"
+    },
+    {
+      "index": 57,
+      "start": 122.06,
+      "source": "No, it's not selected.",
+      "index_translate": "没有，没有选中。",
+      "hy_mt2": "不，它没有被选中。"
+    },
+    {
+      "index": 58,
+      "start": 125.02,
+      "source": "It's been one of those years.",
+      "index_translate": "那真是其中一年了。",
+      "hy_mt2": "这是那样的一年。"
+    },
+    {
+      "index": 59,
+      "start": 127.52,
+      "source": "Has it been a weird year or is that just me?",
+      "index_translate": "这一年是不是有点奇怪，还是只有我这么觉得？",
+      "hy_mt2": "这是一年很奇怪的一年吗？还是只有我这么觉得？"
+    },
+    {
+      "index": 60,
+      "start": 130.3,
+      "source": "I don't mean for the counter, like I just mean the season.",
+      "index_translate": "我不是指计数器，比如我只是指这个季节。",
+      "hy_mt2": "我说的不是计数器，而是这个赛季。"
+    },
+    {
+      "index": 61,
+      "start": 133.04,
+      "source": "Just because Falcons won the major\ndoesn't mean it has to be a state.",
+      "index_translate": "仅仅因为猎鹰队赢得了重大赛事，并不意味着这必须是一个州。",
+      "hy_mt2": "因为猎鹰队赢得了大赛，并不意味着它一定是一个州。"
+    },
+    {
+      "index": 62,
+      "start": 135.3,
+      "source": "Because you could win the major.",
+      "index_translate": "因为你可以赢得大奖。",
+      "hy_mt2": "因为你们有可能赢得那个大赛。"
+    },
+    {
+      "index": 63,
+      "start": 136.8,
+      "source": "You could win a major and everything is wrong.",
+      "index_translate": "你可能赢得大奖，但一切都还是错。",
+      "hy_mt2": "你可以赢得大赛，但一切却都错了。"
+    },
+    {
+      "index": 64,
+      "start": 140.92,
+      "source": "We're in a different dimension or something.",
+      "index_translate": "我们可能身处另一个维度，或者类似的地方。",
+      "hy_mt2": "我们处于一个不同的维度或者某种特殊状态。"
+    },
+    {
+      "index": 65,
+      "start": 142.8,
+      "source": "What's happened?",
+      "index_translate": "发生什么了？",
+      "hy_mt2": "发生了什么？"
+    },
+    {
+      "index": 66,
+      "start": 143.78,
+      "source": "Yeah, I don' know where we want to start with this, right?",
+      "index_translate": "是啊，我不知道我们该从哪里开始呢，对吧？",
+      "hy_mt2": "是的，我不知道该从哪里开始讨论这个，对吧？"
+    },
+    {
+      "index": 67,
+      "start": 146.42,
+      "source": "Because right now you've been playing\nevery event under the sun.",
+      "index_translate": "因为目前你已经玩遍了\n太阳底下所有的活动。",
+      "hy_mt2": "因为现在你一直在参加各种比赛。"
+    },
+    {
+      "index": 68,
+      "start": 150.38,
+      "source": "Some other teams have been having breaks.",
+      "index_translate": "其他一些队伍已经休息了。",
+      "hy_mt2": "其他一些队伍已经休息了。"
+    },
+    {
+      "index": 69,
+      "start": 152.46,
+      "source": "We're coming into EPO where we're back in the Spodek,\nbut it's not IEM.",
+      "index_translate": "我们正在进入 EPO，这里又回到了 Spodek，\n但这里不是 IEM。",
+      "hy_mt2": "我们将进入EPO，再次回到Spodek，但这不是IEM。"
+    },
+    {
+      "index": 70,
+      "start": 156.68,
+      "source": "So it's kind of a strange vibe there.",
+      "index_translate": "所以那里的氛围有点奇怪。",
+      "hy_mt2": "所以这里有一种很奇怪的氛围。"
+    },
+    {
+      "index": 71,
+      "start": 158.5,
+      "source": "Sunny outside.",
+      "index_translate": "外面阳光明媚。",
+      "hy_mt2": "外面阳光明媚。"
+    },
+    {
+      "index": 72,
+      "start": 159.5,
+      "source": "I was saying the same thing.",
+      "index_translate": "我刚才也说了同样的话。",
+      "hy_mt2": "我也是这么说的。"
+    },
+    {
+      "index": 73,
+      "start": 162.16,
+      "source": "Like it's so weird being here,\nlike coming out of the shuttle 20 degrees and sun is shining.",
+      "index_translate": "在这里待着真奇怪，\n就像从20度高温的太阳下出来一样。",
+      "hy_mt2": "在这里感觉真奇怪，\n从航天飞机里出来后，角度只有20度，却阳光明媚。"
+    },
+    {
+      "index": 74,
+      "start": 168.62,
+      "source": "It's kind of nice though.",
+      "index_translate": "不过，这还挺不错的。",
+      "hy_mt2": "不过还是挺不错的。"
+    },
+    {
+      "index": 75,
+      "start": 170.92,
+      "source": "We've got one of these guys that looks after us as the talent,\nright?",
+      "index_translate": "我们有一个这样的家伙负责管理我们作为人才，对吧？",
+      "hy_mt2": "我们有一名这样的人才来照顾我们，对吧？"
+    },
+    {
+      "index": 76,
+      "start": 173.78,
+      "source": "And he's only 22.",
+      "index_translate": "而且他只有22岁。",
+      "hy_mt2": "他才22岁。"
+    },
+    {
+      "index": 77,
+      "start": 174.92,
+      "source": "And I was thinking this morning when I jumped in the shuttle.",
+      "index_translate": "今天早上，我跳进穿梭机时还在想这件事。",
+      "hy_mt2": "今天早上我坐进航天飞机的时候就在想，他可是个能照顾我们的人才，对吧？而且他才22岁。"
+    },
+    {
+      "index": 78,
+      "start": 177.02,
+      "source": "I've been coming here for 12 years.",
+      "index_translate": "我来这里已经12年了。",
+      "hy_mt2": "我来这里已经12年了。"
+    },
+    {
+      "index": 79,
+      "start": 180.1,
+      "source": "He was only 10 years of age.",
+      "index_translate": "他只有10岁。",
+      "hy_mt2": "他当时只有10岁。"
+    },
+    {
+      "index": 80,
+      "start": 181.68,
+      "source": "Like when we first started coming to Katowice,",
+      "index_translate": "比如，当我们刚开始来卡托维兹的时候，",
+      "hy_mt2": "就像我们刚开始来卡托维兹的时候那样，"
+    },
+    {
+      "index": 81,
+      "start": 183.4,
+      "source": "because the city has changed so much in terms\nof what it was that long ago to what it is now.",
+      "index_translate": "因为城市在很久以前和现在相比变化太大了。",
+      "hy_mt2": "因为这座城市在方面发生了巨大的变化——从很久以前的样子变成了现在这样。"
+    },
+    {
+      "index": 82,
+      "start": 189.24,
+      "source": "And you're bang on like\nto be here not in winter is kind of nice.",
+      "index_translate": "而且你完全说得对，\n能在这里而不是在冬天，感觉还挺不错的。",
+      "hy_mt2": "你肯定觉得，不在冬天来这里挺好的。"
+    },
+    {
+      "index": 83,
+      "start": 192.36,
+      "source": "Like it's nice to be back here.",
+      "index_translate": "真不错，能回来这里。",
+      "hy_mt2": "能回到这里真是太好了。"
+    },
+    {
+      "index": 84,
+      "start": 194.22,
+      "source": "And I don't want to dox our hotel,\nbut there's not a more iconic hotel in esports than that one,\nis it?",
+      "index_translate": "而且我不想公开我们酒店的名字，\n但在电竞领域，没有比那家酒店更标志性的了，\n对吧？",
+      "hy_mt2": "我不想破坏我们酒店的声誉，但在这个电子竞技领域，没有比那家更具有代表性的酒店了，对吧？"
+    },
+    {
+      "index": 85,
+      "start": 199.1,
+      "source": "No, no, no.",
+      "index_translate": "不，不，不。",
+      "hy_mt2": "不，不，不。"
+    },
+    {
+      "index": 86,
+      "start": 199.6,
+      "source": "That red and yellow.",
+      "index_translate": "那红色和黄色。",
+      "hy_mt2": "那种红黄搭配。"
+    },
+    {
+      "index": 87,
+      "start": 200.54,
+      "source": "That's the worst one.",
+      "index_translate": "那是最糟糕的一个。",
+      "hy_mt2": "那是最糟糕的一个。"
+    },
+    {
+      "index": 88,
+      "start": 201.42,
+      "source": "You don't like it?",
+      "index_translate": "你不喜欢吗？",
+      "hy_mt2": "你不喜欢吗？"
+    },
+    {
+      "index": 89,
+      "start": 202.52,
+      "source": "Of course not, mate.",
+      "index_translate": "当然不是啦，伙计。",
+      "hy_mt2": "当然不是，朋友。"
+    },
+    {
+      "index": 90,
+      "start": 203.72,
+      "source": "It's okay.",
+      "index_translate": "没关系。",
+      "hy_mt2": "没关系。"
+    },
+    {
+      "index": 91,
+      "start": 204.82,
+      "source": "Usually during winter, it's dark outside.",
+      "index_translate": "通常在冬天，外面会很黑。",
+      "hy_mt2": "通常冬天时，外面很黑。"
+    },
+    {
+      "index": 92,
+      "start": 207.26,
+      "source": "It's gray, okay?",
+      "index_translate": "灰色，没问题吧？",
+      "hy_mt2": "是灰色的，对吗？"
+    },
+    {
+      "index": 93,
+      "start": 208.16,
+      "source": "You get inside the hotel.",
+      "index_translate": "你进入酒店了。",
+      "hy_mt2": "你走进酒店里。"
+    },
+    {
+      "index": 94,
+      "start": 209.7,
+      "source": "It's even worse, mate.",
+      "index_translate": "更糟了，伙计。",
+      "hy_mt2": "更糟糕了，朋友。"
+    },
+    {
+      "index": 95,
+      "start": 212.18,
+      "source": "Like you have no luminosity at all, like no brightness.",
+      "index_translate": "就像你完全没有光，就像没有亮度。",
+      "hy_mt2": "就像完全没有亮度一样，毫无光辉。"
+    },
+    {
+      "index": 96,
+      "start": 215.94,
+      "source": "in the rooms, yeah.",
+      "index_translate": "在房间里，对。",
+      "hy_mt2": "在房间里，是的。"
+    },
+    {
+      "index": 97,
+      "start": 216.68,
+      "source": "The brightness is nowhere to be seen.",
+      "index_translate": "亮度完全看不见。",
+      "hy_mt2": "看不到任何亮度。"
+    },
+    {
+      "index": 98,
+      "start": 219.06,
+      "source": "And actually, it makes me depressed.",
+      "index_translate": "其实，这让我很沮丧。",
+      "hy_mt2": "实际上，这让我感到沮丧。"
+    },
+    {
+      "index": 99,
+      "start": 221.02,
+      "source": "I don't like it.",
+      "index_translate": "我不喜欢。",
+      "hy_mt2": "我不喜欢它。"
+    },
+    {
+      "index": 100,
+      "start": 222.54,
+      "source": "That's why we won last year Katowice.",
+      "index_translate": "这就是我们去年在卡托维兹获胜的原因。",
+      "hy_mt2": "这就是为什么我们去年在卡托维兹获胜。"
+    },
+    {
+      "index": 101,
+      "start": 224.9,
+      "source": "We changed the hotel last year.",
+      "index_translate": "我们去年换了酒店。",
+      "hy_mt2": "去年我们更换了酒店。"
+    },
+    {
+      "index": 102,
+      "start": 226.42,
+      "source": "For me, it was like, ah, baby.",
+      "index_translate": "对我来说，就像，啊，宝宝。",
+      "hy_mt2": "对我来说，就是，啊，宝贝。"
+    },
+    {
+      "index": 103,
+      "start": 228.42,
+      "source": "What is this very slight?",
+      "index_translate": "这是什么微光？",
+      "hy_mt2": "这很轻微吗？"
+    },
+    {
+      "index": 104,
+      "start": 229.52,
+      "source": "New opportunity.",
+      "index_translate": "新机遇。",
+      "hy_mt2": "新机遇。"
+    },
+    {
+      "index": 105,
+      "start": 230.48,
+      "source": "That's right, the curse.",
+      "index_translate": "没错，就是那个诅咒。",
+      "hy_mt2": "没错，就是那个诅咒。"
+    },
+    {
+      "index": 106,
+      "start": 231.52,
+      "source": "But you've broken the curse now.",
+      "index_translate": "但现在你已经打破了诅咒。",
+      "hy_mt2": "但你现在已经打破了那个诅咒。"
+    },
+    {
+      "index": 107,
+      "start": 232.96,
+      "source": "Yeah, yeah, because of the hotel I never won this tournament.",
+      "index_translate": "是啊，是啊，因为酒店的关系，我从来没赢过这个比赛。",
+      "hy_mt2": "是的，没错，因为住在那家酒店，我从未赢得过这次比赛。"
+    },
+    {
+      "index": 108,
+      "start": 235.16,
+      "source": "Yes.",
+      "index_translate": "是的。",
+      "hy_mt2": "是的。"
+    },
+    {
+      "index": 109,
+      "start": 235.44,
+      "source": "Ah, we're in the same hotel.",
+      "index_translate": "啊，我们住的是同一间酒店。",
+      "hy_mt2": "啊，我们住在同一家酒店。"
+    },
+    {
+      "index": 110,
+      "start": 236.54,
+      "source": "Yeah.",
+      "index_translate": "是的。",
+      "hy_mt2": "Yeah."
+    },
+    {
+      "index": 111,
+      "start": 237.36,
+      "source": "Too late now.",
+      "index_translate": "现在太晚了。",
+      "hy_mt2": "现在太晚了。"
+    },
+    {
+      "index": 112,
+      "start": 238.16,
+      "source": "Okay, I will tell you.",
+      "index_translate": "好的，我告诉你。",
+      "hy_mt2": "好的，我告诉你们。"
+    },
+    {
+      "index": 113,
+      "start": 238.74,
+      "source": "I lost the world fine on that hotel room.",
+      "index_translate": "我在那个酒店房间里弄丢了世界。",
+      "hy_mt2": "我从那间酒店房间里赚到了整个世界的财富。"
+    },
+    {
+      "index": 114,
+      "start": 240.4,
+      "source": "I'm not in the hotel.",
+      "index_translate": "我不在酒店。",
+      "hy_mt2": "我不在酒店里。"
+    },
+    {
+      "index": 115,
+      "start": 241.98,
+      "source": "You're not here?",
+      "index_translate": "你不在这里？",
+      "hy_mt2": "你不在这里？"
+    },
+    {
+      "index": 116,
+      "start": 242.82,
+      "source": "No, I changed hotel.",
+      "index_translate": "不，我换酒店了。",
+      "hy_mt2": "不，我改了酒店。"
+    },
+    {
+      "index": 117,
+      "start": 244.18,
+      "source": "Really?",
+      "index_translate": "真的？",
+      "hy_mt2": "真的吗？"
+    },
+    {
+      "index": 118,
+      "start": 244.74,
+      "source": "What?",
+      "index_translate": "什么？",
+      "hy_mt2": "什么？"
+    },
+    {
+      "index": 119,
+      "start": 245.06,
+      "source": "Yeah.",
+      "index_translate": "是的。",
+      "hy_mt2": "Yeah."
+    },
+    {
+      "index": 120,
+      "start": 245.46,
+      "source": "We have a winner.",
+      "index_translate": "我们有获胜者了。",
+      "hy_mt2": "我们有了一个赢家。"
+    },
+    {
+      "index": 121,
+      "start": 246.0,
+      "source": "I didn't want to be there.",
+      "index_translate": "我不想去那里。",
+      "hy_mt2": "我不想去那里。"
+    },
+    {
+      "index": 122,
+      "start": 247.36,
+      "source": "Okay, I will tell you what happened.",
+      "index_translate": "好的，我来告诉你发生了什么。",
+      "hy_mt2": "好的，我告诉你们发生了什么。"
+    },
+    {
+      "index": 123,
+      "start": 249.58,
+      "source": "2025 Katowice.",
+      "index_translate": "2025 卡托维兹。",
+      "hy_mt2": "2025年卡托维兹。"
+    },
+    {
+      "index": 124,
+      "start": 251.26,
+      "source": "Last Katowicze, the announce.",
+      "index_translate": "卡托维兹最后，宣布。",
+      "hy_mt2": "最后，卡托维兹人，公告来了。"
+    },
+    {
+      "index": 125,
+      "start": 252.42,
+      "source": "Yeah.",
+      "index_translate": "是的。",
+      "hy_mt2": "Yeah."
+    },
+    {
+      "index": 126,
+      "start": 252.7,
+      "source": "New hotel.",
+      "index_translate": "新酒店。",
+      "hy_mt2": "新酒店。"
+    },
+    {
+      "index": 127,
+      "start": 253.54,
+      "source": "New life for me.",
+      "index_translate": "我新的人生。",
+      "hy_mt2": "对我来说，新的生活。"
+    },
+    {
+      "index": 128,
+      "start": 255.24,
+      "source": "New win.",
+      "index_translate": "新胜利。",
+      "hy_mt2": "新胜利。"
+    },
+    {
+      "index": 129,
+      "start": 256.1,
+      "source": "Then,\nI think I'm getting ready to not come in the city anymore.",
+      "index_translate": "然后，我觉得我准备不再来这座城市了。",
+      "hy_mt2": "然后，我想我打算不再进入城市了。"
+    },
+    {
+      "index": 130,
+      "start": 258.82,
+      "source": "So happy.",
+      "index_translate": "好开心。",
+      "hy_mt2": "太高兴了。"
+    },
+    {
+      "index": 131,
+      "start": 260.54,
+      "source": "Announcement, Katowice coming back to EPL.",
+      "index_translate": "公告：卡托维兹将重返EPL。",
+      "hy_mt2": "公告：卡托维兹将重返EPL。"
+    },
+    {
+      "index": 132,
+      "start": 262.46,
+      "source": "Wow.",
+      "index_translate": "哇。",
+      "hy_mt2": "Wow."
+    },
+    {
+      "index": 133,
+      "start": 263.38,
+      "source": "Slap back in the face.",
+      "index_translate": "扇耳光。",
+      "hy_mt2": "又打在脸上。"
+    },
+    {
+      "index": 134,
+      "start": 265.86,
+      "source": "Which hotel we are?",
+      "index_translate": "我们住的是哪间酒店？",
+      "hy_mt2": "我们住的是哪家酒店？"
+    },
+    {
+      "index": 135,
+      "start": 267.16,
+      "source": "I changed hotel.",
+      "index_translate": "我换酒店了。",
+      "hy_mt2": "我换了酒店。"
+    },
+    {
+      "index": 136,
+      "start": 268.96,
+      "source": "So it's just you at the other hotel?",
+      "index_translate": "所以，在另一家酒店里只有你一个人？",
+      "hy_mt2": "那么，在另一家酒店里只有你一个人吗？"
+    },
+    {
+      "index": 137,
+      "start": 270.74,
+      "source": "Yes.",
+      "index_translate": "是的。",
+      "hy_mt2": "是的。"
+    },
+    {
+      "index": 138,
+      "start": 271.32,
+      "source": "I mean, we have Flamesy as well decided.",
+      "index_translate": "我的意思是，我们也有Flamesy这个决定。",
+      "hy_mt2": "我的意思是，我们也决定了让Flamesy参与。"
+    },
+    {
+      "index": 139,
+      "start": 273.0,
+      "source": "Okay.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 140,
+      "start": 273.14,
+      "source": "so you gave.",
+      "index_translate": "所以你给了。",
+      "hy_mt2": "所以你给出了。"
+    },
+    {
+      "index": 141,
+      "start": 273.78,
+      "source": "I paid myself.",
+      "index_translate": "我给自己发了工资。",
+      "hy_mt2": "我给自己付了钱。"
+    },
+    {
+      "index": 142,
+      "start": 276.6,
+      "source": "I paid myself, but I wanted to get away from that.",
+      "index_translate": "我付了薪水，但还是想离开那里。",
+      "hy_mt2": "我给自己付了钱，但我想摆脱那种感觉。"
+    },
+    {
+      "index": 143,
+      "start": 280.04,
+      "source": "It just makes me like feel bad.",
+      "index_translate": "这只会让我感觉不好。",
+      "hy_mt2": "这让我感觉很不好。"
+    },
+    {
+      "index": 144,
+      "start": 281.82,
+      "source": "Do you have a gym on the other hotel?",
+      "index_translate": "另一家酒店有健身房吗？",
+      "hy_mt2": "另一家酒店有健身房吗？"
+    },
+    {
+      "index": 145,
+      "start": 283.46,
+      "source": "No, but the gym is closer.",
+      "index_translate": "不，但健身房更近。",
+      "hy_mt2": "不，但健身房更近。"
+    },
+    {
+      "index": 146,
+      "start": 285.92,
+      "source": "It's better.",
+      "index_translate": "更好了。",
+      "hy_mt2": "更好了。"
+    },
+    {
+      "index": 147,
+      "start": 286.82,
+      "source": "Okay.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 148,
+      "start": 287.26,
+      "source": "All right.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 149,
+      "start": 287.38,
+      "source": "It's okay.",
+      "index_translate": "没关系。",
+      "hy_mt2": "没关系。"
+    },
+    {
+      "index": 150,
+      "start": 287.94,
+      "source": "So you, but you seem happy.",
+      "index_translate": "所以，你……但看起来你很开心。",
+      "hy_mt2": "你看起来很开心。"
+    },
+    {
+      "index": 151,
+      "start": 289.8,
+      "source": "I'm happy to be in the city.",
+      "index_translate": "我很高兴能在这座城市。",
+      "hy_mt2": "我很高兴能待在城市里。"
+    },
+    {
+      "index": 152,
+      "start": 291.2,
+      "source": "It's sunny.",
+      "index_translate": "天气晴朗。",
+      "hy_mt2": "天气晴朗。"
+    },
+    {
+      "index": 153,
+      "start": 292.72,
+      "source": "Actually, the room is really nice.",
+      "index_translate": "其实，这个房间真的很好。",
+      "hy_mt2": "实际上，那个房间真的很不错。"
+    },
+    {
+      "index": 154,
+      "start": 295.12,
+      "source": "It said you can deliver me as the sweet in the other hand.",
+      "index_translate": "他们说你可以把我作为甜心送到你手中。",
+      "hy_mt2": "说你可以把另一个手里的糖果递给我。"
+    },
+    {
+      "index": 155,
+      "start": 298.64,
+      "source": "I don't need a sweet because we only sleep in those rooms,\nbut I still have to come back to be in the,\nin the practice room.",
+      "index_translate": "我不需要甜的东西，因为我们只在那些房间睡觉，\n但我还是必须回来，\n在练习室里。",
+      "hy_mt2": "我不需要糖果，因为我们只是睡在那些房间里，\n但我还是得回来，待在练习室里。"
+    },
+    {
+      "index": 156,
+      "start": 304.84,
+      "source": "I check a bit when I'm there, but it feels all right.",
+      "index_translate": "我在那里时稍微检查了一下，但感觉没问题。",
+      "hy_mt2": "我在那里稍微检查了一下，感觉还好。"
+    },
+    {
+      "index": 157,
+      "start": 307.92,
+      "source": "Flashbacks to me, sharing a room with Jake in there,\nlooking left now in the morning.",
+      "index_translate": "闪回到我，和杰克住在一个房间里，\n现在早上看向左边。",
+      "hy_mt2": "回忆起我和杰克同住一个房间时的情景，\n现在早上往左看。"
+    },
+    {
+      "index": 158,
+      "start": 311.98,
+      "source": "He's looking at me.",
+      "index_translate": "他在看着我。",
+      "hy_mt2": "他正在看着我。"
+    },
+    {
+      "index": 159,
+      "start": 313.82,
+      "source": "The men are really close to each other.",
+      "index_translate": "这些男人真的非常亲近。",
+      "hy_mt2": "那些男人彼此靠得很近。"
+    },
+    {
+      "index": 160,
+      "start": 315.88,
+      "source": "Are you guys sharing rooms?",
+      "index_translate": "你们住一间房吗？",
+      "hy_mt2": "你们一起住同一个房间吗？"
+    },
+    {
+      "index": 161,
+      "start": 317.04,
+      "source": "Yeah.",
+      "index_translate": "对。",
+      "hy_mt2": "Yeah."
+    },
+    {
+      "index": 162,
+      "start": 317.28,
+      "source": "Right now.",
+      "index_translate": "现在。",
+      "hy_mt2": "现在。"
+    },
+    {
+      "index": 163,
+      "start": 317.5,
+      "source": "Yeah.",
+      "index_translate": "是的。",
+      "hy_mt2": "Yeah."
+    },
+    {
+      "index": 164,
+      "start": 317.92,
+      "source": "This one.",
+      "index_translate": "这个。",
+      "hy_mt2": "这个。"
+    },
+    {
+      "index": 165,
+      "start": 318.1,
+      "source": "Yeah.",
+      "index_translate": "是的。",
+      "hy_mt2": "Yeah."
+    },
+    {
+      "index": 166,
+      "start": 319.46,
+      "source": "You're traveling so much.",
+      "index_translate": "你到处都跑。",
+      "hy_mt2": "你旅行太多了。"
+    },
+    {
+      "index": 167,
+      "start": 320.58,
+      "source": "No, but only on this one, I guess.",
+      "index_translate": "不，不过就这一个吧，我猜。",
+      "hy_mt2": "不，不过我想只有这个场景是这样。"
+    },
+    {
+      "index": 168,
+      "start": 322.06,
+      "source": "Every event.",
+      "index_translate": "每一次事件。",
+      "hy_mt2": "每个活动。"
+    },
+    {
+      "index": 169,
+      "start": 322.3,
+      "source": "Usually we're not.",
+      "index_translate": "通常我们不是这样。",
+      "hy_mt2": "通常我们不会。"
+    },
+    {
+      "index": 170,
+      "start": 322.82,
+      "source": "Every event they go.",
+      "index_translate": "他们去的所有地方。",
+      "hy_mt2": "他们去参加每一个活动。"
+    },
+    {
+      "index": 171,
+      "start": 323.84,
+      "source": "With your travel schedule,\nand you were sharing all of this, I was like, I used to.",
+      "index_translate": "根据你的旅行计划，\n再加上你分享的所有这些信息，我当时就想，我以前也这样。",
+      "hy_mt2": "根据你的旅行安排，\n当你分享这一切时，我就想，我以前也是这样的。"
+    },
+    {
+      "index": 172,
+      "start": 329.94,
+      "source": "When you're young, it's okay.",
+      "index_translate": "当你还年轻的时候，这没什么关系。",
+      "hy_mt2": "年轻时也没关系。"
+    },
+    {
+      "index": 173,
+      "start": 331.92,
+      "source": "But when you're getting older,\nyou want your space at the end of the day,",
+      "index_translate": "但当你年纪渐长时，\n你希望在一天结束时拥有自己的空间，",
+      "hy_mt2": "但当你年纪越大时，\n一天结束的时候，你就需要一些属于自己的空间。"
+    },
+    {
+      "index": 174,
+      "start": 334.38,
+      "source": "you know,\nlike the kids has been like annoying with you the whole day.",
+      "index_translate": "你知道吧，\n就像那些孩子一整天都在烦你一样。",
+      "hy_mt2": "你知道的，那些孩子一整天都让你很烦心。"
+    },
+    {
+      "index": 175,
+      "start": 337.22,
+      "source": "Sorry.",
+      "index_translate": "抱歉。",
+      "hy_mt2": "对不起。"
+    },
+    {
+      "index": 176,
+      "start": 337.36,
+      "source": "I want my time off now.",
+      "index_translate": "我现在想要休息。",
+      "hy_mt2": "我现在想要休息一下。"
+    },
+    {
+      "index": 177,
+      "start": 338.7,
+      "source": "But you've got the kids.",
+      "index_translate": "不过你得照顾孩子啊。",
+      "hy_mt2": "但是你有孩子啊。"
+    },
+    {
+      "index": 178,
+      "start": 339.6,
+      "source": "Well, not the kids, you got your wife and the dog.",
+      "index_translate": "嗯，除了孩子，你还有妻子和狗。",
+      "hy_mt2": "嗯，不是孩子们，你有你的妻子和狗。"
+    },
+    {
+      "index": 179,
+      "start": 341.58,
+      "source": "And I wish they're not here.",
+      "index_translate": "我希望他们不在这里。",
+      "hy_mt2": "我希望他们不要在这里。"
+    },
+    {
+      "index": 180,
+      "start": 342.44,
+      "source": "They're not coming.",
+      "index_translate": "他们不来。",
+      "hy_mt2": "他们不会来了。"
+    },
+    {
+      "index": 181,
+      "start": 342.86,
+      "source": "I was going to say that'd be one of the kids.",
+      "index_translate": "我本来想说那会是其中一个孩子。",
+      "hy_mt2": "我本来想说那是其中一个孩子。"
+    },
+    {
+      "index": 182,
+      "start": 344.5,
+      "source": "She can die with pleasure.",
+      "index_translate": "她可以欣然死去。",
+      "hy_mt2": "她可以因愉悦而死去。"
+    },
+    {
+      "index": 183,
+      "start": 347.64,
+      "source": "She was...",
+      "index_translate": "她……",
+      "hy_mt2": "她……"
+    },
+    {
+      "index": 184,
+      "start": 350.4,
+      "source": "She told me we're going to stay home.",
+      "index_translate": "她告诉我我们待在家里。",
+      "hy_mt2": "她告诉我我们要待在家里。"
+    },
+    {
+      "index": 185,
+      "start": 354.8,
+      "source": "Just kidding.",
+      "index_translate": "开玩笑的。",
+      "hy_mt2": "开玩笑的。"
+    },
+    {
+      "index": 186,
+      "start": 355.62,
+      "source": "How do I start it here?",
+      "index_translate": "我该如何从这里开始呢？",
+      "hy_mt2": "我该从这里怎么开始呢？"
+    },
+    {
+      "index": 187,
+      "start": 356.9,
+      "source": "The dogs panic in the house.",
+      "index_translate": "屋子里的狗们惊慌失措。",
+      "hy_mt2": "狗们在房子里惊慌失措。"
+    },
+    {
+      "index": 188,
+      "start": 358.44,
+      "source": "He doesn't want to say no.",
+      "index_translate": "他不想说“不”。",
+      "hy_mt2": "他不想拒绝。"
+    },
+    {
+      "index": 189,
+      "start": 361.62,
+      "source": "He's walking all the time.",
+      "index_translate": "他一直在走。",
+      "hy_mt2": "他一直在走动。"
+    },
+    {
+      "index": 190,
+      "start": 364.38,
+      "source": "She's only going to Singapore now, last one.",
+      "index_translate": "她现在只去新加坡，是最后一个了。",
+      "hy_mt2": "她现在只去新加坡一次，最后一次。"
+    },
+    {
+      "index": 191,
+      "start": 366.18,
+      "source": "Okay.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 192,
+      "start": 366.66,
+      "source": "That's a good choice.",
+      "index_translate": "那是个好选择。",
+      "hy_mt2": "这是个好的选择。"
+    },
+    {
+      "index": 193,
+      "start": 367.88,
+      "source": "Okay.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 194,
+      "start": 368.8,
+      "source": "Singapore was also good.",
+      "index_translate": "新加坡也很不错。",
+      "hy_mt2": "新加坡也很不错。"
+    },
+    {
+      "index": 195,
+      "start": 370.86,
+      "source": "You know, I saw something when we went in Krakow.",
+      "index_translate": "你知道，我们进入克拉科夫时看到了一些东西。",
+      "hy_mt2": "你知道，我们在克拉科夫的时候看到了一些东西。"
+    },
+    {
+      "index": 196,
+      "start": 373.5,
+      "source": "I was walking and I went away.",
+      "index_translate": "我正在走着，然后我就离开了。",
+      "hy_mt2": "我正在走路，然后就离开了。"
+    },
+    {
+      "index": 197,
+      "start": 377.08,
+      "source": "Okay.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 198,
+      "start": 377.96,
+      "source": "All right.",
+      "index_translate": "好的。",
+      "hy_mt2": "好的。"
+    },
+    {
+      "index": 199,
+      "start": 381.16,
+      "source": "It's quite a good turn though.",
+      "index_translate": "不过，这确实是个不错的转折。",
+      "hy_mt2": "不过这转折相当不错。"
+    },
+    {
+      "index": 200,
+      "start": 382.72,
+      "source": "It's a good start again.",
+      "index_translate": "这又是个不错的开始。",
+      "hy_mt2": "这又是一个好的开始。"
+    }
+  ]
+}

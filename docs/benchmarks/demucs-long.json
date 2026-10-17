@@ -1,0 +1,13 @@
+{
+  "stage": "demucs",
+  "source": "D:\\MOSS-Transcribe-Diarize\\videos\\0956c23e1712605c326676e34acc598074c4ed76ade1eaa9c0681766e095c23e_input.mp4",
+  "elapsed_sec": 71.302,
+  "peak_tree_rss_mib": 5499.1,
+  "gpu_scope": "all GPUs, device-wide including other processes",
+  "gpu_samples": 120,
+  "gpu_baseline_mib": 189.0,
+  "gpu_peak_used_mib": 1108.0,
+  "returncode": 0,
+  "result": "{\"output_bytes\": 33891520}\r\n",
+  "stderr": "D:\\MOSS-Transcribe-Diarize\\.venv\\Lib\\site-packages\\torchaudio\\_backend\\utils.py:213: UserWarning: In 2.9, this function's implementation will be changed to use torchaudio.load_with_torchcodec` under the hood. Some parameters like ``normalize``, ``format``, ``buffer_size``, and ``backend`` will be ignored. We recommend that you port your code to rely directly on TorchCodec's decoder instead: https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.decoders.AudioDecoder.html#torchcodec.decoders.AudioDecoder.\r\n  warnings.warn(\r\nD:\\MOSS-Transcribe-Diarize\\.venv\\Lib\\site-packages\\torchaudio\\_backend\\utils.py:337: UserWarning: In 2.9, this function's implementation will be changed to use torchaudio.save_with_torchcodec` under the hood. Some parameters like format, encoding, bits_per_sample, buffer_size, and ``backend`` will be ignored. We recommend that you port your code to rely directly on TorchCodec's encoder instead: https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.encoders.AudioEncoder\r\n  warnings.warn(\r\n"
+}

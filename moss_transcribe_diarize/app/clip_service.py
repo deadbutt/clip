@@ -8,10 +8,11 @@ not introduce a second job state machine.
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import json
 import subprocess
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -332,6 +333,7 @@ class ClipOperationsMixin:
                 raise RuntimeError("该片段正在渲染中,请等当前渲染完成后再试。")
             self._rendering_clips.add(clip_key)
         try:
+            export_started = time.perf_counter()
             clip_dir = job.clips_dir / clip_id
             clip_dir.mkdir(parents=True, exist_ok=True)
             ass_path = clip_dir / "subtitle.ass"
@@ -397,6 +399,8 @@ class ClipOperationsMixin:
                 progress_callback=progress_callback,
                 cancel_check=lambda: job.id not in self._jobs,
             )
+            export_elapsed_sec = round(max(0.0, time.perf_counter() - export_started), 3)
+            output_bytes = output_path.stat().st_size if output_path.is_file() else 0
             # Write the cache marker only after ffmpeg succeeds.  If encoding
             # fails while an older MP4 is still present, that old file must not
             # become falsely associated with the new metadata key.
@@ -422,6 +426,8 @@ class ClipOperationsMixin:
                         "source_start": start,
                         "source_end": end,
                         "duration": end - start,
+                        "export_elapsed_sec": export_elapsed_sec,
+                        "output_bytes": output_bytes,
                         "clip_timeline_start": 0.0,
                         "clip_timeline_end": end - start,
                         "segments": [segment.to_dict() for segment in segments],
@@ -441,6 +447,8 @@ class ClipOperationsMixin:
             "start": start,
             "end": end,
             "duration": end - start,
+            "export_elapsed_sec": export_elapsed_sec,
+            "output_bytes": output_bytes,
             "segments": len(segments),
             "cached": False,
             "files": {

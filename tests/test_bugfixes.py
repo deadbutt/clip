@@ -1294,11 +1294,11 @@ class DownloaderCancelTest(unittest.TestCase):
             downloader.subprocess, "Popen", return_value=FakeProc()
         ), patch.object(downloader, "_find_js_runtime", return_value=None), patch.object(
             downloader, "_find_ffmpeg_dir", return_value=None
-        ):
+        ), tempfile.TemporaryDirectory() as download_dir:
             with self.assertRaises(RuntimeError) as ctx:
                 downloader.download_with_yt_dlp(
                     "https://example.com/v",
-                    tempfile.mkdtemp(),
+                    download_dir,
                     cookies_browser=None,
                     progress_callback=None,
                     cancel_check=lambda: True,
@@ -1331,12 +1331,12 @@ class DownloaderCancelTest(unittest.TestCase):
             downloader.subprocess, "Popen", return_value=FakeProc()
         ), patch.object(downloader, "_find_js_runtime", return_value=None), patch.object(
             downloader, "_find_ffmpeg_dir", return_value=None
-        ):
+        ), tempfile.TemporaryDirectory() as download_dir:
             # 取消永远为 False:验证进度行正常上报后走到兜底文件检查
             try:
                 downloader.download_with_yt_dlp(
                     "https://example.com/v",
-                    tempfile.mkdtemp(),
+                    download_dir,
                     cookies_browser=None,
                     progress_callback=lambda ratio, info: seen.append(ratio),
                     cancel_check=lambda: False,

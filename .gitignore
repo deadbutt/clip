@@ -13,9 +13,14 @@ examples/*
 !examples/*.md
 runs/
 videos/
-tools/
+tools/*
+!tools/benchmark_resources.py
+!tools/bililive-go/
+!tools/bililive-go/bililive-go.exe
+!tools/bililive-go/LICENSE
 models/
 testmd/
+artifacts/
 
 # Large or transient runtime files.
 *.safetensors
